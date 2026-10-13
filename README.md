@@ -1,11 +1,17 @@
 # Paymenter Backups
 
-A [Paymenter](https://paymenter.org) extension that creates compressed app and database
-backups and stores them locally or in S3-compatible storage.
+An MIT-licensed Paymenter extension and CLI for scheduled, compressed backups to
+private local storage or an S3-compatible destination.
 
-The code is being added through a series of reviewed pull requests. Installation and
-configuration steps will be in this file when the first release is ready.
+Development targets the official Paymenter v1.5.9 release, PHP 8.3+, Python 3.10+
+and Linux. The default mode captures the database and application during a brief
+native maintenance window. Online database snapshots are a separate mode with a
+narrower recovery scope. Compression and remote delivery happen after service
+restoration.
 
-## License
+The extension preserves Paymenter core files, native table definitions and root
+Composer dependencies. Both the administrator interface and terminal workflows
+use the same backup engine. See [the architecture](docs/ARCHITECTURE.md) for
+consistency, credential, scheduling and recovery contracts.
 
-MIT. See [LICENSE](LICENSE).
+Copyright © 2026 Autonomic Engineering. Licensed under [MIT](LICENSE).
