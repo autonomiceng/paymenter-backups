@@ -1,0 +1,13 @@
+#!/usr/bin/env python3
+"""Portable release launcher; run with python3 -I for isolated scheduling."""
+import pathlib
+import sys
+
+root = pathlib.Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(root / "src"))
+sdk = root / "runtime" / "sdk"
+if sdk.is_dir():
+    sys.path.insert(0, str(sdk))
+from paymenter_backups.cli import main
+
+raise SystemExit(main())

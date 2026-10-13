@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=68,<81"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "paymenter-backups"
+authors = [{name = "Autonomic Engineering"}]
+version = "0.1.2"
+description = "Independent, recoverable backups for upstream Paymenter"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+dependencies = []
+
+[project.scripts]
+paymenter-backups = "paymenter_backups.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
