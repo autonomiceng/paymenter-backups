@@ -153,10 +153,31 @@ try {
         try {
         $freshRoot = $work . '/test-first-use-' . bin2hex(random_bytes(4));
         testCheck(!file_exists($freshRoot), 'First-use folder must start absent');
-        testCheck(mkdir($freshRoot, 0700), 'Could not create empty first-use fixture folder');
         $record->settings()->where('key', 'private_root')->update(['value' => $freshRoot]);
         $record->settings()->whereIn('key', ['full_schedule', 'database_schedule'])->update(['value' => 'off']);
         $record->settings()->where('key', 'upload_s3')->update(['value' => '0']);
+        $freshNativeRows = Paymenter\Extensions\Others\Backups\SettingsWriter::snapshot($record);
+        $lifecycle = Livewire\Livewire::test(App\Admin\Resources\ExtensionResource\Pages\EditExtension::class, ['record' => $record->getRouteKey()]);
+        $lifecycle->update(calls: [['method' => 'save', 'params' => []]], updates: [
+            'data.settings.private_root' => $freshRoot . '-forged', 'data.settings.settings_version' => '1',
+            'data.settings.extra_docroots' => '[]', 'data.settings.s3_secret_key' => 'TEST-SECRET-CANARY']);
+        testCheck(Paymenter\Extensions\Others\Backups\SettingsWriter::snapshot($record) === $freshNativeRows
+            && !file_exists($freshRoot) && !file_exists($freshRoot . '-forged'), 'Native lifecycle Save initialized fresh private storage or changed settings');
+        testCheck(mkdir($freshRoot, 0700), 'Could not create empty first-use fixture folder');
+        $record->settings()->where('key', 'extra_docroots')->update(['value' => 'invalid-json']);
+        $repairRoot = $freshRoot . '-replacement';
+        $brokenRows = rowValues($record);
+        $unconfirmed = submitSettings($class, ['private_root' => $repairRoot, 'extra_docroots' => $freshRoot]);
+        testCheck(!$unconfirmed->instance()->getErrorBag()->isEmpty() && rowValues($record) === $brokenRows
+            && !file_exists($repairRoot), 'Unconfirmed first-use privacy repair changed state');
+        $confirmed = submitSettings($class, ['private_root' => $repairRoot, 'extra_docroots' => $freshRoot, 'confirm_public_directories' => true]);
+        testCheck($confirmed->instance()->getErrorBag()->isEmpty() && is_file($repairRoot . '/installation.json')
+            && !is_file($freshRoot . '/installation.json'), 'Confirmed first-use privacy repair could not select a safe new data directory');
+        testCheck(json_decode($record->settings()->where('key', 'extra_docroots')->value('value'), true) === [$freshRoot]
+            && !file_exists($repairRoot . '/credentials.json') && glob($repairRoot . '/requests/*.json') === [],
+            'Confirmed first-use repair did not preserve its privacy boundary or created secrets/work');
+        $record->settings()->where('key', 'private_root')->update(['value' => $freshRoot]);
+        $record->settings()->where('key', 'extra_docroots')->update(['value' => $initialRows['extra_docroots']]);
         $firstUseRows = rowValues($record);
         $page = Livewire\Livewire::test($class);
         testCheck(!file_exists($freshRoot . '/installation.json'), 'Mount silently initialized first-use state');
@@ -184,7 +205,7 @@ try {
                     || ($originalCredentials !== null && file_get_contents($credentialFile) === $originalCredentials), 'First-use save changed original encrypted credentials');
         $results['unchanged_first_use_save_initializes_only_private_state'] = true;
         } finally {
-            foreach (['private_root', 'full_schedule', 'database_schedule', 'upload_s3'] as $key) {
+            foreach (['private_root', 'extra_docroots', 'full_schedule', 'database_schedule', 'upload_s3'] as $key) {
                 $record->settings()->where('key', $key)->update(['value' => $initialRows[$key]]);
             }
         }
@@ -262,7 +283,7 @@ try {
         try {
             $nativeReceipt = $writer::write($record, ['retention_keep_full' => (string) ($desired + 1),
                 'retention_keep_database' => (string) ((int) $databaseBefore + 1), 'gpg' => '/fixture/results-gpg']);
-            // The native Extensions editor does not take extension locks. Its
+            // A direct native-row writer does not take extension locks. Its
             // later row publication must still survive our rollback.
             $record->settings()->where('key', 'retention_keep_full')->first()->update(['value' => (string) ($desired + 2)]);
             $auditsBeforeRestore = App\Models\Audit::count();
@@ -304,21 +325,21 @@ PHP;
                 while (!str_contains($output, 'editor-ready') && $editor->isRunning() && microtime(true) < $deadline) {
                     $output .= $editor->getIncrementalOutput(); usleep(20000);
                 }
-                testCheck(str_contains($output, 'editor-ready'), 'Concurrent native editor did not reach its row update');
+                testCheck(str_contains($output, 'editor-ready'), 'Concurrent direct native-row writer did not reach its row update');
                 usleep(150000);
                 testCheck($editor->isRunning() && !str_contains($editor->getOutput(), 'editor-published'),
                             'Native editor crossed the locked credential publication callback');
             });
             $editor->wait();
             testCheck($editor->isSuccessful() && str_contains($editor->getOutput(), 'editor-published'),
-                        'Concurrent native editor did not resume after credential publication');
+                        'Concurrent direct native-row writer did not resume after credential publication');
             testCheck((int) $record->settings()->where('key', 'retention_keep_full')->value('value') === $desired + 3,
-                        'Concurrent native editor publication disappeared after finalization');
+                        'Concurrent direct native-row writer publication disappeared after finalization');
         } finally {
             if ($editor?->isRunning()) { $editor->stop(1); }
             $writer::write($record, ['retention_keep_full' => (string) $desired]);
         }
-        $results['native_editor_waits_through_credential_publication_callback'] = true;
+        $results['direct_native_row_writer_waits_through_credential_publication_callback'] = true;
         }
 
         if (testPhase('basic_states')) {
@@ -464,8 +485,8 @@ PHP;
                 'Repair silently replaced the saved value without warning about its field: ' . $key);
             $record->settings()->where('key', $key)->update(['value' => $initialRows[$key]]);
         }
-        // The documented public-directory guard intentionally refuses malformed
-        // JSON before a page override. Its supported native editor rules repair it.
+        // Ordinary Save cannot default the public-directory guard; repair requires
+        // an explicit complete replacement and confirmation on Backups settings.
         foreach (['invalid-json', '', 'null', 'false', '0', '{}', '{"0":"/tmp"}', '"/tmp"'] as $invalidRoots) {
             $record->settings()->where('key', 'extra_docroots')->update(['value' => $invalidRoots]);
             try {
@@ -476,26 +497,122 @@ PHP;
             }
             $page = Livewire\Livewire::test($class);
             $page->update(calls: [['method' => 'saveSettings', 'params' => []]], updates: []);
-            testCheck($page->instance()->getErrorBag()->has('settings.extra_docroots'), 'Malformed public-directory guard did not identify its field');
+            testCheck($page->instance()->getErrorBag()->has('settings.confirm_public_directories')
+                || $page->instance()->getErrorBag()->has('settings.extra_docroots'), 'Malformed public-directory guard did not require confirmation');
             testCheck($record->settings()->where('key', 'extra_docroots')->value('value') === $invalidRoots, 'Page silently defaulted the public-directory guard');
         }
         $remedy = Paymenter\Extensions\Others\Backups\Messages::error('document-roots-invalid');
-        testCheck(str_contains($remedy, 'Extensions') && str_contains($remedy, 'Backups') && str_contains($remedy, 'JSON list'),
-                    'Public-directory refusal does not explain the native editor remedy');
+        testCheck(str_contains($remedy, 'Backups settings') && str_contains($remedy, 'confirm'),
+                    'Public-directory refusal does not explain the Backups settings remedy');
         testCheck(Illuminate\Support\Facades\Validator::make(['extra_docroots' => $initialRows['extra_docroots']],
             ['extra_docroots' => Paymenter\Extensions\Others\Backups\Settings::rules('extra_docroots')])->passes(),
-            'Original public-directory value is not accepted by native editor validation');
-        Paymenter\Extensions\Others\Backups\SettingsWriter::write($record, ['extra_docroots' => $initialRows['extra_docroots']]);
-        $page = Livewire\Livewire::test($class);
-        $page->update(calls: [['method' => 'saveSettings', 'params' => []]], updates: []);
-        testCheck($page->instance()->getErrorBag()->isEmpty(), 'Explicit native repair did not restore page settings');
+            'Original public-directory value is not accepted by internal validation');
+        $page = submitSettings($class, ['extra_docroots' => implode("\n", json_decode($initialRows['extra_docroots'], true)), 'confirm_public_directories' => true]);
+        testCheck($page->instance()->getErrorBag()->isEmpty(), 'Explicit confirmed repair did not restore page settings');
+        testCheck($record->settings()->where('key', 'extra_docroots')->value('value') === $initialRows['extra_docroots'], 'Confirmed empty privacy repair failed');
+        $record->settings()->where('key', 'extra_docroots')->update(['value' => 'invalid-json']);
+        $record->settings()->where('key', 'retention_keep_full')->update(['value' => 'damaged-other-field']);
+        $mixedRepair = submitSettings($class, ['extra_docroots' => implode("\n", json_decode($initialRows['extra_docroots'], true)), 'confirm_public_directories' => true]);
+        testCheck($mixedRepair->instance()->getErrorBag()->isEmpty()
+            && $record->settings()->where('key', 'extra_docroots')->value('value') === $initialRows['extra_docroots']
+            && $record->settings()->where('key', 'retention_keep_full')->value('value') === 'damaged-other-field'
+            && $record->settings()->where('key', 'settings_version')->value('value') === $initialRows['settings_version'],
+            'Folder-only repair was blocked by an implicit default or published another damaged row/version');
+        $record->settings()->where('key', 'retention_keep_full')->update(['value' => $initialRows['retention_keep_full']]);
+        $record->settings()->where('key', 's3_encryption')->update(['value' => '1']);
+        $record->settings()->where('key', 'plaintext_offsite_acknowledged')->update(['value' => '1']);
+        $record->settings()->where('key', 'extra_docroots')->update(['value' => 'invalid-json']);
+        $consentRepair = submitSettings($class, ['extra_docroots' => implode("\n", json_decode($initialRows['extra_docroots'], true)), 'confirm_public_directories' => true]);
+        testCheck($consentRepair->instance()->getErrorBag()->isEmpty()
+            && $record->settings()->where('key', 'extra_docroots')->value('value') === $initialRows['extra_docroots']
+            && $record->settings()->where('key', 'plaintext_offsite_acknowledged')->value('value') === '1'
+            && $record->settings()->where('key', 'settings_version')->value('value') === $initialRows['settings_version'],
+            'Folder-only repair cleared redundant plaintext consent or changed settings version');
+        $normalSave = submitSettings($class, []);
+        testCheck($normalSave->instance()->getErrorBag()->isEmpty()
+            && $record->settings()->where('key', 'plaintext_offsite_acknowledged')->value('value') === '0',
+            'Ordinary Save no longer clears redundant plaintext consent');
+        foreach (['s3_encryption', 'plaintext_offsite_acknowledged'] as $key) {
+            $record->settings()->where('key', $key)->update(['value' => $initialRows[$key]]);
+        }
+        $record->settings()->where('key', 'settings_version')->update(['value' => '1']);
+        $record->settings()->where('key', 'retention_keep')->update(['value' => '3']);
+        $record->settings()->where('key', 'retention_keep_full')->update(['value' => 'damaged-adapter-field']);
+        $record->settings()->where('key', 'extra_docroots')->update(['value' => 'invalid-json']);
+        $legacyRepair = submitSettings($class, ['extra_docroots' => implode("\n", json_decode($initialRows['extra_docroots'], true)), 'confirm_public_directories' => true]);
+        testCheck($legacyRepair->instance()->getErrorBag()->isEmpty()
+            && $record->settings()->where('key', 'extra_docroots')->value('value') === $initialRows['extra_docroots']
+            && $record->settings()->where('key', 'retention_keep_full')->value('value') === 'damaged-adapter-field'
+            && $record->settings()->where('key', 'retention_keep')->value('value') === '3'
+            && $record->settings()->where('key', 'settings_version')->value('value') === '1',
+            'Folder-only repair mistook a trusted legacy-adapter count for an explicit edit');
+        foreach (['settings_version', 'retention_keep', 'retention_keep_full'] as $key) {
+            $record->settings()->where('key', $key)->update(['value' => $initialRows[$key]]);
+        }
+        $record->settings()->where('key', 'extra_docroots')->update(['value' => 'invalid-json']);
+        $stalePage = Livewire\Livewire::test($class);
+        $expectedRepair = Paymenter\Extensions\Others\Backups\SettingsWriter::snapshot($record);
+        $record->settings()->where('key', 'extra_docroots')->update(['value' => '["/tmp"]']);
+        $staleRows = rowValues($record);
+        session()->forget(['filament.notifications', 'filament.claimed_notifications']);
+        $stalePage->update(calls: [['method' => 'saveSettings', 'params' => []]], updates: [
+            'settings.extra_docroots' => '', 'settings.confirm_public_directories' => true]);
+        $refusals = array_merge(session()->pull('filament.claimed_notifications') ?? [], session()->pull('filament.notifications') ?? []);
+        testCheck(rowValues($record) === $staleRows
+            && array_filter($refusals, static fn ($notice) => str_contains((string) ($notice['body'] ?? ''),
+                Paymenter\Extensions\Others\Backups\Messages::error('config-changed'))) !== [],
+            'Stale confirmed page repair erased a completed repair/public boundary');
+        try {
+            Paymenter\Extensions\Others\Backups\SettingsWriter::repairBinaries($record, ['extra_docroots' => []], $expectedRepair);
+            throw new LogicException('Stale privacy repair replaced a newly declared public boundary');
+        } catch (RuntimeException $error) { testCheck($error->getMessage() === 'config-changed', 'Concurrent privacy repair refusal was not explicit'); }
+        testCheck($record->settings()->where('key', 'extra_docroots')->value('value') === '["/tmp"]', 'Concurrent privacy repair erased the newer public boundary');
+        $record->settings()->where('key', 'extra_docroots')->update(['value' => 'invalid-json']);
+        $blockedBaseline = Paymenter\Extensions\Others\Backups\SettingsWriter::snapshot($record);
+        $held = [];
+        $writer = null;
+        try {
+            foreach (['config.lock', 'tick.lock'] as $lock) {
+                $handle = fopen($root . '/' . $lock, 'r+b');
+                testCheck($handle !== false && flock($handle, LOCK_EX | LOCK_NB), 'Could not hold repair coordinator');
+                $held[] = $handle;
+            }
+            $repairCode = <<<'PHP'
+chdir($argv[1]); require 'vendor/autoload.php'; $app=require 'bootstrap/app.php';
+$app->make(Illuminate\Contracts\Console\Kernel::class)->bootstrap();
+$record=App\Models\Extension::where('extension','Backups')->where('type','other')->firstOrFail();
+$expected=json_decode(stream_get_contents(STDIN),true,512,JSON_THROW_ON_ERROR);
+try { Paymenter\Extensions\Others\Backups\SettingsWriter::repairBinaries($record,['extra_docroots'=>[]],$expected); echo 'published'; }
+catch (RuntimeException $e) { echo $e->getMessage(); exit(1); }
+PHP;
+            $writer = new Symfony\Component\Process\Process([PHP_BINARY, '-r', $repairCode, $base], $base);
+            $writer->setInput(json_encode($blockedBaseline, JSON_THROW_ON_ERROR)); $writer->setTimeout(20); $writer->start();
+            $wait = microtime(true) + 10; $opened = false;
+            do {
+                foreach (glob('/proc/' . $writer->getPid() . '/fd/*') ?: [] as $fd) {
+                    if (@readlink($fd) === $root . '/config.lock') { $opened = true; break; }
+                }
+                if (!$opened) { usleep(20000); }
+            } while (!$opened && $writer->isRunning() && microtime(true) < $wait);
+            testCheck($opened && $writer->isRunning(), 'Repair writer did not pass initial snapshot check and wait on config lock');
+            $record->settings()->where('key', 'extra_docroots')->update(['value' => '["/tmp"]']);
+            foreach (array_reverse($held) as $handle) { fclose($handle); } $held = [];
+            $writer->wait();
+            testCheck($writer->getExitCode() === 1 && $writer->getOutput() === 'config-changed'
+                && $record->settings()->where('key', 'extra_docroots')->value('value') === '["/tmp"]',
+                'Under-lock repair comparison overwrote a newer public boundary');
+        } finally {
+            foreach (array_reverse($held) as $handle) { fclose($handle); }
+            if ($writer && $writer->isRunning()) { $writer->stop(1); }
+        }
+        $record->settings()->where('key', 'extra_docroots')->update(['value' => $initialRows['extra_docroots']]);
         testCheck(file_get_contents($root . '/installation.json') === $identity, 'Repair changed installation identity');
         testCheck(($credentialDigest === null && !is_file($credentialFile))
             || ($credentialDigest !== null && hash_file('sha256', $credentialFile) === $credentialDigest), 'Repair changed encrypted credentials');
         testCheck(count(glob($root . '/requests/*')) === $requestCount && count(glob($root . '/runs/*')) === $runCount,
                     'Repair queued work or captured a backup');
         $results['malformed_native_rows_repaired_by_unchanged_visible_defaults'] = true;
-        $results['malformed_public_directory_guard_refuses_with_native_editor_remedy'] = true;
+        $results['malformed_public_directory_guard_requires_explicit_confirmed_repair'] = true;
         }
 
         if (testPhase('cli_config')) {

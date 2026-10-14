@@ -7,12 +7,68 @@ Python 3.10 reaches upstream end-of-life in October 2026; a pinned bundle remain
 usable, but accepting a SDK update requires testing its declared Python floor.
 Never update production dependencies with pip or alter root Composer files.
 
-Run the unit tests, build twice and compare SHA256, then run
-`python3 tools/native_integration.py --release dist/Backups-0.4.0.zip`.
-The fixture fetches and verifies the official Paymenter v1.5.9 archive digest,
-creates its own MariaDB datadir/socket, uses fake credentials, restores into a
-second app/schema and removes its isolated processes. Host schemas, live apps
-and providers are outside this test. Test host configuration and live providers separately from CI and isolated restore tests.
+## Test and build
+
+Use Linux, Python 3.10+, PHP CLI 8.3 or 8.4, Composer, MariaDB server/client,
+ACL tools, and PHP `intl`, `pdo_mysql`, `mbstring`, `zip`, and `dom`. Install the
+SDK into a development virtual environment:
+
+```sh
+python3 -m venv .venv
+. .venv/bin/activate
+python -m pip install --require-hashes -r requirements-s3.lock
+PYTHONPATH=src python -W error::ResourceWarning -m unittest discover -s tests -v
+python -m compileall -q src tools
+python tools/build_release.py --output dist/first.zip
+python tools/build_release.py --output dist/second.zip
+cmp dist/first.zip dist/second.zip
+```
+
+Lint every PHP file in `extension/` and `tests/integration/` on PHP 8.3 and 8.4.
+The S3 protocol tests need the pinned SDK; skipped dependency tests leave
+validation incomplete. `PAYMENTER_BACKUPS_TEST_PHP` selects the PHP executable
+for unit fixtures. Build with `--wheelhouse /path/to/wheels` to verify cached
+hash-locked wheels entirely offline.
+
+## Native restore and browser checks
+
+Run the exact ZIP with each supported PHP version:
+
+```sh
+python tools/native_integration.py --release dist/first.zip --php /path/to/php --composer /path/to/composer
+```
+
+The fixture fetches and verifies the official Paymenter v1.5.9 archive, creates
+its own MariaDB datadir/socket, uses fake credentials, and restores into a second
+application/schema. It checks extension discovery, native settings, authentication,
+secret handling, encrypted transfer, recovery verification, preserved `APP_KEY`,
+Passport keys, migrations, and login. It closes its isolated processes afterwards.
+Allow enough disk for both applications, backup payloads, and private state.
+`--skip-restore` is a development shortcut and does not complete release checks.
+
+For browser testing, start a disposable fixture:
+
+```sh
+python tools/native_ui_fixture.py serve --release dist/first.zip --php /path/to/php
+```
+
+Use its `ui-fixture.json` work directory and URL with `tools/browser_ui_checks.mjs`
+(`--workroot`, `--base-url`, `--package-path /path/to/playwright`, `--phase all`,
+and `--allow-fixture-mutations`). Install Playwright and Chromium separately.
+Follow [UI-TESTING.md](UI-TESTING.md) for desktop/mobile, light/dark, keyboard,
+actual downloads, and queued actions. The browser fixture uses database-only
+captures and loopback S3. Stop it with
+`python tools/native_ui_fixture.py stop --work /path/to/ui-fixture`; verify
+`ui-closed.json` and owner-process exit before removing its files.
+
+Before release, compare the two ZIPs and
+record the final artifact hash and actual test results. Changes to the candidate
+require the affected checks again. Host configuration, live provider/TLS behavior,
+and production recovery need separate validation. Keep fixture logs, screenshots,
+keys, and operational records outside Git. Clean only confirmed-dead owned
+fixtures.
+
+## Security and host checks
 
 Native EditExtension loads every setting into browser state, so no secret or
 encrypted rows belong to Backups. Only non-secret fields are declared. The custom
@@ -52,8 +108,6 @@ CREATE, ALTER, INDEX and DROP sees the view and hides the other three. Inventory
 refuses visible nonzero and query errors; visible-zero records current-user grants
 and explicitly leaves hidden objects unknown. MariaDB versions with different
 visibility need the same privilege and inventory tests.
-
-
 
 ## Settings adapter contract
 
@@ -100,9 +154,11 @@ Keep legacy enabled/mode/schedule/destination/retention/acknowledgement keys in
 storage for v1. Configuration repair merges replacement values before validating
 malformed saved rows; public-directory validation remains strict.
 
-Page Save validates settings and initializes private state before credential
-persistence. Blank secret groups keep saved keys and site password. Test PHP
-adapter parity, native Save rollback, and partial outcomes. `CredentialInput` validates combined groups
+Page Save uses `Runtime::saveConfiguration` to coordinate settings and credential
+changes under the configuration/tick locks. It validates and initializes state
+before merging submitted credentials while native settings rows are locked.
+Blank secret groups keep saved keys and site password. Test PHP adapter parity,
+native Save rollback, and partial outcomes. `CredentialInput` validates combined groups
 before merging and preserves the archive-encryption namespace under the shared
 credential flock and atomic writer.
 

@@ -15,8 +15,8 @@ but does not install packages or change hosting configuration.
 Build on a separate development machine:
 
 ```sh
-python3 tools/build_release.py --output dist/Backups-0.4.0.zip
-(cd dist && sha256sum -c Backups-0.4.0.zip.sha256)
+python3 tools/build_release.py --output dist/Backups-0.4.1.zip
+(cd dist && sha256sum -c Backups-0.4.1.zip.sha256)
 ```
 
 The deterministic archive has one top-level `Backups/` directory, compatible
@@ -27,15 +27,16 @@ command. The private state and remote prefix survive native uninstall.
 
 Select an owner-private directory outside the application and every document
 root. The default is a sibling `paymenter-backups-private` directory, mode 0700,
-owned by the application UID. Configure `extra_docroots` as a JSON list of every additional document root,
-including other sites served by this account. The engine checks private state,
+owned by the application UID. In Backups settings, list every other public web
+folder on this account, one full path per line. CLI `extra_docroots` uses a JSON
+list. The engine checks private state,
 local output and recovery-kit exports against canonical application/docroot paths.
 Read-only plan/config/status never create private state; explicit configuration
 set or capture execution provisions its immutable installation binding.
 Check actual hosting quotas, FPM UID and
 `open_basedir`; the web interface reports unavailable private storage and points
 to the CLI when it cannot write. Use the application's configured PHP binary,
-which may differ from the system CLI PHP. Set the native `php` field to that
+which may differ from the system CLI PHP. Set the PHP path in Backups settings to that
 absolute CLI path when required. Console ticks cross-check it against PHP_BINARY;
 FPM derives PHP_BINDIR/php when the field is blank, never invokes php-fpm.
 Executable validation uses a short isolated Python child to check absolute,
@@ -56,10 +57,15 @@ installation ID. Afterwards the private directory can only be moved from the
 terminal. The page checks each save with the engine before writing, including
 schedule and billing overlap, S3 endpoint and backup directory location.
 
-Non-secret settings are native extension fields, so the native Extensions
-editor also works as a fallback with the same field rules. There, weekdays and
-path lists are JSON (Monday 0 through Sunday 6); cross-field checks run after
-saving and record an advisory result. Fresh records write settings_version=2;
+Backups settings is the only web settings editor. The native Extensions page
+controls enabling, disabling and uninstalling the extension. CLI configuration
+remains available with the same internal validation rules. If the saved public
+web folder list is damaged, re-enter its complete list in Backups settings and
+confirm it before saving; leave it empty only if there are no other public web
+folders on the account. If the saved data-directory path itself is unusable,
+follow [the CLI correction instructions](CLI.md) with its existing canonical
+directory and known installation UUID. The web page never guesses a replacement
+installation. Fresh records write settings_version=2;
 records with existing rows receive marker 1 and retain 0.3 behavior until the
 Backups page explicitly saves every v2 field. Both new schedules default off,
 local storage on, full local count 7 and database local count 24, with a 10 GiB

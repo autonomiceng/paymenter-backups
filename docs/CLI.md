@@ -137,10 +137,33 @@ A definite credential refusal restores unchanged native settings and preserves
 the existing store; concurrent editor updates survive. An ambiguous commit
 keeps the durable save intent and pauses credential-bearing backup work until a
 complete Save resubmits the uncertain groups. Inspect redacted config before
-retrying. The native edit form preserves secrets.
+retrying. The native Extensions lifecycle form exposes no Backups settings and
+preserves the external credential store.
 S3 writes preserve the separate maintenance probe and archive-key namespaces;
 probe and archive-key writes preserve S3. All credential paths share an
 owner-private file lock.
+
+If the saved data-directory path is relative, contains `..` or names a symlink,
+correct that native pin from the terminal. Use the existing canonical directory
+containing `installation.json`; do not select a new directory. First run
+`status` with that explicit `--private-root` and confirm `initialized: true` and
+the known installation UUID. The read does not create state. Then use the same
+directory in both the flag and the settings payload:
+
+```sh
+printf '%s\n' '{"settings":{"private_root":"/srv/paymenter-backups-private"}}' |
+  python3 -I /srv/paymenter/extensions/Others/Backups/runtime/cli.py \
+    --app /srv/paymenter --private-root /srv/paymenter-backups-private \
+    --php /usr/bin/php config set
+```
+
+Choose the application's actual CLI PHP binary. The explicit directory is
+checked against its application, owner and installation binding; the proposed
+pin must equal that bound directory. After the successful status precheck, using
+that same canonical directory preserves UUID and encrypted credentials and moves
+no private files. If status cannot identify the known UUID, stop; do not run
+`config set`. That command can initialize a fresh directory, so a guessed path
+does not establish the identity of the existing installation.
 
 For outer HTTP Basic protection, privately pipe this envelope into `config set`:
 `{"maintenance_probe_credentials":{"origin":"https://billing.example.com",

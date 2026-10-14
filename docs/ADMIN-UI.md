@@ -232,10 +232,14 @@ These rules bind the page to the engine. The engine stays authoritative.
    that save.
 5. **Guards that never default.** Malformed non-guard rows show trusted defaults,
    are rewritten by the next save and are named in a warning. Malformed
-   public-directory guard JSON is refused with a pointer to the native
-   Extensions editor. A change to an initialized data directory is refused.
+   public-directory guard JSON stays refusing until the complete list is entered
+   and explicitly confirmed in Backups settings. An empty list requires the same
+   confirmation. Concurrent native-row changes refuse that repair. A change to
+   an initialized data directory is refused.
+   An unusable stored data-directory pin is corrected through the documented
+   standalone CLI bound to the existing canonical directory and identity.
    When the engine itself cannot start, Save writes only changed binary paths,
-   the data directory and public web folders ("Binary paths saved").
+   the data directory and public web folders ("Setup settings saved").
 6. **Secrets are write-only.** `$s3Keys`, `$siteAccess` and the passphrase in
    `$encryptionInput` are reset by `dehydrate()` on every response, including
    validation failures and unrelated actions. They render inside the one form
