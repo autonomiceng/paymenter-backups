@@ -446,7 +446,8 @@ class AdminArtifactContracts(unittest.TestCase):
         for run_id in run_ids:
             item = artifacts.journal(self.state, run_id)
             item.update(remote_delivered=True, remote={"bucket": "fixture-only-bucket",
-                        "archive_key": base + run_id + ".tar.gz", "manifest_key": base + run_id + ".manifest.json"})
+                        "archive_key": base + run_id + ".tar.gz", "manifest_key": base + run_id + ".manifest.json",
+                        "scope": storage.remote_scope(self.state, self.envelope)})
             self.state.save(item)
             objects[item["remote"]["archive_key"]] = pathlib.Path(item["archive_path"]).read_bytes()
             objects[item["remote"]["manifest_key"]] = json.dumps(read_json(item["manifest_path"]), sort_keys=True, indent=2).encode() + b"\n"

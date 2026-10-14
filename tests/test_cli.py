@@ -104,7 +104,10 @@ class CLITests(unittest.TestCase):
         command = self.command[:-4] + ["--php", sys.executable, "--bridge", str(bridge)]
         self.assertTrue(self.cli("config", "set", input={"settings": {"capture_timeout": 20}}, command=command)["updated"])
         self.assertEqual(json.loads(native_settings.read_text())["capture_timeout"], 20)
-        self.cli("schedule", "set", input={"schedule_time": "03:15", "schedule_weekdays": [0, 2]}, command=command)
+        # The fixture guard includes a billing instant one hour from now. Keep
+        # this CLI roundtrip outside it at every UTC time the suite is run.
+        schedule_time = time.strftime("%H:%M", time.gmtime(time.time() + 12 * 3600))
+        self.cli("schedule", "set", input={"schedule_time": schedule_time, "schedule_weekdays": [0, 2]}, command=command)
         self.cli("schedule", "enable", command=command)
         self.assertTrue(self.cli("schedule", "show", command=command)["enabled"])
         self.cli("schedule", "disable", command=command)

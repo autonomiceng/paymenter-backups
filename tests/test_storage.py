@@ -27,6 +27,28 @@ from paymenter_backups.config import DEFAULTS
 from paymenter_backups.storage import clean_environment, client, deliver, destination_test, prefix, retention, upload, whole_hash
 
 
+class LocalAdmissionTests(unittest.TestCase):
+    def test_budget_full_capture_prunes_once_before_readmitting_and_cleans_failure(self):
+        import test_engine
+        from paymenter_backups.engine import capture, storage_usage
+        fixture = test_engine.Fixture("test_online_excludes_app_and_maintenance")
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        fixture.settings.update(mode="database-online", retention_keep=1)
+        payload = "-- " + os.urandom(100000).hex() + "\n"
+        fixture.envelope["tools"]["dump"] = str(fixture.script("large-dump", "print(" + repr(payload) + ")"))
+        first = capture(fixture.state, fixture.envelope)
+        latest = capture(fixture.state, fixture.envelope)
+        fixture.settings["local_byte_budget"] = storage_usage(fixture.state, fixture.settings) - 1
+        with patch("paymenter_backups.engine.inventory", side_effect=BackupError("admitted-test-stop")):
+            with self.assertRaisesRegex(BackupError, "admitted-test-stop"):
+                capture(fixture.state, fixture.envelope)
+        self.assertFalse(pathlib.Path(first["archive_path"]).exists())
+        self.assertTrue(pathlib.Path(latest["archive_path"]).exists())
+        failed = next(item for item in fixture.state.journals() if item.get("error") == "admitted-test-stop")
+        self.assertFalse((fixture.state.run_path(failed["run_id"]) / "payload").exists())
+
+
 @unittest.skipUnless(boto3, "Install requirements-s3.lock SDK for protocol tests")
 class S3ProtocolTests(unittest.TestCase):
     def setUp(self):
@@ -80,6 +102,12 @@ class S3ProtocolTests(unittest.TestCase):
                 if key not in fixture.objects:
                     return self.answer(404, b"<Error><Code>NoSuchKey</Code></Error>")
                 self.answer(200, fixture.objects[key], {"ETag": "multipart-not-a-hash"})
+            def do_HEAD(self):
+                key, _ = self.split()
+                fixture.trace.append(("HEAD", key, {}, dict(self.headers)))
+                self.send_response(200 if key in fixture.objects else 404)
+                self.send_header("Content-Length", str(len(fixture.objects.get(key, b""))))
+                self.end_headers()
             def do_DELETE(self):
                 key, query = self.split()
                 fixture.trace.append(("DELETE", key, query, dict(self.headers)))
@@ -131,7 +159,8 @@ class S3ProtocolTests(unittest.TestCase):
 
     def test_completed_multipart_stale_journal_retry_and_failure_keeps_local(self):
         fixture, journal = self.capture_fixture()
-        journal["multipart"] = {"bucket": "fixture", "key": prefix(fixture.state, fixture.envelope) + journal["run_id"] + ".tar.gz", "upload_id": "already-completed"}
+        from paymenter_backups.storage import remote_scope
+        journal["multipart"] = {"bucket": "fixture", "key": prefix(fixture.state, fixture.envelope) + journal["run_id"] + ".tar.gz", "upload_id": "already-completed", "scope": remote_scope(fixture.state, fixture.envelope)}
         fixture.state.save(journal)
         self.no_such_upload = True
         with patch("paymenter_backups.storage.client", return_value=self.s3):
@@ -142,6 +171,19 @@ class S3ProtocolTests(unittest.TestCase):
                 deliver(fixture.state, fixture.envelope, journal["run_id"])
         self.assertTrue(pathlib.Path(journal["archive_path"]).exists())
         self.assertTrue(pathlib.Path(journal["manifest_path"]).exists())
+
+    def test_legacy_multipart_retry_refuses_without_provider_calls_or_scope_promotion(self):
+        from paymenter_backups import artifacts
+        fixture, journal = self.capture_fixture()
+        journal["multipart"] = {"bucket": "fixture", "key": prefix(fixture.state, fixture.envelope) + journal["run_id"] + ".tar.gz", "upload_id": "unbound-legacy-upload"}
+        fixture.state.save(journal)
+        before = artifacts.journal(fixture.state, journal["run_id"])
+        with patch("paymenter_backups.storage.client") as provider:
+            for _ in range(2):
+                with self.assertRaisesRegex(BackupError, "multipart-location-unbound"):
+                    deliver(fixture.state, fixture.envelope, journal["run_id"])
+            provider.assert_not_called()
+        self.assertEqual(artifacts.journal(fixture.state, journal["run_id"]), before)
 
     def test_retention_owned_scope_last_good_and_lastmanifest_do_not_rewind(self):
         from paymenter_backups.engine import capture
@@ -175,8 +217,8 @@ class S3ProtocolTests(unittest.TestCase):
             deliver(fixture.state, fixture.envelope, first["run_id"])
             deliver(fixture.state, fixture.envelope, second["run_id"])
             self.fail_archive_delete = True
-            with self.assertRaisesRegex(BackupError, "retention-remote-delete-failed"):
-                retention(fixture.state, fixture.envelope, True)
+            result = retention(fixture.state, fixture.envelope, True)
+            self.assertIn("retention-remote-delete-failed", [item["code"] for item in result["skipped"]])
             journal = read_json(fixture.state.run_path(first["run_id"]) / "journal.json")
             self.assertTrue(journal["retention_delete_intent"]["remote_verified"])
             self.assertTrue(pathlib.Path(first["archive_path"]).exists())
@@ -197,15 +239,15 @@ class S3ProtocolTests(unittest.TestCase):
                 raise OSError("disposable fault")
             return unlink(path, *args, dir_fd=dir_fd, **kwargs)
         with patch("os.unlink", fault):
-            with self.assertRaisesRegex(BackupError, "retention-local-delete-failed"):
-                retention(fixture.state, fixture.envelope, True)
+            result = retention(fixture.state, fixture.envelope, True)
+            self.assertIn("retention-local-delete-failed", [item["code"] for item in result["skipped"]])
         self.assertFalse(pathlib.Path(first["manifest_path"]).exists())
         self.assertTrue(pathlib.Path(first["archive_path"]).exists())
         surviving = pathlib.Path(first["archive_path"])
         original = surviving.read_bytes()
         surviving.write_bytes(original + b"operator replacement")
-        with self.assertRaisesRegex(BackupError, "retention-local-verification-failed"):
-            retention(fixture.state, fixture.envelope, True)
+        result = retention(fixture.state, fixture.envelope, True)
+        self.assertIn("retention-local-verification-failed", [item["code"] for item in result["skipped"]])
         self.assertTrue(surviving.exists())
         surviving.write_bytes(original)
         retention(fixture.state, fixture.envelope, True)
@@ -234,6 +276,72 @@ class S3ProtocolTests(unittest.TestCase):
             self.assertTrue(destination_test(State(), envelope)["verified"])
         self.assertEqual(self.objects, {"/fixture/unrelated/customer.txt": b"preserve"})
         self.assertTrue(all(key.startswith("/fixture/owned/fixture-installation/probes/") for _, key, _, _ in self.trace))
+
+    def test_explicit_delivery_repairs_checked_legacy_interrupted_manifest(self):
+        from paymenter_backups import artifacts
+        fixture, journal = self.capture_fixture()
+        with patch("paymenter_backups.storage.client", return_value=self.s3):
+            deliver(fixture.state, fixture.envelope, journal["run_id"])
+            old = artifacts.journal(fixture.state, journal["run_id"])
+            manifest = old.pop("manifest")
+            old["remote"].pop("scope")
+            old["retention_delete_intent"] = {"manifest": manifest, "remote_verified": True}
+            fixture.state.save(old)
+            pathlib.Path(old["manifest_path"]).unlink()
+            result = deliver(fixture.state, fixture.envelope, journal["run_id"])
+        repaired = artifacts.journal(fixture.state, journal["run_id"])
+        self.assertTrue(result["remote_delivered"])
+        self.assertEqual(read_json(repaired["manifest_path"]), manifest)
+        self.assertTrue(repaired["legacy_retention_recovery"]["metadata_repaired"])
+        self.assertIn("scope", repaired["remote"])
+        self.assertNotIn("retention_delete_intent", repaired)
+
+    def test_retrieval_resumes_after_publication_without_refetching_or_overwriting(self):
+        from paymenter_backups import storage, artifacts
+        from paymenter_backups.engine import capture
+        fixture, first = self.capture_fixture()
+        fixture.settings["destination"] = "local"
+        second = capture(fixture.state, fixture.envelope)
+        fixture.settings.update(destination="s3", retention_keep=1, s3_retention_policy="keep-all")
+        with patch("paymenter_backups.storage.client", return_value=self.s3):
+            deliver(fixture.state, fixture.envelope, first["run_id"])
+            deliver(fixture.state, fixture.envelope, second["run_id"])
+            retention(fixture.state, fixture.envelope, True)
+            with patch("paymenter_backups.storage.complete_retrieval", side_effect=BackupError("simulated-publish-crash")):
+                with self.assertRaisesRegex(BackupError, "simulated-publish-crash"):
+                    storage.retrieve(fixture.state, fixture.envelope, first["run_id"])
+            pending = artifacts.journal(fixture.state, first["run_id"])
+            self.assertFalse(pending["local_complete"])
+            self.assertIn("retrieve_intent", pending)
+            self.trace.clear()
+            result = storage.retrieve(fixture.state, fixture.envelope, first["run_id"])
+            self.assertFalse(any(verb == "GET" for verb, _, _, _ in self.trace))
+        self.assertTrue(result["retrieved"])
+        self.assertNotIn("retrieve_intent", artifacts.journal(fixture.state, first["run_id"]))
+
+    def test_retrieval_retry_reclaims_only_its_recorded_abandoned_spool(self):
+        from paymenter_backups import storage, artifacts
+        from paymenter_backups.engine import capture
+        fixture, first = self.capture_fixture()
+        fixture.settings["destination"] = "local"
+        second = capture(fixture.state, fixture.envelope)
+        fixture.settings.update(destination="s3", retention_keep=1, s3_retention_policy="keep-all")
+        with patch("paymenter_backups.storage.client", return_value=self.s3):
+            deliver(fixture.state, fixture.envelope, first["run_id"])
+            deliver(fixture.state, fixture.envelope, second["run_id"])
+            retention(fixture.state, fixture.envelope, True)
+            item = artifacts.journal(fixture.state, first["run_id"])
+            directory = pathlib.Path(first["archive_path"]).parent
+            spool = directory / (".remote-" + "a" * 32 + ".partial")
+            spool.write_bytes(b"abandoned owned download")
+            unrelated = directory / ".operator-recovery.partial"
+            unrelated.write_bytes(b"preserve unrelated work")
+            item["retrieve_work"] = {"temporary": spool.name, "scope": item["remote"]["scope"],
+                                     "identity": artifacts.identity(spool.stat())}
+            fixture.state.save(item)
+            self.assertTrue(storage.retrieve(fixture.state, fixture.envelope, first["run_id"])["retrieved"])
+        self.assertFalse(spool.exists())
+        self.assertEqual(unrelated.read_bytes(), b"preserve unrelated work")
 
     def test_explicit_client_ignores_hostile_environment(self):
         hostile = {"AWS_PROFILE": "untrusted", "AWS_ENDPOINT_URL_S3": "http://evil.invalid", "AWS_ACCESS_KEY_ID": "bad-access",

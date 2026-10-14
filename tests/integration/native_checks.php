@@ -50,6 +50,52 @@ if ($mode === 'upload') {
     $digest = fn () => hash_file('sha256', $root . '/credentials.json');
     $secretFields = fn ($livewire) => array_filter([...array_values($livewire->get('s3Keys') ?? []), $livewire->get('siteAccess.username'), $livewire->get('siteAccess.password')], fn ($value) => $value !== null && $value !== '');
 
+    // Field help uses a native dialog and does not submit or alter settings.
+    $help = Livewire\Livewire::test($page);
+    $helpRows = $nativeRows();
+    $helpDigest = $digest();
+    $helpContext = $schemaAction($help, 'cronLockHelp');
+    $help->call('mountAction', 'cronLockHelp', [], $helpContext);
+    $helpModal = $help->effects['partials']['action-modals'] ?? $help->html();
+    check(count($help->get('mountedActions')) === 1 && str_contains($helpModal, 'Use the lock paths') && str_contains($helpModal, 'Close'), 'Job lock help dialog missing from native modal partial');
+    check($nativeRows() === $helpRows && $digest() === $helpDigest, 'Opening help changed settings or credentials');
+    $window = Livewire\Livewire::test($page);
+    $window->set('settings.enabled', true);
+    $windowState = $window->get('settings');
+    $beforeBilling = $windowState['lock_timeout'] + $windowState['drain_seconds'] + $windowState['capture_timeout'] + 30 + $windowState['billing_margin_seconds'];
+    $afterBilling = 60 + $windowState['billing_margin_seconds'];
+    check(str_contains($window->html(), $beforeBilling . ' seconds before and ' . $afterBilling . ' seconds after'), 'Billing window does not reflect current time limits');
+
+    // A malformed saved row falls back visibly and must still be repaired by Save.
+    $originalKeep = $record->settings()->where('key', 'retention_keep')->value('value');
+    $record->settings()->where('key', 'retention_keep')->update(['value' => 'malformed-fixture']);
+    $repair = Livewire\Livewire::test($page);
+    $repair->call('saveSettings');
+    check((int) $record->settings()->where('key', 'retention_keep')->value('value') === Paymenter\Extensions\Others\Backups\Settings::DEFAULTS['retention_keep'], 'Saving defaults did not repair malformed native row');
+    $record->settings()->where('key', 'retention_keep')->update(['value' => $originalKeep]);
+    // Hidden malformed JSON still reaches authoritative config validation and repair.
+    $hiddenOriginal = $record->settings()->whereIn('key', ['schedule_weekdays', 'enabled', 'schedule_frequency'])->pluck('value', 'key')->all();
+    $record->settings()->where('key', 'enabled')->update(['value' => '0']);
+    $record->settings()->where('key', 'schedule_frequency')->update(['value' => 'daily']);
+    $record->settings()->where('key', 'schedule_weekdays')->update(['value' => 'invalid-json']);
+    $process->mustRun();
+    $invalidCold = json_decode($process->getOutput(), true);
+    check($invalidCold['settings']['schedule_weekdays'] === 'invalid-json', 'Cold bridge silently changed malformed weekdays');
+    $invalidEngine = new Symfony\Component\Process\Process([
+        $invalidCold['tools']['python'], '-I', $base . '/extensions/Others/Backups/runtime/cli.py',
+        '--app', $base, '--private-root', $root, '--php', PHP_BINARY, 'config', 'validate',
+    ]);
+    $invalidEngine->run();
+    check($invalidEngine->getExitCode() !== 0 && str_contains($invalidEngine->getOutput() . $invalidEngine->getErrorOutput(), 'config-invalid'), 'Malformed weekdays did not refuse ordinary engine validation');
+    $hiddenRepair = Livewire\Livewire::test($page);
+    session()->forget(['filament.notifications', 'filament.claimed_notifications']);
+    $hiddenRepair->call('saveSettings');
+    check($hiddenRepair->instance()->getErrorBag()->isEmpty() && $record->settings()->where('key', 'schedule_weekdays')->value('value') === '[0]', 'Saving defaults did not repair hidden malformed weekdays');
+    $notifications = session()->pull('filament.claimed_notifications') ?? session()->pull('filament.notifications') ?? [];
+    $repairNotices = array_filter($notifications, static fn ($notice) => ($notice['title'] ?? '') === 'Settings saved with corrections' && str_contains($notice['body'] ?? '', 'Days for weekly backups'));
+    check(count($repairNotices) > 0, 'Malformed weekday repair was not disclosed');
+    foreach ($hiddenOriginal as $key => $value) { $record->settings()->where('key', $key)->update(['value' => $value]); }
+
     // Settings: engine-matching field rules refuse before any native write.
     $livewire = Livewire\Livewire::test($page);
     $before = $nativeRows();
@@ -114,11 +160,13 @@ if ($mode === 'upload') {
     App\Providers\SettingsProvider::flushCache();
     try {
         $probe = Livewire\Livewire::test($page);
-        check(str_contains($probe->html(), 'Full backups load https://fixture.example.invalid'), 'site address not shown from app URL');
+        check(str_contains(html_entity_decode($probe->html()), 'this server requests a test page under https://fixture.example.invalid'), 'site address not shown from app URL');
+        check(str_contains($probe->html(), 'sites protected by a web server password prompt') && str_contains($probe->html(), 'separate from your Paymenter account login'), 'HTTP Basic purpose missing before credentials saved');
         // The browser cannot choose the address; a sent origin is ignored.
         $probeSecrets = ['siteAccess.origin' => 'https://other.invalid', 'siteAccess.username' => 'PROBE-USER-CREDENTIAL-CANARY', 'siteAccess.password' => 'PROBE-PASSWORD-CREDENTIAL-CANARY'];
         $probe->update(calls: [['method' => 'saveSitePassword', 'params' => []]], updates: $probeSecrets);
         check($probe->instance()->getErrorBag()->isEmpty() && $secretFields($probe) === [], 'site password save failed or kept input');
+        check(str_contains($probe->html(), 'sites protected by a web server password prompt') && str_contains($probe->html(), 'Replace credentials'), 'Saved HTTP Basic credentials hide purpose or replacement action');
         $process->mustRun();
         $bound = json_decode($process->getOutput(), true);
         check($bound['maintenance_probe_credentials'] === ['origin' => 'https://fixture.example.invalid', 'username' => 'PROBE-USER-CREDENTIAL-CANARY', 'password' => 'PROBE-PASSWORD-CREDENTIAL-CANARY'], 'probe namespace not bound');
@@ -128,12 +176,21 @@ if ($mode === 'upload') {
         App\Models\Setting::whereNull('settingable_type')->where('key', 'app_url')->update(['value' => 'http://fixture.example.invalid']);
         App\Providers\SettingsProvider::flushCache();
         $plain = Livewire\Livewire::test($page);
-        check(str_contains($plain->html(), 'does not use https://'), 'http address not explained');
+        check(str_contains($plain->html(), 'uses http://'), 'http address not explained');
+        check(str_contains($plain->html(), 'sites protected by a web server password prompt') && str_contains($plain->html(), 'separate from your Paymenter account login'), 'HTTP Basic purpose missing for HTTP address');
+        check(str_contains($plain->html(), 'Remove credentials'), 'Saved HTTP Basic credentials cannot be removed over HTTP');
         $plain->update(calls: [['method' => 'saveSitePassword', 'params' => []]], updates: $probeSecrets);
         check($digest() === $credentialDigest && $secretFields($plain) === [], 'http address changed credentials or kept input');
+        $httpRemoval = Livewire\Livewire::test($page);
+        $httpContext = $schemaAction($httpRemoval, 'removeSitePassword');
+        $httpRemoval->call('mountAction', 'removeSitePassword', [], $httpContext)->call('callMountedAction');
+        $process->mustRun();
+        $httpCleared = json_decode($process->getOutput(), true);
+        check($httpCleared['maintenance_probe_credentials'] === [] && $httpCleared['credentials']['access_key'] === 'ACCESS-CREDENTIAL-CANARY', 'HTTP removal failed or lost S3 keys');
         App\Models\Setting::whereNull('settingable_type')->where('key', 'app_url')->update(['value' => 'https://fixture.example.invalid']);
         App\Providers\SettingsProvider::flushCache();
         $probe = Livewire\Livewire::test($page);
+        $probe->update(calls: [['method' => 'saveSitePassword', 'params' => []]], updates: $probeSecrets);
         $encryptedBackup = json_decode(file_get_contents($root . '/credentials.json'), true);
         Paymenter\Extensions\Others\Backups\PrivateStore::atomic($root . '/credentials.json', array_replace($encryptedBackup, ['payload' => 'unreadable-fixture-ciphertext']));
         $unreadable = $digest();
@@ -163,6 +220,21 @@ if ($mode === 'upload') {
     check($nativeRows()['destination'] === 'local', 'destination not restored');
     $credentialDigest = $digest();
 
+    // Malformed location-guard JSON refuses page repair and points to the native editor.
+    $oldDocroots = $record->settings()->where('key', 'extra_docroots')->value('value');
+    $record->settings()->where('key', 'extra_docroots')->update(['value' => 'invalid-json']);
+    $guardRows = $nativeRows();
+    $guardPage = Livewire\Livewire::test($page);
+    $guardPage->call('saveSettings');
+    check($nativeRows() === $guardRows && $guardPage->instance()->getErrorBag()->has('settings.extra_docroots'), 'Page silently defaulted malformed document-root guard');
+    check(str_contains($guardPage->html(), 'Extensions') && str_contains($guardPage->html(), 'edit Backups'), 'Malformed guard repair did not name native editor');
+    $process->run();
+    check($process->getExitCode() !== 0 && str_contains($process->getErrorOutput(), 'document-roots-invalid'), 'Malformed document-root guard did not return its safe code');
+    $guardEditor = Livewire\Livewire::test(App\Admin\Resources\ExtensionResource\Pages\EditExtension::class, ['record' => $record->getRouteKey()]);
+    $guardEditor->update(calls: [['method' => 'save', 'params' => []]], updates: ['data.settings.extra_docroots' => $oldDocroots]);
+    check($guardEditor->instance()->getErrorBag()->isEmpty() && $record->settings()->where('key', 'extra_docroots')->value('value') === $oldDocroots, 'Native editor could not repair malformed document-root guard');
+    check($digest() === $credentialDigest, 'Native location-guard repair changed credentials');
+
     // Native EditExtension fill/save keeps external secrets and contains no canary.
     $native = Livewire\Livewire::test(App\Admin\Resources\ExtensionResource\Pages\EditExtension::class, ['record' => $record->getRouteKey()]);
     check(!str_contains($native->html(), 'CREDENTIAL-CANARY'), 'native editor secret leak');
@@ -191,7 +263,8 @@ if ($mode === 'upload') {
             throw new RuntimeException('relative Python command accepted');
         } catch (RuntimeException $error) { check($error->getMessage() === 'python-binary-invalid', 'relative Python refusal not explicit'); }
         $broken = Livewire\Livewire::test($page);
-        check(str_contains($broken->html(), 'The backup engine cannot run from the web server') && !str_contains($broken->html(), 'CREDENTIAL-CANARY'), 'engine failure not explained');
+        check(str_contains($broken->html(), 'The Python path is not a working Python 3.10 or newer program')
+            && str_contains($broken->html(), 'Check it under Advanced') && !str_contains($broken->html(), 'CREDENTIAL-CANARY'), 'engine failure not explained');
     } finally {
         $record->settings()->where('key', 'python')->update(['value' => $configuredPython]);
     }
@@ -218,11 +291,14 @@ if ($mode === 'upload') {
     try {
         $record->settings()->where('key', 'no_concurrent_ddl_acknowledged')->update(['value' => '0']);
         $blocked = $dialogState();
-        check(!$blocked['submit'] && str_contains($blocked['text'], 'Full backups need 2 host checks') && !str_contains($blocked['text'], 'that database schema changes never run'),
+        check(!$blocked['submit']
+            && str_contains($blocked['text'], 'Full backups need 2 items under Settings, Host checks.')
+            && !str_contains($blocked['text'], 'that database schema changes never run'),
               'blocked dialog offers submit or counts host checks twice: ' . strip_tags($blocked['text']));
         $record->settings()->where('key', 'no_concurrent_ddl_acknowledged')->update(['value' => '1']);
         $partial = $dialogState();
-        check($partial['submit'] && $partial['disabled'] === ['full-quiesced'] && $partial['selected'] === 'database-online' && str_contains($partial['text'], 'Full backups need 1 host check'),
+        check($partial['submit'] && $partial['disabled'] === ['full-quiesced'] && $partial['selected'] === 'database-online'
+            && str_contains($partial['text'], 'Full backups need 1 item under Settings, Host checks.'),
               'partially blocked dialog not guided: ' . json_encode(array_diff_key($partial, ['text' => 1])));
     } finally {
         $record->settings()->where('key', 'no_concurrent_ddl_acknowledged')->update(['value' => $ddl]);
@@ -246,11 +322,13 @@ if ($mode === 'upload') {
         check($request['status'] === 'pending' && $request['arguments']['actor'] === $admin->id, 'FPM launched heavy work or lost actor');
         if ($request['action'] === 'run') { check($request['arguments']['mode'] === 'database-online', 'per-backup mode lost'); }
     }
-    check(str_contains($queue->html(), 'Queued') && str_contains($queue->html(), 'Waiting for Paymenter&#039;s scheduler'), 'queued backup not shown');
+    $queuedView = Livewire\Livewire::test($page);
+    $queuedText = html_entity_decode($queuedView->html());
+    check(str_contains($queuedText, 'Queued') && str_contains($queuedText, "Paymenter's scheduler has not run yet"), 'queued backup or scheduler notice not shown');
     // Phones stack history rows and wrap long commands instead of pushing actions or text off screen.
     check(str_contains($queue->html(), 'fi-ta-table-stacked-on-mobile') && str_contains($queue->html(), 'overflow-wrap: anywhere'), 'mobile history or command wrapping missing');
     // Copy never promises a start time the host has not shown.
-    foreach (['within a minute', 'under a minute', 'every minute', 'up to '] as $promise) { check(!str_contains($queue->html(), $promise), 'unsupported timing promise: ' . $promise); }
+    foreach (['within a minute', 'under a minute'] as $promise) { check(!str_contains($queue->html(), $promise), 'unsupported backup-start timing promise: ' . $promise); }
     check(str_contains($queue->html(), 'Host checks') && str_contains($queue->html(), 'paymenter_backups() {') && str_contains($queue->html(), '/usr/bin/flock -n'), 'settings or help guidance missing');
     check(!file_exists($base . '/storage/framework/down') && !glob($root . '/runs/*/journal.json'), 'FPM started capture');
     foreach ($spooled as $request) {
@@ -314,8 +392,8 @@ if ($mode === 'upload') {
     } elseif ($action === 'delete-refused') {
         $livewire->call('mountAction', 'delete', [], ['table' => true, 'recordKey' => $argv[4]]);
         $mounted = $livewire->instance()->getMountedAction();
-        $description = $mounted->getModalDescription();
-        check(str_contains($description instanceof Illuminate\Contracts\Support\Htmlable ? $description->toHtml() : (string) $description, $argv[5]), 'delete refusal not explained');
+        $modal = $livewire->effects['partials']['action-modals'] ?? $livewire->html();
+        check(str_contains(html_entity_decode($modal), $argv[5]), 'delete refusal not explained in preview');
         check(!$mounted->getModalSubmitAction(), 'refused delete still offers submit');
         echo json_encode(['delete_refused' => true]) . "\n";
     } elseif ($action === 'download') {
@@ -347,7 +425,7 @@ if ($mode === 'upload') {
     Illuminate\Support\Facades\Auth::login($admin);
     Filament\Facades\Filament::setCurrentPanel(Filament\Facades\Filament::getPanel('admin'));
     $page = Livewire\Livewire::test(Paymenter\Extensions\Others\Backups\Admin\Pages\Backups::class);
-    check(!str_contains($page->html(), 'The backup engine cannot run from the web server') && str_contains($page->html(), 'Backup history'), 'restricted native admin status unavailable');
+    check(!str_contains($page->html(), 'The web server could not start the backup program') && str_contains($page->html(), 'Backup history'), 'restricted native admin status unavailable');
     try {
         // A PHP alias to the same executable remains valid under the restrictive policy.
         $record->settings()->where('key', 'php')->update(['value' => $argv[3]]);
