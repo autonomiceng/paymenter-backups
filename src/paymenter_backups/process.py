@@ -6,6 +6,7 @@ import pathlib
 import signal
 import selectors
 import resource
+import re
 import subprocess
 import time
 import warnings
@@ -34,7 +35,7 @@ atexit.register(forget_detached_on_exit)
 def safe_environment():
     # Do not inherit TAR_OPTIONS, MYSQL_PWD, GZIP, LD_PRELOAD, provider/CA/proxy
     # overrides, application variable overrides or TLS session key logging.
-    return {"PATH": os.defpath, "LANG": "C.UTF-8", "LC_ALL": "C.UTF-8", "TZ": "UTC"}
+    return {"PATH": "/usr/local/bin:/usr/bin:/bin", "LANG": "C.UTF-8", "LC_ALL": "C.UTF-8", "TZ": "UTC"}
 
 
 def boot_id():
@@ -173,6 +174,51 @@ def run(command, timeout, output=None, input_bytes=None, register=None, budget_c
             proc.stdin.close()
 
 
+def probe(command, timeout=5, stdout_limit=262144, stderr_limit=8192):
+    """Bounded diagnostic stdout/stderr with supervised child-group cleanup."""
+    parent = os.getpid()
+    proc = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE, close_fds=True, start_new_session=True,
+                            preexec_fn=lambda: child_setup(parent), env=safe_environment())
+    group = process_identity(proc.pid)
+    output = {proc.stdout: bytearray(), proc.stderr: bytearray()}
+    deadline = time.monotonic() + timeout
+    try:
+        with selectors.DefaultSelector() as selector:
+            for pipe in output:
+                selector.register(pipe, selectors.EVENT_READ)
+            while selector.get_map():
+                if time.monotonic() >= deadline:
+                    raise BackupError('child-timeout')
+                for key, _ in selector.select(0.05):
+                    chunk = os.read(key.fd, 65536)
+                    if not chunk:
+                        selector.unregister(key.fileobj)
+                        continue
+                    output[key.fileobj].extend(chunk)
+                    limit = stdout_limit if key.fileobj is proc.stdout else stderr_limit
+                    if len(output[key.fileobj]) > limit:
+                        raise BackupError('child-output-limit')
+        try:
+            proc.wait(timeout=max(0.1, deadline - time.monotonic()))
+        except subprocess.TimeoutExpired:
+            raise BackupError("child-timeout") from None
+        if group and group_members(group):
+            raise BackupError('process-state-uncertain')
+        return proc.returncode, bytes(output[proc.stdout]), bytes(output[proc.stderr])
+    finally:
+        if proc.poll() is None:
+            try:
+                if group:
+                    terminate(group)
+                else:
+                    proc.kill()
+            finally:
+                proc.wait(timeout=3)
+        proc.stdout.close()
+        proc.stderr.close()
+
+
 def hash_stream(command, timeout, register=None):
     """Stream the second dump through a hasher, with no second SQL file."""
     import hashlib
@@ -218,7 +264,7 @@ def app_workers(app):
             if path.stat().st_uid != os.getuid():
                 continue
             arguments = (path / "cmdline").read_bytes().replace(b"\0", b" ").decode(errors="replace")
-            if "artisan" not in arguments or not any(word in arguments for word in ("schedule:run", "queue:work", "queue:listen", "horizon")):
+            if "artisan" not in arguments or not any(word in arguments for word in ("schedule:run", "schedule:work", "queue:work", "queue:listen", "horizon")):
                 continue
             cwd = (path / "cwd").resolve()
             if cwd == app or str(app / "artisan") in arguments:
@@ -226,6 +272,25 @@ def app_workers(app):
         except (OSError, RuntimeError):
             continue
     return found
+
+
+def continuous_workers(app):
+    """Inspect live PHP workers without returning command lines or identities."""
+    for pid in app_workers(app):
+        try:
+            words = pathlib.Path(f'/proc/{pid}/cmdline').read_bytes().decode().split('\0')
+            # flock waiting to spawn a child is not itself an application writer.
+            if pathlib.Path(words[0]).name in ('flock', 'env'):
+                continue
+            if any(word in words for word in ('queue:listen', 'horizon', 'schedule:work')):
+                return True
+            if 'queue:work' in words:
+                bounded = any(word in words for word in ('--stop-when-empty', '--once')) or any(re.fullmatch(r'--(?:max-time|max-jobs)=[1-9][0-9]*', word) for word in words)
+                if not bounded or '--force' in words:
+                    return True
+        except (OSError, UnicodeError):
+            continue
+    return False
 
 
 def detach(command):

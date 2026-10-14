@@ -9,7 +9,7 @@ import stat
 import time
 import uuid
 
-from . import artifacts
+from . import artifacts, encryption, remote_artifacts
 from .common import BackupError, atomic_json, read_json
 from .engine import verify
 
@@ -72,9 +72,7 @@ def scope_matches(state, envelope, item):
         return False
     remote = item.get("remote") or item.get("delivery_intent") or {}
     scope = remote_scope(state, envelope)
-    return (remote.get("scope") == scope and remote.get("bucket") == scope["bucket"]
-            and remote.get("archive_key") == scope["prefix"] + item["run_id"] + ".tar.gz"
-            and remote.get("manifest_key") == scope["prefix"] + item["run_id"] + ".manifest.json")
+    return remote_artifacts.owned(remote, scope, item["run_id"])
 
 
 def owned_manifest(state, item):
@@ -101,8 +99,10 @@ def remote_readiness(state, envelope, item):
 
 def observe_remote(state, envelope, item):
     """Cheap pair presence and bounded manifest proof; archive bytes stay unread."""
-    manifest = owned_manifest(state, item)
     remote = item.get("remote") or item["delivery_intent"]
+    if remote_artifacts.format_of(remote) == encryption.FORMAT:
+        return remote_artifacts.observe(state, envelope, item)
+    manifest = owned_manifest(state, item)
     s3 = client(envelope)
     expected = json.dumps(manifest, sort_keys=True, indent=2).encode() + b"\n"
     result = "present"
@@ -185,6 +185,10 @@ class RemoteReader:
 def checked_remote(state, envelope, item, record=False, directory=None, directory_fd=None):
     """Bounded private spool, complete object/manifest/archive check, no publication."""
     from .engine import check_archive, output_limit, space
+    if remote_artifacts.format_of(item.get("remote") or item.get("delivery_intent") or {}) == encryption.FORMAT:
+        with remote_artifacts.checked_remote(state, envelope, item, record, directory, directory_fd) as result:
+            yield result
+        return
     if not scope_matches(state, envelope, item):
         raise BackupError("remote-scope-changed" if (item.get("remote") or {}).get("scope") else "remote-location-unbound")
     manifest = owned_manifest(state, item)
@@ -329,7 +333,9 @@ def upload(s3, bucket, key, path, journal=None, state=None):
         upload_id = s3.create_multipart_upload(Bucket=bucket, Key=key)["UploadId"]
         if journal is not None:
             journal["multipart"] = {"bucket": bucket, "key": key, "upload_id": upload_id,
-                                     "scope": journal["delivery_intent"]["scope"]}
+                                     "scope": journal["delivery_intent"]["scope"],
+                                     "format": remote_artifacts.format_of(journal["delivery_intent"]),
+                                     **({"key_fingerprint": journal["delivery_intent"]["key_fingerprint"]} if remote_artifacts.format_of(journal["delivery_intent"]) == encryption.FORMAT else {})}
             state.save(journal)
         parts = []
         try:
@@ -410,8 +416,63 @@ def recover_legacy_delivery_source(state, item):
     state.save(item)
 
 
-def deliver(state, envelope, run_id):
+def deliver(state, envelope, run_id, envelope_loader=None):
+    """Delivery and optional staging removal share one run-lock attempt.
+
+    Refresh key selection under the lock. Staging cleanup always requires a
+    complete current proof of the recorded format, including decryption.
+    """
     with state.lock():
+        if envelope_loader is not None:
+            envelope = envelope_loader()
+        item = artifacts.journal(state, run_id)
+        if envelope['settings']['destination'] == 's3' and item.get('remote_delivered') and scope_matches(state, envelope, item):
+            # Remote-only retries cannot require a local source.
+            try:
+                with checked_remote(state, envelope, item, record=True):
+                    pass
+            except BackupError:
+                if not item.get('local_complete') or item.get('staging_removal_intent'):
+                    raise
+            else:
+                staging_removal(state, envelope, item, remote_proven=True)
+                return {'run_id': run_id, 'remote_delivered': True, 'already_delivered': True,
+                        'local_complete': item.get('local_complete', False)}
+        result = deliver_payload(state, envelope, run_id)
+        item = artifacts.journal(state, run_id)
+        if result.get('remote_delivered'):
+            staging_removal(state, envelope, item)
+            result['local_complete'] = item.get('local_complete', False)
+        return result
+
+
+def deliver_payload(state, envelope, run_id):
+    """Publish the frozen recorded format; caller holds run.lock."""
+    item = artifacts.journal(state, run_id)
+    if envelope['settings']['destination'] != 's3':
+        return _deliver_plaintext(state, envelope, run_id, locked=True)
+    remote = item.get('remote') or item.get('delivery_intent')
+    if item.get('multipart') and not item['multipart'].get('scope'):
+        raise BackupError('multipart-location-unbound')
+    format = remote_artifacts.format_of(remote) if remote else (
+        remote_artifacts.multipart_format(item['multipart']) if item.get('multipart') else
+        encryption.FORMAT if encryption.enabled(envelope) else remote_artifacts.PLAINTEXT)
+    if format == encryption.FORMAT:
+        manifest = owned_manifest(state, item) if item.get('remote_delivered') else verify(state, run_id, show=True)
+        item = artifacts.journal(state, run_id)
+        try:
+            return remote_artifacts.deliver(state, envelope, item, manifest)
+        except BackupError as error:
+            item['delivery_error'] = error.code
+            state.save(item)
+            raise
+    if not item.get('remote_delivered') and (encryption.enabled(envelope) or not envelope['settings'].get('plaintext_offsite_acknowledged')):
+        raise BackupError('legacy-plaintext-delivery-blocked')
+    return _deliver_plaintext(state, envelope, run_id, locked=True)
+
+
+def _deliver_plaintext(state, envelope, run_id, locked=False):
+    with contextlib.nullcontext() if locked else state.lock():
         source = artifacts.journal(state, run_id)
         old = source.get("multipart")
         if old and envelope["settings"]["destination"] == "s3":
@@ -497,7 +558,62 @@ def deliver(state, envelope, run_id):
             raise BackupError(journal["delivery_error"]) from None
 
 
-def destination_test(state, envelope):
+def staging_removal(state, envelope, item, remote_proven=False):
+    """The same-run remote exception applies only to staging/expired retrieval.
+
+    Intent precedes the manifest-first descriptor-relative unlinks. Every retry
+    obtains a new remote proof; neither remote_delivered nor HEAD authorizes it.
+    Caller holds run.lock; checked_remote is the encryption proof seam.
+    """
+    settings = envelope['settings']
+    if settings.get('settings_version', 1) != 2 or settings['keep_local'] or not settings['upload_s3']:
+        return False
+    if item.get('local_download_until', 0) > time.time():
+        return False
+    if not item.get('local_complete') and not item.get('staging_removal_intent'):
+        return False
+    if artifacts.deleting(item) or item.get('local_delete_intent') or item.get('remote_delete_intent'):
+        raise BackupError('staging-removal-conflict')
+    if not item.get('remote_delivered') or not scope_matches(state, envelope, item):
+        raise BackupError('staging-removal-remote-proof-required')
+    if not remote_proven:
+        with checked_remote(state, envelope, item, record=True):
+            pass
+    manifest = owned_manifest(state, item)
+    intent = item.get('staging_removal_intent')
+    # Verify present files before creating an intent; an absent file only counts
+    # as a resumed unlink when a previous durable intent established ownership.
+    check_local(state, item, manifest, intent, 'staging-removal')
+    if not intent:
+        intent = {'at': time.time(), 'manifest': manifest, 'scope': remote_scope(state, envelope)}
+        item['staging_removal_intent'] = intent
+        state.save(item)
+    elif intent.get('scope') != remote_scope(state, envelope) or intent.get('manifest') != manifest:
+        raise BackupError('staging-removal-remote-proof-required')
+    try:
+        remove_local(state, item, manifest, intent, 'staging-removal')
+        item.update(local_complete=False, staging_removed_at=time.time(),
+                    local_pruned={'at': time.time(), 'reason': 'staging-removal'})
+        item.pop('verification', None)
+        item.pop('staging_removal_intent', None)
+        item.pop('staging_removal_error', None)
+        # Keep remote ownership/manifest and run identity; this is not Delete.
+        finish_copy_state(state, item)
+        return True
+    except BackupError as error:
+        item['staging_removal_error'] = error.code
+        state.save(item)
+        raise
+
+
+def destination_test(state, envelope, envelope_loader=None, locked=False):
+    with contextlib.nullcontext() if locked else state.lock():
+        if envelope_loader is not None:
+            envelope = envelope_loader()
+        return _destination_test(state, envelope)
+
+
+def _destination_test(state, envelope):
     if envelope["settings"]["destination"] == "local":
         from .engine import destination
         directory = destination(state, envelope)
@@ -509,6 +625,8 @@ def destination_test(state, envelope):
         finally:
             probe.unlink(missing_ok=True)
         return {"destination": "local", "destination_id": destination_id(state, envelope), "verified": True}
+    if encryption.enabled(envelope):
+        return remote_artifacts.destination_test(state, envelope)
     s3 = client(envelope)
     bucket = envelope["settings"]["s3_bucket"]
     key = prefix(state, envelope) + "probes/" + uuid.uuid4().hex
@@ -527,14 +645,25 @@ def destination_test(state, envelope):
             failure = "destination-probe-cleanup-failed"
     if failure:
         raise BackupError(failure)
-    return {"destination": "s3", "destination_id": destination_id(state, envelope), "verified": True}
+    return {"destination": "s3", "destination_id": destination_id(state, envelope), "verified": True, "format": remote_artifacts.PLAINTEXT}
 
 
-def latest_remote_run(state, envelope, complete):
+def pointer_bytes(state, item):
+    remote = item["remote"]
+    value = {"installation_uuid": state.uuid, "run_id": item["run_id"], "manifest_key": remote["manifest_key"]}
+    if remote_artifacts.format_of(remote) == encryption.FORMAT:
+        value.update(format=encryption.FORMAT, descriptor_sha256=remote["descriptor_digest"]["sha256"])
+        return remote_artifacts.encode(value)
+    return json.dumps(value).encode()
+
+
+def latest_remote_run(state, envelope, complete, mode=None):
     """Newest run delivered under the configured bucket and installation prefix."""
     if envelope["settings"]["destination"] != "s3":
         return None
     current_prefix = prefix(state, envelope)
+    if mode is not None:
+        complete = [item for item in complete if item.get("mode") == mode]
     return next((item["run_id"] for item in complete if item.get("remote_delivered")
                  and scope_matches(state, envelope, item)
                  and (item.get("remote_observation") or {}).get("status") not in ("missing", "damaged")), None)
@@ -543,6 +672,8 @@ def latest_remote_run(state, envelope, complete):
 def remove_remote(state, s3, bucket, base, item, manifest, intent_key, failure, preverified=False):
     """Verify owned remote objects match the manifest or are gone, then delete them."""
     remote = item.get("remote") or item["delivery_intent"]
+    if remote_artifacts.format_of(remote) == encryption.FORMAT:
+        return remote_artifacts.remove(state, s3, bucket, base, item, intent_key, failure, preverified)
     expected = {"bucket": bucket, "archive_key": base + item["run_id"] + ".tar.gz", "manifest_key": base + item["run_id"] + ".manifest.json"}
     if any(remote.get(key) != value for key, value in expected.items()):
         raise BackupError(failure + "-ownership-mismatch")
@@ -630,7 +761,20 @@ def available_runs(state):
                   key=lambda item: item["created_at"], reverse=True)
 
 
-def local_survivor(state, items, excluded, checked=None):
+def recorded_mode(state, item):
+    """Only agreement with the owned manifest can establish a retention kind."""
+    mode = item.get('mode')
+    if mode not in ('full-quiesced', 'database-online'):
+        return None
+    try:
+        return mode if owned_manifest(state, item).get('mode') == mode else None
+    except BackupError:
+        return None
+
+
+def local_survivor(state, items, excluded, checked=None, mode=None):
+    if mode is not None:
+        items = [item for item in items if recorded_mode(state, item) == mode]
     checked = {} if checked is None else checked
     for item in items:
         if item["run_id"] in excluded or not item.get("local_complete") or artifacts.deleting(item) or item.get("local_delete_intent"):
@@ -652,7 +796,9 @@ def local_survivor(state, items, excluded, checked=None):
     raise BackupError("delete-no-verified-local-survivor")
 
 
-def remote_survivor(state, envelope, items, excluded, checked=None):
+def remote_survivor(state, envelope, items, excluded, checked=None, mode=None):
+    if mode is not None:
+        items = [item for item in items if recorded_mode(state, item) == mode]
     checked = {} if checked is None else checked
     for item in items:
         if item["run_id"] in excluded or not item.get("remote_delivered") or artifacts.deleting(item) or item.get("remote_delete_intent"):
@@ -692,6 +838,16 @@ def remove_copy(state, envelope, item, location, reason, request_id=None, remote
     if location == "s3":
         if not scope_matches(state, envelope, item):
             raise BackupError(reason + "-remote-scope-changed")
+        if remote_artifacts.format_of(item.get("remote") or item.get("delivery_intent") or {}) == encryption.FORMAT and not intent.get("remote_verified"):
+            if not remote_checked:
+                if item.get("delivery_intent") and not item.get("remote_delivered"):
+                    remote_artifacts.check_pending_source(state, envelope, item, manifest)
+                else:
+                    with checked_remote(state, envelope, item, record=True):
+                        pass
+            intent["remote_verified"] = True
+            intent["verification_level"] = "restore"
+            state.save(item)
         remove_remote(state, client(envelope), envelope["settings"]["s3_bucket"], prefix(state, envelope), item, manifest, key, reason, preverified=remote_checked)
         item.update({"remote_delivered": False, "remote_pruned": {"at": time.time(), "reason": reason}})
         item["remote_observation"] = {"status": "none", "checked_at": time.time()}
@@ -707,11 +863,12 @@ def remove_copy(state, envelope, item, location, reason, request_id=None, remote
     finish_copy_state(state, item)
 
 
-def retention(state, envelope, execute=False, locked=False, local_only=False):
+def _retention(state, envelope, execute=False, locked=False, local_only=False, mode=None):
     with contextlib.nullcontext() if locked else state.lock(create=execute):
         settings = envelope["settings"]
         keep = settings["retention_keep"]
-        items = [item for item in available_runs(state) if not artifacts.deleting(item)]
+        items = [item for item in available_runs(state) if not artifacts.deleting(item) and not item.get("staging_removal_intent")
+                 and (mode is None or recorded_mode(state, item) == mode)]
         skipped = []
         checked = {}
         checked_local = {}
@@ -746,6 +903,8 @@ def retention(state, envelope, execute=False, locked=False, local_only=False):
                              and item is not remote[0] and scope_matches(state, envelope, item)] if remote else []
         if local_only:
             remote_candidates = []
+        if settings.get("settings_version", 1) == 2 and not settings["keep_local"]:
+            local_candidates = []
         result = {"keep": [item["run_id"] for item in local[:keep]],
                   "local_delete": [item["run_id"] for item in local_candidates],
                   "remote_delete": [item["run_id"] for item in remote_candidates],
@@ -758,7 +917,7 @@ def retention(state, envelope, execute=False, locked=False, local_only=False):
         if local_candidates:
             for _ in range(keep):
                 try:
-                    protected_local.add(local_survivor(state, available_runs(state), protected_local, checked_local))
+                    protected_local.add(local_survivor(state, available_runs(state), protected_local, checked_local, mode))
                 except BackupError:
                     break
         # Presence observations repair lifecycle-stale discovery. Full archive
@@ -769,11 +928,12 @@ def retention(state, envelope, execute=False, locked=False, local_only=False):
             s3 = client(envelope)
             pointer = prefix(state, envelope) + "lastmanifest.json"
             try:
-                if good_remote:
-                    value = json.dumps({"installation_uuid": state.uuid, "run_id": good_remote["run_id"], "manifest_key": good_remote["remote"]["manifest_key"]}).encode()
+                overall = next((run for run in available_runs(state) if run.get("remote_delivered") and scope_matches(state, envelope, run) and not artifacts.deleting(run) and (run.get("remote_observation") or {}).get("status") in ("delivered", "present")), None)
+                if overall:
+                    value = pointer_bytes(state, overall)
                     s3.put_object(Bucket=settings["s3_bucket"], Key=pointer, Body=value, ContentLength=len(value))
                 elif not any(item.get("remote_delivered") and scope_matches(state, envelope, item)
-                             and (item.get("remote_observation") or {}).get("status") == "unknown" for item in items):
+                             and (item.get("remote_observation") or {}).get("status") == "unknown" for item in available_runs(state)):
                     s3.delete_object(Bucket=settings["s3_bucket"], Key=pointer)
             except Exception:
                 skipped.append({"run_id": None, "location": "s3", "code": "retention-pointer-update-failed"})
@@ -786,7 +946,7 @@ def retention(state, envelope, execute=False, locked=False, local_only=False):
                 if good_remote and item["run_id"] == good_remote["run_id"]:
                     result["protected"].append({"run_id": item["run_id"], "location": "s3", "code": "retention-last-good-s3-copy"})
                     continue
-                remote_survivor(state, envelope, available_runs(state), {item["run_id"]}, checked)
+                remote_survivor(state, envelope, available_runs(state), {item["run_id"]}, checked, mode)
                 if not item.get("remote_delete_intent"):
                     check_remote_once(state, envelope, item, checked)
                 remove_copy(state, envelope, item, "s3", "retention", remote_checked=item["run_id"] in checked and checked[item["run_id"]] is None)
@@ -805,7 +965,7 @@ def retention(state, envelope, execute=False, locked=False, local_only=False):
                     result["protected"].append({"run_id": item["run_id"], "location": "local", "code": "retention-last-good-local-copy"})
                 continue
             try:
-                local_survivor(state, available_runs(state), {item["run_id"]}, checked_local)
+                local_survivor(state, available_runs(state), {item["run_id"]}, checked_local, mode)
                 # Removing only the local copy of an S3 backup requires current
                 # full remote verification; expired pairs can be removed together.
                 if settings["destination"] == "s3" and item.get("remote_delivered"):
@@ -823,13 +983,57 @@ def retention(state, envelope, execute=False, locked=False, local_only=False):
                          and not item.get("remote_delete_intent") and (item.get("remote_observation") or {}).get("status") in ("delivered", "present")]
             try:
                 if refreshed:
-                    value = json.dumps({"installation_uuid": state.uuid, "run_id": refreshed[0]["run_id"], "manifest_key": refreshed[0]["remote"]["manifest_key"]}).encode()
+                    value = pointer_bytes(state, refreshed[0])
                     s3.put_object(Bucket=settings["s3_bucket"], Key=pointer, Body=value, ContentLength=len(value))
             except Exception:
                 skipped.append({"run_id": None, "location": "s3", "code": "retention-pointer-update-failed"})
         atomic_json(state.root / "retention.json", {"at": time.time(), "skipped_count": len(skipped),
                                                   "local_removed": len(result["removed"]["local"]),
                                                   "s3_removed": len(result["removed"]["s3"])})
+        return result
+
+
+def retention(state, envelope, execute=False, locked=False, local_only=False):
+    if envelope['settings'].get('settings_version', 1) == 1:
+        return _retention(state, envelope, execute, locked, local_only)
+    with contextlib.nullcontext() if locked else state.lock(create=execute):
+        results = {}
+        staging = []
+        skipped = []
+        if not envelope['settings']['keep_local'] and envelope['settings']['upload_s3']:
+            for item in available_runs(state):
+                if not item.get('local_complete') or not item.get('remote_delivered') or item.get('local_download_until', 0) > time.time():
+                    continue
+                if recorded_mode(state, item) is None:
+                    continue
+                if execute:
+                    try:
+                        if staging_removal(state, envelope, item):
+                            staging.append(item['run_id'])
+                    except BackupError as error:
+                        skipped.append({'run_id': item['run_id'], 'location': 'local', 'code': error.code})
+                elif scope_matches(state, envelope, item) and not artifacts.deleting(item):
+                    staging.append(item['run_id'])
+        for kind, mode in (('full', 'full-quiesced'), ('database', 'database-online')):
+            settings = dict(envelope['settings'], retention_keep=envelope['settings']['retention_keep_' + kind])
+            for suffix in ('policy', 'keep', 'days'):
+                settings['s3_retention_' + suffix] = settings['s3_retention_' + suffix + '_' + kind]
+            results[kind] = _retention(state, dict(envelope, settings=settings), execute, True, local_only, mode)
+        result = {key: list(dict.fromkeys(value for part in results.values() for value in part[key]))
+                  for key in ('keep', 'local_delete', 'remote_delete', 'delete')}
+        result['local_delete'] = list(dict.fromkeys(staging + result['local_delete']))
+        result['delete'] = list(dict.fromkeys(staging + result['delete']))
+        result.update(by_kind=results, staging_removal=staging,
+                      skipped=skipped + [item for part in results.values() for item in part['skipped']],
+                      protected=[item for part in results.values() for item in part['protected']],
+                      removed={location: list(dict.fromkeys((staging if execute and location == 'local' else []) + [run for part in results.values() for run in part['removed'][location]])) for location in ('local', 's3')},
+                      execute_required=not execute)
+        for item in available_runs(state):
+            if recorded_mode(state, item) is None:
+                result['skipped'].append({'run_id': item['run_id'], 'location': None, 'code': 'retention-mode-unknown'})
+        if execute:
+            atomic_json(state.root / 'retention.json', {'at': time.time(), 'skipped_count': len(result['skipped']),
+                        'local_removed': len(result['removed']['local']), 's3_removed': len(result['removed']['s3'])})
         return result
 
 
@@ -842,6 +1046,10 @@ def delete_plan(state, envelope, run_id, request_id=None, location="all"):
         raise BackupError("delete-location-invalid")
     item = artifacts.journal(state, run_id)
     items = available_runs(state)
+    if envelope["settings"].get("settings_version", 1) == 2:
+        if recorded_mode(state, item) is None:
+            return {"run_id": run_id, "refusal": "delete-mode-unknown", "execute_required": True}
+        items = [other for other in items if recorded_mode(state, other) == item["mode"]]
     target_local = location in ("local", "all") and bool(item.get("local_complete") or item.get("local_delete_intent"))
     target_remote = location in ("s3", "all") and bool(item.get("remote_delivered") or item.get("remote_delete_intent") or item.get("delivery_intent"))
     refusal = "artifact-deleted" if item.get("retained_deleted") else None
@@ -880,13 +1088,14 @@ def delete_run(state, envelope, run_id, request_id=None, location="all"):
         if preview["refusal"]:
             raise BackupError(preview["refusal"])
         survivor = None
+        mode = item.get("mode") if envelope["settings"].get("settings_version", 1) == 2 else None
         if preview["local_copy"]:
             try:
-                survivor = local_survivor(state, available_runs(state), {run_id})
+                survivor = local_survivor(state, available_runs(state), {run_id}, mode=mode)
             except BackupError:
                 raise BackupError("delete-no-verified-survivor") from None
         if preview["remote_copy"]:
-            remote_survivor(state, envelope, available_runs(state), {run_id})
+            remote_survivor(state, envelope, available_runs(state), {run_id}, mode=mode)
         manifest = owned_manifest(state, item)
         if not artifacts.deleting(item):
             item["delete_intent"] = {"at": time.time(), "manifest": manifest, "location": location, "request_id": request_id, "survivor": survivor}

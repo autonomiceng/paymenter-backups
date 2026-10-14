@@ -5,6 +5,7 @@ and configured nonsecret settings. It never includes artifact paths,
 manifests, database grants, process identities, request results, stderr or
 credential material.
 """
+import datetime
 import pathlib
 import re
 import time
@@ -66,6 +67,18 @@ def run_entry(state, item, active_runs, envelope=None):
              "verified_at": None, "verification_source": None,
              "verification_error": code((item.get("verification_error") or {}).get("code")),
              "deleted_at": None, "deletion_reason": None, "request_id": identifier(item.get("request_id"))}
+    remote = item.get("remote") or item.get("delivery_intent") or {}
+    from . import remote_artifacts
+    try:
+        entry["remote_format"] = remote_artifacts.format_of(remote) if remote else None
+    except BackupError:
+        entry["remote_format"] = None
+    fingerprint = remote.get("key_fingerprint")
+    entry["key_short"] = fingerprint[:16] if isinstance(fingerprint, str) and re.fullmatch("[0-9a-f]{64}", fingerprint) else None
+    entry["ciphertext_size"] = number((remote.get("archive_ciphertext") or {}).get("size"))
+    entry["remote_verification_level"] = code((item.get("remote_verification") or {}).get("level"))
+    entry['staging_removal_error'] = code(item.get('staging_removal_error'))
+    entry['staging_removal_pending'] = bool(item.get('staging_removal_intent'))
     entry["local_download_until"] = number(item.get("local_download_until"))
     entry["retention_error"] = code((item.get("retention_error") or {}).get("code"))
     entry["remote_checked_at"] = number((item.get("remote_observation") or {}).get("checked_at"))
@@ -106,10 +119,10 @@ def run_entry(state, item, active_runs, envelope=None):
     return entry
 
 
-def request_entry(item):
+def request_entry(item, state=None, envelope=None, destination_binding=None):
     arguments = item.get("arguments") if isinstance(item.get("arguments"), dict) else {}
     result = item.get("result") if isinstance(item.get("result"), dict) else {}
-    return {"request_id": identifier(item.get("request_id")), "action": code(item.get("action")),
+    entry = {"request_id": identifier(item.get("request_id")), "action": code(item.get("action")),
             "status": code(item.get("status")), "created_at": number(item.get("created_at")),
             "finished_at": number(item.get("finished_at") or item.get("updated_at")),
             "attempts": number(item.get("attempts")), "error": code(item.get("error")),
@@ -119,7 +132,53 @@ def request_entry(item):
             "location": code(arguments.get("location")),
             "result_destination_id": identifier(result.get("destination_id")),
             "skipped_count": len(result["skipped"]) if isinstance(result.get("skipped"), list) else None,
-            "result_run_id": identifier(result.get("run_id"))}
+            "result_run_id": identifier(result.get("run_id")),
+            "schedule_kind": item.get("schedule_kind") if item.get("schedule_kind") in ("full", "database") else None,
+            "covered_by": identifier(item.get("covered_by"))}
+    if item.get("action") == "destination-test":
+        entry["result_verified"] = destination_test_current(state, envelope, item, result, destination_binding)
+    return entry
+
+
+def destination_test_binding(state, envelope):
+    """Build one safe current binding; reuse expensive key validation in overview."""
+    if state is None or envelope is None:
+        return {}
+    from . import encryption, remote_artifacts
+    from .storage import destination_id
+    try:
+        binding = {"destination": envelope["settings"]["destination"],
+                   "destination_id": destination_id(state, envelope), "key_status": None}
+        if binding["destination"] == "s3":
+            binding["format"] = encryption.FORMAT if encryption.enabled(envelope) else remote_artifacts.PLAINTEXT
+            if binding["format"] == encryption.FORMAT:
+                try:
+                    record = encryption.key(envelope, active=True)
+                    binding["key_fingerprint"] = record["fingerprint"]["value"]
+                    binding["key_status"] = {"code": None}
+                except BackupError as error:
+                    binding["key_status"] = {"code": error.code}
+        return binding
+    except (BackupError, KeyError, TypeError, ValueError):
+        return {}
+
+
+def destination_test_current(state, envelope, item, result, destination_binding=None):
+    """A test badge proves only its current provider/format/acknowledged key."""
+    if item.get("status") != "complete" or result.get("verified") is not True:
+        return False
+    from . import encryption, remote_artifacts
+    binding = destination_binding if destination_binding is not None else destination_test_binding(state, envelope)
+    if (not binding or result.get("destination") != binding["destination"]
+            or result.get("destination_id") != binding["destination_id"]):
+        return False
+    if binding["destination"] == "local":
+        return True
+    if result.get("format", remote_artifacts.PLAINTEXT) != binding["format"]:
+        return False
+    if binding["format"] == encryption.FORMAT:
+        return bool(binding.get("key_fingerprint") and result.get("key_fingerprint") == binding["key_fingerprint"])
+    return "key_fingerprint" not in result
 
 
 def origin(url):
@@ -131,11 +190,12 @@ def origin(url):
     return None
 
 
-def configuration(state, envelope, error=None):
+def configuration(state, envelope, error=None, encryption_key_status=None):
     if envelope is None:
         return {"available": False, "valid": False, "error": code(error) or "unknown"}
     settings = envelope["settings"]
-    local_path = settings.get("local_path") or str(state.default_destination())
+    v2 = settings.get("settings_version", 1) == 2
+    local_path = settings.get("local_path") or str(state.root / "backups" if v2 else state.default_destination())
     result = {"available": True, "valid": error is None, "error": code(error),
               "extension_enabled": bool(settings.get("extension_enabled", True)),
               "mode": code(settings["mode"]),
@@ -158,6 +218,29 @@ def configuration(state, envelope, error=None):
               "app_origin": origin((envelope.get("framework") or {}).get("app_url")),
               "billing": {"time": (envelope.get("billing") or {}).get("daily_time"), "timezone": (envelope.get("billing") or {}).get("timezone")},
               "admission": {}}
+    from . import encryption
+    namespace = envelope.get("archive_encryption_credentials") or {}
+    records = namespace.get("keys") or {}
+    active = records.get(namespace.get("active_fingerprint")) or {}
+    pending = records.get(namespace.get("pending_fingerprint")) or {}
+    selected = active or pending
+    active_fp = (active.get("fingerprint") or {}).get("value")
+    pending_fp = (pending.get("fingerprint") or {}).get("value")
+    def short(value):
+        return value[:16] if isinstance(value, str) and re.fullmatch("[0-9a-f]{64}", value) else None
+    try:
+        binary, _ = encryption.tool(envelope)
+        tool_status = {"ok": True, "path": binary, "code": None}
+    except BackupError as failure:
+        tool_status = {"ok": False, "path": None, "code": failure.code}
+    result["encryption"] = {"enabled": encryption.enabled(envelope), "tool": tool_status,
+        "key": {"state": "active" if active else "pending" if pending else "none", "short": short(active_fp or pending_fp),
+                "source": selected.get("source") if selected.get("source") in ("generated", "passphrase") else None,
+                "acknowledged": bool(active_fp and (active.get("acknowledgement") or {}).get("fingerprint") == active_fp),
+                "created_at": number(selected.get("created_at")), "pending_short": short(pending_fp),
+                # Nonsecret PBKDF2 identity (also in remote descriptors); the page acknowledges it.
+                "pending_fingerprint": pending_fp if isinstance(pending_fp, str) and re.fullmatch("[0-9a-f]{64}", pending_fp) else None},
+        "readiness_code": encryption.readiness(envelope, key_status=encryption_key_status)}
     app_url = (envelope.get("framework") or {}).get("app_url", "")
     current_origin = origin(app_url)
     probe_credentials = envelope.get("maintenance_probe_credentials") or {}
@@ -165,23 +248,73 @@ def configuration(state, envelope, error=None):
     state_code = "unavailable" if current_origin is None else "http" if current_origin.startswith("http://") else "not-saved" if not probe_credentials else "saved" if saved_origin == current_origin else "origin-changed"
     result["site_password"] = {"state": state_code, "origin": current_origin, "saved_origin": saved_origin,
                                "probe_base": current_origin + urllib.parse.urlsplit(app_url).path if current_origin else None}
-    if error is None:
-        if settings["enabled"]:
-            try:
-                result["schedule"]["next_at"] = next_slot(settings)
-            except (KeyError, ValueError):
-                pass
-        for mode in ("full-quiesced", "database-online"):
-            proposed = dict(envelope, settings=dict(settings, mode=mode))
-            try:
-                result["admission"][mode] = [code(item) for item in plan(state, proposed)["admission_errors"]]
-            except BackupError as failure:
-                result["admission"][mode] = [code(failure.code)]
+    from .discovery import cached, suggestions
+    from .readiness import state_for, stores
+    from .tools import checks
+    result['settings_version'] = settings.get('settings_version', 1)
+    result['schedules'] = {'timezone': settings['schedule_timezone']}
+    for kind in ('full', 'database'):
+        result['schedules'][kind] = {'frequency': settings[kind + '_schedule'], 'time': settings[kind + '_time'],
+                                    'weekdays': list(settings[kind + '_weekdays']), 'next_at': None}
+        if kind == 'database':
+            result['schedules'][kind].update(every_hours=settings['database_every_hours'], minute=settings['database_minute'])
+        try:
+            # Adapted v1 fields are for display; singleton next-slot semantics stay.
+            selected = 'full' if settings['mode'] == 'full-quiesced' else 'database'
+            if v2:
+                result['schedules'][kind]['next_at'] = next_slot(settings, kind=kind)
+            elif kind == selected and settings['enabled']:
+                result['schedules'][kind]['next_at'] = next_slot(settings)
+        except (KeyError, ValueError):
+            pass
+    result['storage'] = {'keep_local': bool(settings['keep_local']), 'upload_s3': bool(settings['upload_s3']),
+                         'local_path': local_path, 'default_local_path': str(state.root / 'backups'),
+                         'legacy_default_path': str(state.default_destination()) if state.default_destination() != state.root / 'backups' else None,
+                         **{key: result['destination'][key] for key in ('s3_bucket', 's3_region', 's3_endpoint', 's3_prefix', 's3_path_style')}}
+    if v2:
+        result['retention'] = {'automatic': bool(settings['automatic_retention'])}
+    for kind in ('full', 'database'):
+        result['retention'][kind] = {'local_keep': settings['retention_keep_' + kind],
+                                    **{'s3_' + suffix: settings['s3_retention_' + suffix + '_' + kind] for suffix in ('policy', 'keep', 'days')}}
+    jobs = cached(state)
+    try:
+        import os, pwd
+        user = pwd.getpwuid(os.getuid()).pw_name
+    except KeyError:
+        user = str(os.getuid())
+    result['checks'] = {'jobs': {key: jobs.get(key) for key in ('checked_at', 'state', 'error', 'items')} |
+                       {'suggestions': suggestions(state, envelope), 'crontab_user': user},
+                       'stores': stores(envelope), 'tools': envelope.get('tool_checks') or checks(envelope),
+                       'billing': billing_window(settings, envelope.get('billing', {}))}
+    # Use the encryption module's delivery probe for the shared tool diagnostics.
+    result['checks']['tools']['gpg'] = {
+        'configured': settings.get('gpg', ''),
+        'resolved': tool_status['path'], 'ok': tool_status['ok'], 'code': tool_status['code']}
+    result['readiness'] = {}
+    if settings['enabled'] and error is None and not v2:
+        result['schedule']['next_at'] = next_slot(settings)
+    for mode in ('full-quiesced', 'database-online'):
+        proposed = dict(envelope, settings=dict(settings, mode=mode))
+        try:
+            proposed_plan = plan(state, proposed, jobs, encryption_key_status={'code': result['encryption']['readiness_code']})
+            items = proposed_plan['readiness_items']
+            admission = proposed_plan['admission_errors']
+        except BackupError as failure:
+            items = [{'code': code(failure.code), 'field': failure.field, 'detail': failure.detail}]
+            admission = [code(failure.code)]
+        if error:
+            validation = envelope.get('validation_error', {})
+            items.insert(0, {'code': code(error), 'field': validation.get('field'), 'detail': validation.get('detail', {})})
+            admission = [code(error), *admission]
+        result['admission'][mode] = list(dict.fromkeys(admission))
+        result['readiness'][mode] = {'state': state_for(items), 'items': items}
     if state.root.exists():
         used = storage_usage(state, settings)
         result["space"]["used"] = used
         result["space"]["state"] = "full" if used >= settings["local_byte_budget"] else "ok"
-    result["retention"]["pending"] = {"local": None, "s3": None}
+    result["retention"]["pending"] = {kind: {"local": None, "s3": None} for kind in ("full", "database")}
+    if not v2:
+        result["retention"]["pending"].update(local=None, s3=None)
     result["retention"]["last_apply"] = None
     try:
         private_file(state.root / "retention.json")
@@ -194,10 +327,34 @@ def configuration(state, envelope, error=None):
         result["destination"]["id"] = destination_id(state, envelope)
         try:
             preview = retention(state, envelope)
-            result["retention"]["pending"] = {"local": len(preview["local_delete"]), "s3": len(preview["remote_delete"])}
+            if v2:
+                result['retention']['pending'] = {kind: {'local': len(part['local_delete']), 's3': len(part['remote_delete'])} for kind, part in preview['by_kind'].items()}
+                journal_kinds = {item['run_id']: 'full' if item.get('mode') == 'full-quiesced' else 'database' for item in state.journals()}
+                for run_id in preview.get('staging_removal', []):
+                    kind = journal_kinds[run_id]
+                    if run_id not in preview['by_kind'][kind]['local_delete']:
+                        result['retention']['pending'][kind]['local'] += 1
+            else:
+                modes = {item['run_id']: item.get('mode') for item in state.journals()}
+                result['retention']['pending'] = {kind: {location: sum(modes.get(run_id) == mode for run_id in preview[key]) for location, key in (('local', 'local_delete'), ('s3', 'remote_delete'))} for kind, mode in (('full', 'full-quiesced'), ('database', 'database-online'))}
+                result['retention']['pending'].update(local=len(preview['local_delete']), s3=len(preview['remote_delete']))
         except BackupError:
             pass
     return result
+
+
+def billing_window(settings, billing):
+    value = {'time': billing.get('daily_time'), 'timezone': billing.get('timezone'),
+             'window_before': None, 'window_after': None}
+    try:
+        daily = datetime.datetime.strptime(value['time'], '%H:%M')
+        before = settings['lock_timeout'] + settings['drain_seconds'] + settings['capture_timeout'] + 30 + settings['billing_margin_seconds']
+        after = 60 + settings['billing_margin_seconds']
+        value['window_before'] = (daily - datetime.timedelta(seconds=before)).strftime('%H:%M')
+        value['window_after'] = (daily + datetime.timedelta(seconds=after)).strftime('%H:%M')
+    except (TypeError, ValueError, OverflowError):
+        pass
+    return value
 
 
 def scheduler(state):
@@ -214,18 +371,23 @@ def overview(state, envelope=None, error=None):
     requests = list_requests(state) if state.initialized else []
     active_runs = {(item.get("action"), (item.get("arguments") or {}).get("run_id")) for item in requests if item.get("status") in ACTIVE}
     runs = sorted((run_entry(state, item, active_runs, envelope) for item in journals), key=lambda item: item["created_at"] or 0, reverse=True)
-    ordered = sorted((request_entry(item) for item in requests), key=lambda item: item["created_at"] or 0, reverse=True)
+    destination_binding = destination_test_binding(state, envelope) if any(item.get("action") == "destination-test" for item in requests) else {}
+    ordered = sorted((request_entry(item, state, envelope, destination_binding) for item in requests), key=lambda item: item["created_at"] or 0, reverse=True)
     active = [item for item in ordered if item["status"] in ACTIVE]
     recent = [item for item in ordered if item["status"] not in ACTIVE][:REQUEST_HISTORY]
     pending_s3 = [item for item in journals if item.get("local_complete") and not item.get("remote_delivered") and not item.get("remote_pruned") and not item.get("retained_deleted")]
     verified_remote = {item["run_id"] for item in journals if item.get("remote_verification")}
+    last_good = {"local": next((item["run_id"] for item in runs if item["local"] and item["download"] == "ready"), None),
+                 "s3": next((item["run_id"] for item in runs if item["remote"] in ("delivered", "present") and item["run_id"] in verified_remote), None)}
+    for kind, mode in (('full', 'full-quiesced'), ('database', 'database-online')):
+        last_good[kind] = next((item['run_id'] for item in runs if item['mode'] == mode and
+                              ((item['local'] and item['download'] == 'ready') or (item['remote'] in ('delivered', 'present') and item['run_id'] in verified_remote))), None)
+        last_good['s3_' + kind] = next((item['run_id'] for item in runs if item['mode'] == mode and item['remote'] in ('delivered', 'present') and item['run_id'] in verified_remote), None)
     return {"schema_version": 1, "generated_at": time.time(), "initialized": state.initialized,
             "installation_uuid": state.uuid, "maintenance": (state.app / "storage/framework/down").exists(),
             "scheduler": scheduler(state) if state.initialized else {"last_tick_at": None},
-            "configuration": configuration(state, envelope, error), "runs": runs,
-            "last_good": {"local": next((item["run_id"] for item in runs if item["local"] and item["download"] == "ready"), None),
-                          "s3": next((item["run_id"] for item in runs if item["remote"] in ("delivered", "present")
-                                      and item["run_id"] in verified_remote), None)},
+            "configuration": configuration(state, envelope, error, encryption_key_status=destination_binding.get("key_status")), "runs": runs,
+            "last_good": last_good,
             "s3_pending": {"count": len(pending_s3) if envelope and envelope["settings"]["destination"] == "s3" else 0,
                            "oldest_at": min((number(item.get("created_at")) or 0 for item in pending_s3), default=None) if envelope and envelope["settings"]["destination"] == "s3" else None},
             "requests": active + recent}
