@@ -1,0 +1,523 @@
+{
+  "schema_version": 1,
+  "vectors": [
+    {
+      "name": "absent-marker-defaults",
+      "legacy": {},
+      "expected": {
+        "full_schedule": "off",
+        "full_time": "02:00",
+        "full_weekdays": [
+          0
+        ],
+        "database_schedule": "off",
+        "database_every_hours": 1,
+        "database_minute": 0,
+        "database_time": "02:00",
+        "database_weekdays": [
+          0,
+          1,
+          2,
+          3,
+          4,
+          5,
+          6
+        ],
+        "keep_local": true,
+        "upload_s3": false,
+        "retention_keep_full": 7,
+        "retention_keep_database": 7,
+        "s3_retention_policy_full": "local-count",
+        "s3_retention_policy_database": "local-count",
+        "s3_retention_keep_full": 30,
+        "s3_retention_keep_database": 30,
+        "s3_retention_days_full": 90,
+        "s3_retention_days_database": 90,
+        "full_host_assumptions_acknowledged": false,
+        "s3_encryption": true,
+        "job_lock_paths": [],
+        "python": "",
+        "php": "",
+        "dump": "",
+        "mysql": "",
+        "tar": "",
+        "gzip": ""
+      }
+    },
+    {
+      "name": "enabled-full-weekly",
+      "legacy": {
+        "enabled": "1",
+        "mode": "full-quiesced",
+        "schedule_frequency": "weekly",
+        "schedule_time": "03:15",
+        "schedule_weekdays": "[0,3,6]"
+      },
+      "expected": {
+        "full_schedule": "weekly",
+        "full_time": "03:15",
+        "full_weekdays": [
+          0,
+          3,
+          6
+        ],
+        "database_schedule": "off",
+        "database_every_hours": 1,
+        "database_minute": 0,
+        "database_time": "02:00",
+        "database_weekdays": [
+          0,
+          1,
+          2,
+          3,
+          4,
+          5,
+          6
+        ],
+        "keep_local": true,
+        "upload_s3": false,
+        "retention_keep_full": 7,
+        "retention_keep_database": 7,
+        "s3_retention_policy_full": "local-count",
+        "s3_retention_policy_database": "local-count",
+        "s3_retention_keep_full": 30,
+        "s3_retention_keep_database": 30,
+        "s3_retention_days_full": 90,
+        "s3_retention_days_database": 90,
+        "full_host_assumptions_acknowledged": false,
+        "s3_encryption": true,
+        "job_lock_paths": [],
+        "python": "",
+        "php": "",
+        "dump": "",
+        "mysql": "",
+        "tar": "",
+        "gzip": ""
+      }
+    },
+    {
+      "name": "disabled-full-carries-fields",
+      "legacy": {
+        "enabled": false,
+        "schedule_time": "04:25",
+        "schedule_weekdays": [
+          2,
+          5
+        ]
+      },
+      "expected": {
+        "full_schedule": "off",
+        "full_time": "04:25",
+        "full_weekdays": [
+          2,
+          5
+        ],
+        "database_schedule": "off",
+        "database_every_hours": 1,
+        "database_minute": 0,
+        "database_time": "02:00",
+        "database_weekdays": [
+          0,
+          1,
+          2,
+          3,
+          4,
+          5,
+          6
+        ],
+        "keep_local": true,
+        "upload_s3": false,
+        "retention_keep_full": 7,
+        "retention_keep_database": 7,
+        "s3_retention_policy_full": "local-count",
+        "s3_retention_policy_database": "local-count",
+        "s3_retention_keep_full": 30,
+        "s3_retention_keep_database": 30,
+        "s3_retention_days_full": 90,
+        "s3_retention_days_database": 90,
+        "full_host_assumptions_acknowledged": false,
+        "s3_encryption": true,
+        "job_lock_paths": [],
+        "python": "",
+        "php": "",
+        "dump": "",
+        "mysql": "",
+        "tar": "",
+        "gzip": ""
+      }
+    },
+    {
+      "name": "enabled-database-daily",
+      "legacy": {
+        "enabled": true,
+        "mode": "database-online",
+        "schedule_time": "01:10"
+      },
+      "expected": {
+        "full_schedule": "off",
+        "full_time": "03:00",
+        "full_weekdays": [
+          6
+        ],
+        "database_schedule": "daily",
+        "database_every_hours": 1,
+        "database_minute": 0,
+        "database_time": "01:10",
+        "database_weekdays": [
+          0
+        ],
+        "keep_local": true,
+        "upload_s3": false,
+        "retention_keep_full": 7,
+        "retention_keep_database": 7,
+        "s3_retention_policy_full": "local-count",
+        "s3_retention_policy_database": "local-count",
+        "s3_retention_keep_full": 30,
+        "s3_retention_keep_database": 30,
+        "s3_retention_days_full": 90,
+        "s3_retention_days_database": 90,
+        "full_host_assumptions_acknowledged": false,
+        "s3_encryption": true,
+        "job_lock_paths": [],
+        "python": "",
+        "php": "",
+        "dump": "",
+        "mysql": "",
+        "tar": "",
+        "gzip": ""
+      }
+    },
+    {
+      "name": "disabled-database-weekly-s3-plaintext",
+      "legacy": {
+        "enabled": "0",
+        "mode": "database-online",
+        "schedule_frequency": "weekly",
+        "schedule_time": "23:59",
+        "schedule_weekdays": "[1,4]",
+        "destination": "s3",
+        "plaintext_offsite_acknowledged": "1",
+        "retention_keep": "13",
+        "s3_retention_policy": "age",
+        "s3_retention_keep": "42",
+        "s3_retention_days": "100"
+      },
+      "expected": {
+        "full_schedule": "off",
+        "full_time": "03:00",
+        "full_weekdays": [
+          6
+        ],
+        "database_schedule": "off",
+        "database_every_hours": 1,
+        "database_minute": 0,
+        "database_time": "23:59",
+        "database_weekdays": [
+          1,
+          4
+        ],
+        "keep_local": true,
+        "upload_s3": true,
+        "retention_keep_full": 13,
+        "retention_keep_database": 13,
+        "s3_retention_policy_full": "age",
+        "s3_retention_policy_database": "age",
+        "s3_retention_keep_full": 42,
+        "s3_retention_keep_database": 42,
+        "s3_retention_days_full": 100,
+        "s3_retention_days_database": 100,
+        "full_host_assumptions_acknowledged": false,
+        "s3_encryption": false,
+        "job_lock_paths": [],
+        "python": "",
+        "php": "",
+        "dump": "",
+        "mysql": "",
+        "tar": "",
+        "gzip": ""
+      }
+    },
+    {
+      "name": "s3-unacknowledged-proposal-encrypted",
+      "legacy": {
+        "destination": "s3"
+      },
+      "expected": {
+        "full_schedule": "off",
+        "full_time": "02:00",
+        "full_weekdays": [
+          0
+        ],
+        "database_schedule": "off",
+        "database_every_hours": 1,
+        "database_minute": 0,
+        "database_time": "02:00",
+        "database_weekdays": [
+          0,
+          1,
+          2,
+          3,
+          4,
+          5,
+          6
+        ],
+        "keep_local": true,
+        "upload_s3": true,
+        "retention_keep_full": 7,
+        "retention_keep_database": 7,
+        "s3_retention_policy_full": "local-count",
+        "s3_retention_policy_database": "local-count",
+        "s3_retention_keep_full": 30,
+        "s3_retention_keep_database": 30,
+        "s3_retention_days_full": 90,
+        "s3_retention_days_database": 90,
+        "full_host_assumptions_acknowledged": false,
+        "s3_encryption": true,
+        "job_lock_paths": [],
+        "python": "",
+        "php": "",
+        "dump": "",
+        "mysql": "",
+        "tar": "",
+        "gzip": ""
+      }
+    },
+    {
+      "name": "ack-and-00",
+      "legacy": {
+        "cooperative_writers_acknowledged": false,
+        "external_state_acknowledged": false
+      },
+      "expected": {
+        "full_schedule": "off",
+        "full_time": "02:00",
+        "full_weekdays": [
+          0
+        ],
+        "database_schedule": "off",
+        "database_every_hours": 1,
+        "database_minute": 0,
+        "database_time": "02:00",
+        "database_weekdays": [
+          0,
+          1,
+          2,
+          3,
+          4,
+          5,
+          6
+        ],
+        "keep_local": true,
+        "upload_s3": false,
+        "retention_keep_full": 7,
+        "retention_keep_database": 7,
+        "s3_retention_policy_full": "local-count",
+        "s3_retention_policy_database": "local-count",
+        "s3_retention_keep_full": 30,
+        "s3_retention_keep_database": 30,
+        "s3_retention_days_full": 90,
+        "s3_retention_days_database": 90,
+        "full_host_assumptions_acknowledged": false,
+        "s3_encryption": true,
+        "job_lock_paths": [],
+        "python": "",
+        "php": "",
+        "dump": "",
+        "mysql": "",
+        "tar": "",
+        "gzip": ""
+      }
+    },
+    {
+      "name": "ack-and-01",
+      "legacy": {
+        "cooperative_writers_acknowledged": false,
+        "external_state_acknowledged": true
+      },
+      "expected": {
+        "full_schedule": "off",
+        "full_time": "02:00",
+        "full_weekdays": [
+          0
+        ],
+        "database_schedule": "off",
+        "database_every_hours": 1,
+        "database_minute": 0,
+        "database_time": "02:00",
+        "database_weekdays": [
+          0,
+          1,
+          2,
+          3,
+          4,
+          5,
+          6
+        ],
+        "keep_local": true,
+        "upload_s3": false,
+        "retention_keep_full": 7,
+        "retention_keep_database": 7,
+        "s3_retention_policy_full": "local-count",
+        "s3_retention_policy_database": "local-count",
+        "s3_retention_keep_full": 30,
+        "s3_retention_keep_database": 30,
+        "s3_retention_days_full": 90,
+        "s3_retention_days_database": 90,
+        "full_host_assumptions_acknowledged": false,
+        "s3_encryption": true,
+        "job_lock_paths": [],
+        "python": "",
+        "php": "",
+        "dump": "",
+        "mysql": "",
+        "tar": "",
+        "gzip": ""
+      }
+    },
+    {
+      "name": "ack-and-10",
+      "legacy": {
+        "cooperative_writers_acknowledged": true,
+        "external_state_acknowledged": false
+      },
+      "expected": {
+        "full_schedule": "off",
+        "full_time": "02:00",
+        "full_weekdays": [
+          0
+        ],
+        "database_schedule": "off",
+        "database_every_hours": 1,
+        "database_minute": 0,
+        "database_time": "02:00",
+        "database_weekdays": [
+          0,
+          1,
+          2,
+          3,
+          4,
+          5,
+          6
+        ],
+        "keep_local": true,
+        "upload_s3": false,
+        "retention_keep_full": 7,
+        "retention_keep_database": 7,
+        "s3_retention_policy_full": "local-count",
+        "s3_retention_policy_database": "local-count",
+        "s3_retention_keep_full": 30,
+        "s3_retention_keep_database": 30,
+        "s3_retention_days_full": 90,
+        "s3_retention_days_database": 90,
+        "full_host_assumptions_acknowledged": false,
+        "s3_encryption": true,
+        "job_lock_paths": [],
+        "python": "",
+        "php": "",
+        "dump": "",
+        "mysql": "",
+        "tar": "",
+        "gzip": ""
+      }
+    },
+    {
+      "name": "ack-and-11",
+      "legacy": {
+        "cooperative_writers_acknowledged": true,
+        "external_state_acknowledged": true
+      },
+      "expected": {
+        "full_schedule": "off",
+        "full_time": "02:00",
+        "full_weekdays": [
+          0
+        ],
+        "database_schedule": "off",
+        "database_every_hours": 1,
+        "database_minute": 0,
+        "database_time": "02:00",
+        "database_weekdays": [
+          0,
+          1,
+          2,
+          3,
+          4,
+          5,
+          6
+        ],
+        "keep_local": true,
+        "upload_s3": false,
+        "retention_keep_full": 7,
+        "retention_keep_database": 7,
+        "s3_retention_policy_full": "local-count",
+        "s3_retention_policy_database": "local-count",
+        "s3_retention_keep_full": 30,
+        "s3_retention_keep_database": 30,
+        "s3_retention_days_full": 90,
+        "s3_retention_days_database": 90,
+        "full_host_assumptions_acknowledged": true,
+        "s3_encryption": true,
+        "job_lock_paths": [],
+        "python": "",
+        "php": "",
+        "dump": "",
+        "mysql": "",
+        "tar": "",
+        "gzip": ""
+      }
+    },
+    {
+      "name": "pins-preserved",
+      "legacy": {
+        "job_lock_paths": "[\"/srv/private/jobs.lock\"]",
+        "python": "/usr/bin/python3",
+        "php": "/opt/plesk/php/8.3/bin/php",
+        "dump": "/usr/bin/mysqldump",
+        "mysql": "/usr/bin/mysql",
+        "tar": "/usr/bin/tar",
+        "gzip": "/usr/bin/gzip"
+      },
+      "expected": {
+        "full_schedule": "off",
+        "full_time": "02:00",
+        "full_weekdays": [
+          0
+        ],
+        "database_schedule": "off",
+        "database_every_hours": 1,
+        "database_minute": 0,
+        "database_time": "02:00",
+        "database_weekdays": [
+          0,
+          1,
+          2,
+          3,
+          4,
+          5,
+          6
+        ],
+        "keep_local": true,
+        "upload_s3": false,
+        "retention_keep_full": 7,
+        "retention_keep_database": 7,
+        "s3_retention_policy_full": "local-count",
+        "s3_retention_policy_database": "local-count",
+        "s3_retention_keep_full": 30,
+        "s3_retention_keep_database": 30,
+        "s3_retention_days_full": 90,
+        "s3_retention_days_database": 90,
+        "full_host_assumptions_acknowledged": false,
+        "s3_encryption": true,
+        "job_lock_paths": [
+          "/srv/private/jobs.lock"
+        ],
+        "python": "/usr/bin/python3",
+        "php": "/opt/plesk/php/8.3/bin/php",
+        "dump": "/usr/bin/mysqldump",
+        "mysql": "/usr/bin/mysql",
+        "tar": "/usr/bin/tar",
+        "gzip": "/usr/bin/gzip"
+      }
+    }
+  ]
+}
