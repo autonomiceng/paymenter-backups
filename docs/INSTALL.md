@@ -42,8 +42,8 @@ is required. No path in this guide is deployment specific.
 
 After enabling the extension, open **System > Backups**. The Backups tab lists
 what is still needed; the Settings tab edits everything in one form. Set the
-private directory and program paths under Advanced before the first save if the
-defaults do not fit the host. The first save creates the private directory and
+private directory in First-time setup and program paths under Advanced before
+the first save if the defaults do not fit the host. The first save creates the private directory and
 installation ID. Afterwards the private directory can only be moved from the
 terminal. The page checks each save with the engine before writing, including
 schedule and billing overlap, S3 endpoint and backup directory location.
@@ -51,29 +51,34 @@ schedule and billing overlap, S3 endpoint and backup directory location.
 Non-secret settings are native extension fields, so the native Extensions
 editor also works as a fallback with the same field rules. There, weekdays and
 path lists are JSON (Monday 0 through Sunday 6); cross-field checks run after
-saving and record an advisory result. Defaults are automatic backups off,
-full backups, local storage, 02:00 UTC, a 10 GiB private byte budget and seven
-retained verified copies. Automatic retention applies after successful
-publication and preserves undelivered/unresolved copies. Enabling the
-extension does not itself enable automatic backups. Settings saves never touch
-the credential file.
+saving and record an advisory result. Fresh records write settings_version=2;
+records with existing rows receive marker 1 and retain 0.3 behavior until the
+Backups page explicitly saves every v2 field. Both new schedules default off,
+local storage on, full local count 7 and database local count 24, with a 10 GiB
+budget and 1 GiB reserve. Suggested operating cadence is database hourly/full
+weekly after readiness passes; enabling the extension alone starts neither.
+Settings-only validation/init never access the encrypted credential file. Secret
+submissions follow initialization, using one combined merge; failures after
+settings save are partial outcomes requiring secret re-entry.
 
-New installations store archives under `PRIVATE_ROOT/backups`. Existing
-installations keep their recorded paths and `artifacts` default. Local count
-and S3 retention are independent. S3 defaults to the previous local count;
-choosing count or age explicitly activates its own limit. S3 retrieval runs as
-a queued task before a local Download is offered. HTTP Basic credentials are
-optional advanced settings for web server password prompts, separate from
-Paymenter account login. Saved credential removal never changes host passwords
-or revokes provider keys.
+Empty v2 binary paths mean trusted detection (Python, matching hosting PHP,
+MariaDB/MySQL dump/client alternatives, GNU tar, gzip; GPG belongs to encryption
+setup). Nonempty legacy pins remain pinned. New v2 captures with blank
+local_path use PRIVATE_ROOT/backups, including old artifacts bindings. Recorded
+old backups and immutable identity stay unchanged and count toward the budget.
+Local/S3 choices are independent and at least one is required. S3-only still
+requires capture/staging/retrieval capacity; local staging is removed only after
+complete remote scope/manifest/checksum/archive proof. Retrieval is queued and
+protects the local Download copy for 24 hours.
 
-Full-quiesced requires explicit no-concurrent-DDL, cooperative-writer and
-external-state acknowledgements, existing owner-controlled scheduler/worker
-flock files, registered cron or systemd timer services using those files, bounded requests/work,
-file-backed native maintenance, a fresh observed billing guard and sufficient
-space. The runner checks these prerequisites and refuses an incomplete setup.
-Configure hosting-specific job coordination with the operator before enabling
-capture. It never kills provider work to achieve idle.
+Both modes require no concurrent updates/migrations/DDL. Full additionally
+requires the merged host assumptions confirmation, file maintenance, supported
+resolved stores inside the app/default database, and verified job coordination.
+The tick caches sanitized account-crontab/systemd diagnostics for the page;
+capture rediscovers. Empty v2 lock overrides derive the verified union. No
+scheduler, incomplete discovery, unparseable/unlocked/continuous jobs or unsafe
+locks refuse. Custom extensions and panel/Supervisor writers remain declared
+host assumptions. Full never kills provider work to achieve idle.
 
 ```sh
 python3 -I /path/to/app/extensions/Others/Backups/runtime/cli.py \
@@ -88,8 +93,9 @@ job invoking `schedule:run` each minute. Keep a working existing launcher and
 use exactly one scheduler launcher. Backups never installs, enables or edits
 those jobs. Follow [Paymenter's installation guide](https://paymenter.org/docs/installation/install)
 for the host setup. Full backups additionally require that scheduler and worker
-jobs use the configured cooperative locks. Save Backups settings before creating
-lock files inside its new extension data directory. The tick uses no Laravel cache mutex and runs
+jobs use the configured cooperative locks. Save Backups settings first: init
+creates scheduler.lock and queue.lock as 0600 regular files. Discovered locks
+elsewhere must already exist safely. The tick uses no Laravel cache mutex and runs
 in maintenance for recovery. It is the sole detached launcher; terminal capture
 is foreground. Administrator heavy actions only write durable requests.
 
@@ -110,7 +116,10 @@ Saving or clearing preserves S3 credentials. Full capture continues to require
 an exact native maintenance 503 response without cookies or redirects. An
 unauthenticated401, a normal page or an origin mismatch refuses full capture.
 
-S3 requires TLS and an explicit plaintext-offsite acknowledgement. Archives
+S3 requires TLS. V2 encryption defaults on; plaintext uploads require an
+explicit acknowledgement, freshly submitted when turning encryption off. The
+engine refuses encrypted delivery when encryption support is unavailable;
+legacy acknowledged plaintext uploads retain their format until v2 adoption. Archives
 contain `.env`, APP_KEY, database data and Passport keys, but never S3 credentials.
 Give dedicated credentials only the bucket/prefix list, get, put, delete and
 multipart permissions needed for this installation. The installation UUID scopes
@@ -137,3 +146,11 @@ Before rollback, keep a private copy of the encrypted file and avoid credential
 edits with that bridge. Install a version supporting every saved namespace before
 entering probe credentials again. Without authenticated maintenance probes,
 full mode can refuse with 401.
+
+
+Use exactly the scheduler/queue replacement lines in overview's
+configuration.checks.jobs.suggestions. They include a private flock and accepted
+>/dev/null 2>&1 tail. Replace the existing scheduler entry rather than adding a
+second one. Backups never writes crontab or systemd configuration. A continuous
+queue service must be replaced with bounded coordinated work before full mode;
+database-only mode does not depend on job locks or local store classification.
