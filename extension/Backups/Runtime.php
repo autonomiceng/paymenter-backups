@@ -197,12 +197,53 @@ PYTHON;
     }
 
     /** Merge requested namespaces under one private credential flock. Null keeps saved values. */
+    public static function saveConfiguration(array $settings, ?array $credentials = null): array
+    {
+        $input = ['settings' => $settings ?: new \stdClass];
+        if ($credentials !== null) {
+            $input['credentials'] = $credentials['s3'] ?? null;
+            $input['maintenance_probe_credentials'] = $credentials['site'] ?? null;
+        }
+        $actor = \Illuminate\Support\Facades\Auth::id();
+        if ($actor !== null) { $input['_actor'] = (int) $actor; }
+        $arguments = self::engine(['config', 'set']);
+        if (array_key_exists('private_root', $settings) && !is_file(self::privateRoot() . '/installation.json')) {
+            // A first save may choose its private location before any identity exists.
+            $index = array_search('--private-root', $arguments, true);
+            $arguments[$index + 1] = PrivateStore::root(realpath(base_path()), $settings['private_root'] ?: null,
+                false, $settings['extra_docroots'] ?? []);
+        }
+        $process = new Process($arguments, base_path(), self::safeEnvironment(), json_encode($input, JSON_THROW_ON_ERROR));
+        // Finite bridge/native/probe phases and rollback can outlive the ordinary
+        // status timeout. A killed writer is an unknown outcome, never "not saved".
+        $process->setTimeout(300);
+        try { $process->run(); }
+        catch (\Symfony\Component\Process\Exception\ProcessTimedOutException $error) { throw new RuntimeException('config-save-outcome-unknown'); }
+        if (!$process->isSuccessful()) { throw new RuntimeException(self::errorCode($process->getErrorOutput(), 'config-save-outcome-unknown')); }
+        $result = json_decode($process->getOutput(), true, 32, JSON_THROW_ON_ERROR);
+        if (!is_array($result) || !is_bool($result['updated'] ?? null)) { throw new RuntimeException('config-save-outcome-unknown'); }
+        return $result;
+    }
+
+    /** Standalone secret edits use the same coordinator as combined Save. */
+    public static function publishCredentialsWhileLocked(array $input, string $root): void
+    {
+        // Internal native finalizer owns both inherited flocks and native row
+        // locks. Read committed rows in the cold child; it writes only secrets.
+        $process = new Process([PHP_BINARY, __DIR__ . '/bridge.php', 'credentials-merge', '--app', realpath(base_path()), '--private-root', $root],
+            base_path(), self::safeEnvironment(), json_encode($input, JSON_THROW_ON_ERROR));
+        $process->setTimeout(30);
+        try { $process->run(); }
+        catch (\Throwable $error) { throw new RuntimeException('config-save-outcome-unknown'); }
+        if (!$process->isSuccessful()) { throw new RuntimeException(self::errorCode($process->getErrorOutput(), 'config-save-outcome-unknown')); }
+        $result = json_decode($process->getOutput(), true);
+        if (($result['ok'] ?? false) !== true) { throw new RuntimeException('config-save-outcome-unknown'); }
+    }
+
     public static function saveCredentials(array $input): void
     {
-        $process = new Process([self::php(), __DIR__ . '/bridge.php', 'credentials-merge', '--app', realpath(base_path()), '--private-root', self::privateRoot()], base_path(), self::safeEnvironment(), json_encode($input, JSON_THROW_ON_ERROR));
-        $process->setTimeout(10);
-        $process->run();
-        if (!$process->isSuccessful()) { throw new RuntimeException(self::errorCode($process->getErrorOutput(), 'credentials-save-failed')); }
+        $result = self::saveConfiguration([], $input);
+        if (($result['partial'] ?? false) || ($result['updated'] ?? false) !== true) { throw new RuntimeException('config-save-outcome-unknown'); }
     }
 
     /** Encryption setup returns only public metadata; secrets have dedicated paths below. */
@@ -218,12 +259,26 @@ PYTHON;
         return $result;
     }
 
-    /** Called inside a confirmation modal renderer, never assigned to Livewire state. */
-    public static function revealRecoveryKey(): array
+    /** Fresh selected identity only; never key material or the overview's shortened identity. */
+    public static function recoveryKeyFingerprint(): ?string
     {
-        $result = self::keyResponse('archive-key-reveal');
+        $result = self::keyResponse('archive-key-status');
+        if (($result['state'] ?? null) === 'none') { return null; }
+        $fingerprint = $result['fingerprint'] ?? null;
+        if (!is_string($fingerprint) || !preg_match('/^[a-f0-9]{64}$/D', $fingerprint)) {
+            throw new RuntimeException('archive-key-invalid');
+        }
+        return $fingerprint;
+    }
+
+    /** Called inside a confirmation modal renderer, never assigned to Livewire state. */
+    public static function revealRecoveryKey(string $fingerprint): array
+    {
+        if (!preg_match('/^[a-f0-9]{64}$/D', $fingerprint)) { throw new RuntimeException('archive-key-mismatch'); }
+        $result = self::keyResponse('archive-key-reveal', ['fingerprint' => $fingerprint]);
         if (!is_string($result['secret'] ?? null) || !is_string($result['fingerprint'] ?? null)
             || array_diff(array_keys($result), ['secret', 'fingerprint'])) { throw new RuntimeException('archive-key-invalid'); }
+        if (!hash_equals($fingerprint, $result['fingerprint'])) { throw new RuntimeException('archive-key-mismatch'); }
         return $result;
     }
 

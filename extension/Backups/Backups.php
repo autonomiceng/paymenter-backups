@@ -5,7 +5,7 @@ use App\Attributes\ExtensionMeta;
 use App\Classes\Extension\Extension;
 use Illuminate\Console\Scheduling\Schedule;
 
-#[ExtensionMeta(name: 'Backups', description: 'Database and file backups for Paymenter on this server and in S3, with verified downloads and terminal recovery.', version: '0.3.0', author: 'Autonomic Engineering')]
+#[ExtensionMeta(name: 'Backups', description: 'Scheduled database and full backups for Paymenter, on this server and in encrypted S3 storage, with verified downloads and recovery.', version: '0.4.0', author: 'Autonomic Engineering')]
 class Backups extends Extension
 {
     public function getConfig($values = []) { return Settings::fields(); }

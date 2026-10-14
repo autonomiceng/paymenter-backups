@@ -1,5 +1,6 @@
 """Durable requests and DST-aware backup schedule slots."""
 import datetime
+import contextlib
 import hashlib
 import json
 import math
@@ -185,7 +186,7 @@ def _sync_schedule(state, settings, now):
 
 def sync_schedule(state, settings, now=None, settings_loader=None):
     """Record schedule edits at save time without starting work or backfilling."""
-    with state.lock("tick.lock", timeout=10):
+    with state.lock("config.lock", timeout=10), state.lock("tick.lock", timeout=10):
         if settings_loader is not None:
             settings = settings_loader()
         return _sync_schedule(state, settings, time.time() if now is None else now)
@@ -199,7 +200,7 @@ def tick(state, envelope, command_prefix, envelope_loader=None):
     settings = envelope["settings"]
     if not settings.get("extension_enabled", True):
         return {"enabled": False}
-    with state.lock("tick.lock"):
+    with state.lock("config.lock"), state.lock("tick.lock"):
         if envelope_loader is not None:
             envelope = envelope_loader()
             settings = envelope["settings"]
@@ -229,7 +230,7 @@ def tick(state, envelope, command_prefix, envelope_loader=None):
                     mode = ("full-quiesced" if kind == "full" else "database-online") if v2 else settings["mode"]
                     create(state, arguments={"mode": mode}, slot=slot, scheduled_metadata=metadata)
             dues[kind] = due
-        reconcile_coverage(state)
+        reconcile_coverage(state, envelope, cheap_only=True)
         with state.lock("requests.lock"):
             items = list_requests(state)
             eligible = []
@@ -312,18 +313,36 @@ def freeze_legacy_requests(state, mode):
                 atomic_json(path(state, item['request_id']), item)
 
 
-def reconcile_coverage(state):
-    """Reconcile from durable capture evidence, including after delivery failure.
+def reconcile_coverage(state, envelope=None, locked=False, cheap_only=False):
+    """Satisfy waiting slots with an available verified full generation.
 
-    A journal's completion proof is written before any network/delivery attempt.
-    Pending manual requests are never absorbed.
+    Capture supplies locked=True while holding the run lock. Other callers
+    defer if that lock is busy. Proof and receipt publication share the lock
+    with deletion; historical capture evidence alone cannot cover a new slot.
+    Existing satisfied receipts and pending manual requests remain unchanged.
+    Tick uses cheap_only to accept only current recorded local verification;
+    anything needing archive/provider work remains eligible for a fresh backup.
     """
+    try:
+        with contextlib.nullcontext() if locked else state.lock():
+            _reconcile_coverage(state, envelope, cheap_only)
+    except BackupError as error:
+        if error.code != "busy":
+            raise
+
+
+def _reconcile_coverage(state, envelope, cheap_only):
+    from . import artifacts
+    from .engine import verify
+    from .storage import checked_remote
     fulls = [item for item in state.journals() if item.get("mode") == "full-quiesced"
              and item.get("capture_complete") and item.get("service_recovered")
+             and not item.get("retained_deleted") and not artifacts.deleting(item)
              and item.get("database_coverage") and type(item.get("database_snapshot_lower_bound")) in (int, float)
              and math.isfinite(item["database_snapshot_lower_bound"])]
     epoch = read_json(state.root / 'schedule.json') if (state.root / 'schedule.json').exists() else {}
     current = epoch.get('kinds', {}).get('database')
+    proofs = {}
     with state.lock("requests.lock"):
         for item in list_requests(state):
             if (item.get("schedule_kind") != "database" or not item.get("slot")
@@ -331,7 +350,32 @@ def reconcile_coverage(state):
                 continue
             if current is not None and (item.get('schedule_fingerprint') != current['fingerprint'] or item.get('schedule_since') != current['since']):
                 continue
-            covering = next((run for run in fulls if run["database_snapshot_lower_bound"] >= item["slot_at"]), None)
+            covering = None
+            for run in fulls:
+                if run["database_snapshot_lower_bound"] < item["slot_at"]:
+                    continue
+                run_id = run["run_id"]
+                if run_id not in proofs:
+                    proofs[run_id] = False
+                    try:
+                        if cheap_only:
+                            with artifacts.open_archive(state, run_id, run) as artifact:
+                                proofs[run_id] = (artifact.manifest.get("mode") == "full-quiesced"
+                                                  and artifacts.verification_current(artifact))
+                        else:
+                            manifest = verify(state, run_id, show=True)
+                            proofs[run_id] = manifest.get("mode") == "full-quiesced"
+                    except BackupError:
+                        pass
+                    if not proofs[run_id] and not cheap_only and envelope is not None and run.get("remote_delivered"):
+                        try:
+                            with checked_remote(state, envelope, run) as (_path, manifest):
+                                proofs[run_id] = manifest.get("mode") == "full-quiesced"
+                        except BackupError:
+                            pass
+                if proofs[run_id]:
+                    covering = run
+                    break
             if covering:
                 item.update(status="satisfied", covered_by=covering["run_id"], finished_at=time.time())
                 atomic_json(path(state, item["request_id"]), item)
@@ -352,7 +396,7 @@ def worker(state, envelope, request_id, envelope_loader=None):
             if arguments.get("mode"):
                 envelope["settings"]["mode"] = arguments["mode"]
             journal = capture(state, envelope, scheduled=bool(item.get("slot")), request_id=request_id)
-            reconcile_coverage(state)
+            reconcile_coverage(state, envelope)
             result = {"run_id": journal["run_id"], "local_complete": journal["local_complete"]}
             if envelope["settings"]["destination"] == "s3":
                 result.update(deliver(state, envelope, journal["run_id"], envelope_loader=envelope_loader))

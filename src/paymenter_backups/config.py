@@ -88,7 +88,18 @@ def bridge(args, verb="read", payload=None):
         raise BackupError("bridge-failed") from None
 
 
-def load(args, credential_free=False):
+def load(args, credential_free=False, coordinated=True):
+    # The cold bridge reads native rows and the encrypted store separately.
+    # Read both beneath the Save lock, including worker/storage reloads. Callers
+    # already owning config.lock explicitly suppress this nested acquisition.
+    if coordinated:
+        from .common import State
+        state = State(args.app, args.private_root, initialize=False)
+        if state.initialized:
+            with state.lock("config.lock", timeout=10):
+                return load(args, credential_free, coordinated=False)
+    if not credential_free and (pathlib.Path(args.private_root) / "config-save.json").exists():
+        raise BackupError("config-save-outcome-unknown")
     envelope = bridge(args, "read-settings" if credential_free else "read")
     if envelope.get("schema_version") != 1 or pathlib.Path(envelope.get("app", "")).resolve() != pathlib.Path(args.app).resolve():
         raise BackupError("bridge-identity-mismatch")

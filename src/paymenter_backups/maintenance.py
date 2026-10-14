@@ -282,11 +282,15 @@ def cron_lock(line, app, paths):
         raise BackupError('job-locks-unverified') from None
 
 
-def _legacy_cron_lock(line, app, paths):
+def _legacy_cron_lock(line, app, paths, cron=True):
     """Support explicit path-based flock invocations; ambiguous shell refuses."""
+    from .discovery import cron_command
     try:
+        if cron:
+            line = cron_command(line)
         tokens = shlex.split(line, comments=True)
-        tokens = tokens[1:] if tokens[0].startswith("@") else tokens[5:]
+        if cron:
+            tokens = tokens[1:] if tokens[0].startswith("@") else tokens[5:]
         flock_index = next(i for i, value in enumerate(tokens) if value in ("flock", "/usr/bin/flock", "/bin/flock"))
         if tokens[:flock_index] not in ([], ["cd", str(app), "&&"]):
             raise ValueError()
@@ -412,8 +416,8 @@ def systemd_locks(app, paths, tools):
                 tokens = shlex.split(invocations[0])
                 if working == str(app):
                     tokens = ["cd", str(app), "&&"] + tokens
-                line = "* * * * * " + " ".join(shlex.quote(token) for token in tokens)
-                verified.add(_legacy_cron_lock(line, app, paths))
+                line = " ".join(shlex.quote(token) for token in tokens)
+                verified.add(_legacy_cron_lock(line, app, paths, cron=False))
         except (KeyError, ValueError, UnicodeError, BackupError):
             raise BackupError("job-locks-unverified") from None
     return verified
