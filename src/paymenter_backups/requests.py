@@ -395,9 +395,11 @@ def worker(state, envelope, request_id, envelope_loader=None):
         if action == "run":
             if arguments.get("mode"):
                 envelope["settings"]["mode"] = arguments["mode"]
-            journal = capture(state, envelope, scheduled=bool(item.get("slot")), request_id=request_id)
+            journal = capture(state, envelope, scheduled=bool(item.get("slot")), request_id=request_id, envelope_loader=envelope_loader)
             reconcile_coverage(state, envelope)
             result = {"run_id": journal["run_id"], "local_complete": journal["local_complete"]}
+            if envelope_loader is not None:
+                envelope = envelope_loader()
             if envelope["settings"]["destination"] == "s3":
                 result.update(deliver(state, envelope, journal["run_id"], envelope_loader=envelope_loader))
         elif action == "verify":
@@ -405,18 +407,18 @@ def worker(state, envelope, request_id, envelope_loader=None):
             with state.lock():
                 result = verify(state, arguments["run_id"], record=True, envelope=envelope)
         elif action == "retrieve":
-            result = retrieve(state, envelope, arguments["run_id"])
+            result = retrieve(state, envelope, arguments["run_id"], envelope_loader=envelope_loader)
         elif action == "delete":
-            result = delete_run(state, envelope, arguments["run_id"], request_id, location=arguments.get("location", "all"))
+            result = delete_run(state, envelope, arguments["run_id"], request_id, location=arguments.get("location", "all"), envelope_loader=envelope_loader)
         elif action == "deliver":
             result = deliver(state, envelope, arguments["run_id"], envelope_loader=envelope_loader)
         elif action == "retention":
-            result = retention(state, envelope, bool(arguments.get("execute")))
+            result = retention(state, envelope, bool(arguments.get("execute")), envelope_loader=envelope_loader)
         else:
             result = destination_test(state, envelope, envelope_loader=envelope_loader)
         if action in ("run", "deliver"):
             from .cli import apply_automatic_retention
-            apply_automatic_retention(state, envelope, result)
+            apply_automatic_retention(state, envelope, result, envelope_loader=envelope_loader)
         item.update({"status": "complete", "result": result})
     except BackupError as error:
         deferred = {"busy", "billing-guard-stale", "billing-window-protected", "job-lock-busy"}

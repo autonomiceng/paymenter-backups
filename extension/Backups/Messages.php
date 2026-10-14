@@ -107,7 +107,7 @@ final class Messages
 
         // Encryption
         'archive-encryption-tool-missing' => 'GnuPG (gpg) wasn\'t found. Install it, or set its path under Advanced, Binary paths.',
-        'archive-encryption-tool-unusable' => 'GnuPG (gpg) is installed but can\'t encrypt here. Check its version and the path under Advanced, Binary paths.',
+        'archive-encryption-tool-unusable' => 'GnuPG (gpg) or its gpg-agent and gpgconf helpers aren\'t usable here. Install the complete gnupg package and check the path under Advanced, Binary paths.',
         'archive-key-required' => 'Uploads to S3 need a recovery key. Save settings with "Encrypt backups in S3" on to create one.',
         'archive-key-save-required' => 'Save the recovery key outside this server and confirm it. Uploads to S3 start after that.',
         'archive-key-invalid' => 'The recovery key or its fingerprint is invalid. Passphrases need at least 20 characters, no control characters, and at most 1024 UTF-8 bytes.',
@@ -564,7 +564,7 @@ final class Messages
             case 'archive-encryption-tool-missing':
             case 'archive-encryption-tool-unusable':
                 $path = $detail['path'] ?? ($context['tools']['gpg']['resolved'] ?? null) ?? ($context['tools']['gpg']['configured'] ?? null);
-                return $item('Install GnuPG', 'Backups use gpg to encrypt uploads to S3' . (is_string($path) && $path !== '' ? '. It wasn\'t usable at ' . $path : ', and it wasn\'t found') . '. Install the gnupg package, or set its path under Binary paths.', [], $settings('Go to Binary paths', 'advanced'));
+                return $item('Install GnuPG', 'Backups use gpg with gpg-agent and gpgconf to encrypt uploads to S3' . (is_string($path) && $path !== '' ? '. It wasn\'t usable at ' . $path : ', and it wasn\'t found') . '. Install the complete gnupg package, or set its path under Binary paths.', [], $settings('Go to Binary paths', 'advanced'));
             case 'tool-unavailable':
                 $tool = is_string($detail['tool'] ?? null) ? $detail['tool'] : null;
                 $name = self::TOOLS[$tool] ?? 'A required binary';

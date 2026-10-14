@@ -20,7 +20,7 @@ NON_ERRORS = {
     'credentials-write', 'database-and-full-app-checkpoint', 'database-online',
     'delete-interrupted', 'destination-test', 'discard-pending', 'document-roots',
     'enabled-runtime', 'encryption-key', 'entering-maintenance', 'full-quiesced',
-    'gpg-agent', 'keep-all', 'list-timers', 'list-unit-files', 'list-units', 'local-count',
+    'gpg-agent', 'agent-socket', 'keep-all', 'list-timers', 'list-unit-files', 'list-units', 'local-count',
     'maintenance-probe-credentials-write', 'mariadb-dump', 'needs-recovery', 'needs-setup',
     'no-cache', 'not-saved', 'on-abnormal', 'on-abort', 'on-failure', 'on-success',
     'on-watchdog', 'openpgp-symmetric-aes256-seipd-v1', 'origin-changed',

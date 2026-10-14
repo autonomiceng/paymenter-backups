@@ -477,24 +477,25 @@ def dispatch(args):
             envelope["settings"]["mode"] = args.mode
         if not args.execute:
             return plan(state, envelope)
-        journal = capture(state, envelope)
+        journal = capture(state, envelope, envelope_loader=lambda: load(args))
         result = {"run_id": journal["run_id"], "local_complete": True, "archive_path": journal["archive_path"]}
+        envelope = load(args)
         if envelope["settings"]["destination"] == "s3":
             result.update(deliver(state, envelope, journal["run_id"], envelope_loader=lambda: load(args)))
-        apply_automatic_retention(state, envelope, result)
+        apply_automatic_retention(state, envelope, result, envelope_loader=lambda: load(args))
         return result
     if command == "deliver":
         result = deliver(state, envelope, args.run_id, envelope_loader=lambda: load(args))
-        apply_automatic_retention(state, envelope, result)
+        apply_automatic_retention(state, envelope, result, envelope_loader=lambda: load(args))
         return result
     if command == "retention":
-        return retention(state, envelope, args.verb == "apply")
+        return retention(state, envelope, args.verb == "apply", envelope_loader=lambda: load(args))
     if command == "delete":
         if not args.execute:
             return delete_plan(state, envelope, args.run_id, location=args.location)
-        return delete_run(state, envelope, args.run_id, location=args.location)
+        return delete_run(state, envelope, args.run_id, location=args.location, envelope_loader=lambda: load(args))
     if command == "retrieve":
-        return retrieve(state, envelope, args.run_id) if args.execute else retrieve_plan(state, envelope, args.run_id)
+        return retrieve(state, envelope, args.run_id, envelope_loader=lambda: load(args)) if args.execute else retrieve_plan(state, envelope, args.run_id)
     if command == "destination-test":
         with state.lock():
             return destination_test(state, envelope, envelope_loader=lambda: load(args), locked=True)
@@ -582,12 +583,16 @@ def stream_artifact(state, args):
             os.close(descriptor)
 
 
-def apply_automatic_retention(state, envelope, result):
-    if envelope["settings"]["automatic_retention"]:
-        try:
-            result["retention"] = retention(state, envelope, execute=True)
-        except BackupError as error:
-            result["retention_error"] = error.code
+def apply_automatic_retention(state, envelope, result, envelope_loader=None):
+    try:
+        with state.lock():
+            if envelope_loader is not None:
+                envelope = envelope_loader()
+                state.apply_policy(envelope['settings'])
+            if envelope["settings"]["automatic_retention"]:
+                result["retention"] = retention(state, envelope, execute=True, locked=True)
+    except BackupError as error:
+        result["retention_error"] = error.code
 
 
 def main(argv=None):

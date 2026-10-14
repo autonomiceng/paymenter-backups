@@ -90,6 +90,9 @@ def tool(envelope):
     agent = str(pathlib.Path(binary).with_name('gpg-agent'))
     if not pathlib.Path(agent).is_file() or not os.access(agent, os.X_OK):
         raise BackupError('archive-encryption-tool-unusable')
+    config = pathlib.Path(agent).resolve().with_name('gpgconf')
+    if not config.is_file() or not os.access(config, os.X_OK):
+        raise BackupError('archive-encryption-tool-unusable')
     return binary, agent
 
 
@@ -125,19 +128,41 @@ def owned_home(agent, deadline):
     parent = os.getpid()
     with tempfile.TemporaryDirectory(prefix='pb-gpg-') as directory:
         os.chmod(directory, 0o700)
+        config = str(pathlib.Path(agent).resolve().with_name('gpgconf'))
+        if not pathlib.Path(config).is_file() or not os.access(config, os.X_OK):
+            raise BackupError('archive-encryption-tool-unusable')
+        try:
+            discovered = subprocess.run([config, '--homedir', directory, '--list-dirs', 'agent-socket'],
+                                        capture_output=True, timeout=max(0.01, min(5, deadline - time.monotonic())),
+                                        env=safe_environment())
+            if discovered.returncode or len(discovered.stdout) > 4096:
+                raise ValueError()
+            from urllib.parse import unquote
+            socket = pathlib.Path(unquote(discovered.stdout.decode().strip()))
+            if not socket.is_absolute() or '\0' in str(socket):
+                raise ValueError()
+        except (OSError, ValueError, UnicodeError, subprocess.TimeoutExpired):
+            raise BackupError('archive-encryption-tool-unusable') from None
         proc = subprocess.Popen([agent, '--homedir', directory, '--no-options', '--daemon', '--no-detach',
                                  '--disable-scdaemon', '--allow-loopback-pinentry', '--no-allow-external-cache'],
                                 stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                                 close_fds=True, start_new_session=True,
                                 preexec_fn=lambda: child_setup(parent), env=safe_environment())
         try:
-            while not pathlib.Path(directory, 'S.gpg-agent').exists():
+            while not socket.is_socket():
                 if proc.poll() is not None or time.monotonic() >= deadline:
                     raise BackupError('archive-encryption-tool-unusable')
                 time.sleep(0.01)
             yield directory
         finally:
             _stop(proc)
+            # gpgconf derives this invocation's socket directory from its unique
+            # homedir; personal agents and sockets are never addressed.
+            try:
+                subprocess.run([config, '--homedir', directory, '--remove-socketdir'],
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5, env=safe_environment())
+            except (OSError, subprocess.TimeoutExpired):
+                pass
 
 
 @contextlib.contextmanager
@@ -164,12 +189,13 @@ def stream_deadline(seconds):
         signal.signal(signal.SIGALRM, previous_handler)
 
 
-def transform(envelope, source, secret, decrypt=False, maximum=None, budget_check=None):
-    with stream_deadline(envelope['settings'].get('capture_timeout', 300)):
-        yield from _transform(envelope, source, secret, decrypt, maximum, budget_check)
+def transform(envelope, source, secret, decrypt=False, maximum=None, budget_check=None, timeout=None):
+    seconds = envelope['settings'].get('capture_timeout', 300) if timeout is None else timeout
+    with stream_deadline(seconds):
+        yield from _transform(envelope, source, secret, decrypt, maximum, budget_check, seconds)
 
 
-def _transform(envelope, source, secret, decrypt=False, maximum=None, budget_check=None):
+def _transform(envelope, source, secret, decrypt=False, maximum=None, budget_check=None, timeout=None):
     """Yield bounded output and require successful exit/profile before completion.
 
     Consumers must withhold publication until iteration finishes. No stderr is
@@ -177,7 +203,7 @@ def _transform(envelope, source, secret, decrypt=False, maximum=None, budget_che
     """
     binary, agent = tool(envelope)
     secret_bytes = validate_secret(secret)
-    deadline = time.monotonic() + envelope['settings'].get('capture_timeout', 300)
+    deadline = time.monotonic() + (envelope['settings'].get('capture_timeout', 300) if timeout is None else timeout)
     parent = os.getpid()
     with owned_home(agent, deadline) as home:
         phrase_read, phrase_write = os.pipe()
@@ -257,7 +283,7 @@ def _transform(envelope, source, secret, decrypt=False, maximum=None, budget_che
                 if proc.returncode or not {b'DECRYPTION_OKAY', b'END_DECRYPTION'} <= names:
                     raise BackupError('archive-decryption-failed')
             elif (proc.returncode or b'END_ENCRYPTION' not in names
-                  or [parts[1:] for parts in tokens if parts and parts[0] == b'BEGIN_ENCRYPTION'] != [[b'2', b'9']]):
+                  or [parts[1:] for parts in tokens if parts and parts[0] == b'BEGIN_ENCRYPTION'] not in ([[b'2', b'9']], [[b'2', b'9', b'0']])):
                 raise BackupError('archive-encryption-failed')
         except (OSError, subprocess.TimeoutExpired):
             raise BackupError('archive-decryption-failed' if decrypt else 'archive-encryption-failed') from None
