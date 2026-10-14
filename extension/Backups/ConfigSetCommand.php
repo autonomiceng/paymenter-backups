@@ -2,7 +2,6 @@
 namespace Paymenter\Extensions\Others\Backups;
 
 use Illuminate\Console\Command;
-use Illuminate\Support\Facades\DB;
 
 final class ConfigSetCommand extends Command
 {
@@ -24,12 +23,7 @@ final class ConfigSetCommand extends Command
                 }
             }
             $record = \App\Models\Extension::where('extension', 'Backups')->where('type', 'other')->firstOrFail();
-            (new Backups)->installed();
-            DB::transaction(function () use ($input, $fields, $record) {
-                foreach ($input as $key => $value) {
-                    $record->settings()->updateOrCreate(['key' => $key], ['value' => is_bool($value) ? ($value ? '1' : '0') : (string) $value, 'type' => $fields[$key]['database_type'] ?? 'string', 'encrypted' => false]);
-                }
-            });
+            SettingsWriter::write($record, $input);
             Runtime::command(['init']);
             (new Backups)->updated($record);
             $this->line(json_encode(['ok' => true]));

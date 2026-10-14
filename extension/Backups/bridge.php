@@ -88,7 +88,10 @@ try {
         if (strlen($input) > 65536) { throw new RuntimeException('credentials-invalid'); }
         $new = json_decode($input, true, 8, JSON_THROW_ON_ERROR);
         if (!is_array($new)) { throw new RuntimeException('credentials-invalid'); }
-        if ($verb === 'credentials-write') {
+        if ($verb === 'credentials-write' && $new === ['clear' => true]) {
+            // Explicit S3 removal keeps the independent probe namespace.
+            $credentials = array_diff_key($credentials, array_flip(['access_key', 'secret_key', 'session_token']));
+        } elseif ($verb === 'credentials-write') {
             if (array_diff(array_keys($new), ['access_key', 'secret_key', 'session_token']) || empty($new['access_key']) || empty($new['secret_key'])) { throw new RuntimeException('credentials-invalid'); }
             foreach ($new as $value) { if (!is_string($value) || strlen($value) > 8192) { throw new RuntimeException('credentials-invalid'); } }
             // Preserve the independent probe namespace and the existing S3 API.
