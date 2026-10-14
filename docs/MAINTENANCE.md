@@ -8,7 +8,7 @@ usable, but accepting a SDK update requires testing its declared Python floor.
 Never update production dependencies with pip or alter root Composer files.
 
 Run the unit tests, build twice and compare SHA256, then run
-`python3 tools/native_integration.py --release dist/Backups-0.1.2.zip`.
+`python3 tools/native_integration.py --release dist/Backups-0.2.0.zip`.
 The fixture fetches and verifies the official Paymenter v1.5.9 archive digest,
 creates its own MariaDB datadir/socket, uses fake credentials, restores into a
 second app/schema and removes its isolated processes. Host schemas, live apps
@@ -17,8 +17,12 @@ and providers are outside this test. Test host configuration and live providers 
 Native EditExtension loads every setting into browser state, so no secret or
 encrypted rows belong to Backups. Only non-secret fields are declared. The custom
 page resets write-only secrets on every response, including failed saves and
-unrelated actions. Gate every page/action with `admin.extensions.update`, with
-native auth/CSRF. Updates must preserve these negative integration checks.
+unrelated actions. Gate every page/action and the download route with
+`admin.extensions.update`, with native auth/CSRF. Updates must preserve these
+negative integration checks, the settings validation-before-write checks and
+the download, verification and per-backup delete checks in the drill. Keep all
+administrator copy in `extension/Backups/Messages.php` and follow
+[ADMIN-UI.md](ADMIN-UI.md).
 
 Cold configuration bootstraps only environment/configuration, no providers, and
 reads rows through PDO using the native morph class. Its framework URL/timezone

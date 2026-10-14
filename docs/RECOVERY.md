@@ -56,6 +56,10 @@ Full restore into an isolated new host/path:
    artifacts contain only SQL and cannot supply an atomic app/files restore.
 2. Run `verify RUN-ID --show` against the original private state, or independently
    validate the recovery kit's archive SHA256 and size from manifest.json.
+   An archive downloaded from the admin page arrives only when its streamed
+   bytes matched the recorded SHA-256; an interrupted download is incomplete
+   and must not be used. Check its size and SHA-256 against the backup's
+   manifest before restoring.
    Verification reads all gzip bytes including CRC/trailer and every payload
    hash. Fetch remote manifest and full archive; do not use ETag as SHA256.
 3. Extract outer tar.gz into a private scratch directory. It contains
