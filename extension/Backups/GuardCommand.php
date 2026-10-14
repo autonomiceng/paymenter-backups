@@ -7,7 +7,7 @@ use Illuminate\Console\Scheduling\Schedule;
 final class GuardCommand extends Command
 {
     protected $signature = 'backups:guard';
-    protected $description = 'Refresh the observed native billing schedule guard';
+    protected $description = 'Record Paymenter daily billing times so full backups can avoid them';
 
     public function handle(Schedule $schedule): int
     {

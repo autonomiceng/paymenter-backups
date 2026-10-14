@@ -8,19 +8,19 @@ final class ProbeCredentials
     {
         $parts = parse_url($url);
         if (!$parts || preg_match('/[\x00-\x20\x7f\\\\]/', $url) || ($parts['scheme'] ?? '') !== 'https' || empty($parts['host']) || isset($parts['user']) || isset($parts['pass']) || str_contains($url, '?') || str_contains($url, '#') || ($originOnly && !in_array($parts['path'] ?? '', ['', '/'], true))) {
-            throw new \RuntimeException('maintenance-probe-credentials-invalid');
+            throw new \RuntimeException('maintenance-probe-origin-invalid');
         }
-        if (!preg_match('~^https://(?:\[[0-9a-fA-F:.]+\]|[a-zA-Z0-9.-]+)(?::[0-9]{1,5})?(?:/|$)~', $url)) { throw new \RuntimeException('maintenance-probe-credentials-invalid'); }
+        if (!preg_match('~^https://(?:\[[0-9a-fA-F:.]+\]|[a-zA-Z0-9.-]+)(?::[0-9]{1,5})?(?:/|$)~', $url)) { throw new \RuntimeException('maintenance-probe-origin-invalid'); }
         $host = strtolower($parts['host']);
         if (str_starts_with($host, '[')) {
             $ip = substr($host, 1, -1);
-            if (!filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_IPV6) || str_starts_with(bin2hex(inet_pton($ip)), '00000000000000000000ffff')) { throw new \RuntimeException('maintenance-probe-credentials-invalid'); }
+            if (!filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_IPV6) || str_starts_with(bin2hex(inet_pton($ip)), '00000000000000000000ffff')) { throw new \RuntimeException('maintenance-probe-origin-invalid'); }
             $host = '[' . inet_ntop(inet_pton($ip)) . ']';
         } elseif (strlen($host) > 253 || array_filter(explode('.', $host), static fn ($label) => !preg_match('/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/D', $label))) {
-            throw new \RuntimeException('maintenance-probe-credentials-invalid');
+            throw new \RuntimeException('maintenance-probe-origin-invalid');
         }
         $port = $parts['port'] ?? 443;
-        if ($port < 1 || $port > 65535) { throw new \RuntimeException('maintenance-probe-credentials-invalid'); }
+        if ($port < 1 || $port > 65535) { throw new \RuntimeException('maintenance-probe-origin-invalid'); }
         return 'https://' . $host . ($port === 443 ? '' : ':' . $port);
     }
 

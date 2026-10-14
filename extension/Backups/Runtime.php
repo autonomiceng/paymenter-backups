@@ -20,8 +20,14 @@ final class Runtime
     {
         $extension = \App\Models\Extension::where('extension', 'Backups')->where('type', 'other')->firstOrFail();
         $configured = $extension->settings()->where('key', 'private_root')->value('value');
-        $docroots = $extension->settings()->where('key', 'extra_docroots')->value('value') ?: '[]';
-        return PrivateStore::root(realpath(base_path()), $configured, $create, json_decode($docroots, true, 16, JSON_THROW_ON_ERROR));
+        $rawDocroots = $extension->settings()->where('key', 'extra_docroots')->value('value');
+        $rawDocroots = $rawDocroots ?? '[]';
+        try { $docroots = json_decode($rawDocroots, true, 16, JSON_THROW_ON_ERROR); }
+        catch (\JsonException $error) { throw new \RuntimeException('document-roots-invalid'); }
+        if (!is_array($docroots) || !array_is_list($docroots) || !str_starts_with(ltrim($rawDocroots), '[')) {
+            throw new \RuntimeException('document-roots-invalid');
+        }
+        return PrivateStore::root(realpath(base_path()), $configured, $create, $docroots);
     }
 
     public static function php(): string
