@@ -85,7 +85,7 @@ class RetentionLifecycle(unittest.TestCase):
         self.fixture.setUp()
         self.addCleanup(self.fixture.doCleanups)
         self.state = self.fixture.state
-        self.envelope = {"settings": dict(DEFAULTS, destination="s3", s3_bucket="fixture",
+        self.envelope = {"settings": dict(DEFAULTS, destination="s3", s3_encryption=False, s3_bucket="fixture",
             s3_endpoint="https://first.invalid", plaintext_offsite_acknowledged=True,
             minimum_free_bytes=0, local_byte_budget=1024**3, retention_keep=1,
             s3_retention_policy="keep-all")}
