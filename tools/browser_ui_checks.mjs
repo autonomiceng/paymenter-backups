@@ -129,12 +129,25 @@ async function menu(page, row, name) {
   await livewire(page, () => page.getByRole('button', {name, exact: true}).filter({visible: true}).click());
   const modal = page.locator('.fi-modal.fi-modal-open');
   if (['Details', 'Delete'].includes(name)) await modal.locator('.fi-modal-heading').waitFor();
-  if (name === 'Delete') { const local = modal.getByRole('radio', {name:'This server only',exact:true}); if (await local.count()) await checked(page, local); }
+  if (name === 'Delete') { const local = modal.getByRole('radio', {name:'This server',exact:true}); if (await local.count()) await checked(page, local); }
 }
 async function closeDialog(page) {
   const modal = page.locator('.fi-modal.fi-modal-open'); const id = await modal.getAttribute('id');
   await modal.getByRole('button', {name: /^(Close|Cancel)$/}).last().click();
   await page.locator(`[id="${id}.heading"]`).waitFor({state: 'hidden'});
+}
+async function archivePath(runId) {
+  // New installations keep backups in DATA_DIR/backups; earlier ones in DATA_DIR/artifacts.
+  for (const directory of ['backups', 'artifacts']) {
+    const candidate = path.join(metadata.private_root, directory, runId + '.tar.gz');
+    if (await stat(candidate).then(() => true, () => false)) return candidate;
+  }
+  return path.join(metadata.private_root, 'backups', runId + '.tar.gz');
+}
+async function setToggle(page, locator, on) { if ((await locator.getAttribute('aria-checked')) !== String(on)) await livewire(page, () => locator.click()); }
+async function uploadToS3(page) {
+  await checked(page, field(page, 'upload_s3'));
+  await field(page, 's3_bucket').waitFor();
 }
 async function findRow(page, runId) {
   // IDs deliberately do not appear in the first column. The authorized download route
@@ -148,25 +161,27 @@ try {
       const installedSettings = await readFile(path.join(metadata.app, 'extensions/Others/Backups/Settings.php'), 'utf8');
       assert.match(installedSettings, /'local_byte_budget'\s*=>\s*10737418240/);
       assert.match(installedSettings, /'minimum_free_bytes'\s*=>\s*1073741824/);
-      await load(page, 'Settings'); await field(page, 'local_byte_budget').fill('10240'); await field(page, 'minimum_free_bytes').fill('1024');
+      await load(page, 'Settings'); await field(page, 'local_byte_budget').fill('10'); await field(page, 'minimum_free_bytes').fill('1');
       const before = await snapshot(); await save(page);
       assert.deepEqual((await snapshot()).files, before.files, 'Saving nonsecrets changed encrypted credentials');
-      await load(page, 'Settings'); assert.equal(await field(page, 'local_byte_budget').inputValue(), '10240'); assert.equal(await field(page, 'minimum_free_bytes').inputValue(), '1024');
+      await load(page, 'Settings'); assert.equal(await field(page, 'local_byte_budget').inputValue(), '10'); assert.equal(await field(page, 'minimum_free_bytes').inputValue(), '1');
       await shot(page, 'settings-default-space'); await load(page); assert.match(await page.locator('main').innerText(), /of 10 GiB/); await shot(page, 'overview-default-space');
-      return {budgetBytes: 10737418240, reserveBytes: 1073741824, budgetMiB: 10240, reserveMiB: 1024};
+      return {budgetBytes: 10737418240, reserveBytes: 1073741824, budgetGiB: 10, reserveGiB: 1};
     });
   }
   if (phase === 'inspect' || phase === 'all') {
-    await check('default directory is selectable and scheduler link is discoverable', async () => {
-      await load(page, 'Settings'); const main = page.locator('main');
-      const directory = main.locator('code').filter({hasText: metadata.private_root + '/'}).first();
-      await directory.waitFor(); const value = await directory.innerText();
-      assert(value === metadata.private_root + '/artifacts' || value === metadata.private_root + '/backups');
-      await directory.evaluate(element => {const range=document.createRange();range.selectNodeContents(element);const selection=getSelection();selection.removeAllRanges();selection.addRange(range)});
-      assert.equal(await page.evaluate(() => getSelection().toString()), value);
-      await load(page, 'Backups'); const scheduler = page.getByRole('link', {name:'Paymenter scheduler setup',exact:true});
-      assert.equal(await scheduler.isVisible(), true); assert.equal(await scheduler.getAttribute('href'),'https://paymenter.org/docs/installation/install');
-      return {defaultDirectory:value,manualTextSelection:true,schedulerLinkVisible:true};
+    await check('default directory is the placeholder and setup names the cron line', async () => {
+      await load(page, 'Settings');
+      const placeholder = await field(page, 'local_path').getAttribute('placeholder');
+      assert(placeholder === metadata.private_root + '/backups' || placeholder === metadata.private_root + '/artifacts', `Unexpected default directory ${placeholder}`);
+      await load(page, 'Backups'); const setup = page.locator('[id="setup"]');
+      assert.equal(await setup.isVisible(), true, 'Setup block hidden while the cron job never ran');
+      const text = await setup.innerText();
+      assert.doesNotMatch(text, /need \d+ (items|changes)/, 'Setup counts items instead of naming them');
+      assert.match(text, /schedule:run/, 'Setup does not give the cron line');
+      assert.equal(await page.getByRole('link', {name: 'Paymenter scheduler setup', exact: true}).count(), 0, 'External scheduler link returned');
+      await shot(page, 'setup-readiness');
+      return {defaultDirectory: placeholder, cronLineShown: true};
     });
     await check('desktop light, dark, mobile tabs and overflow', async () => {
       for (const scheme of ['light', 'dark']) {
@@ -215,12 +230,11 @@ try {
       assert((await commands.count()) >= 6, 'Expected scheduler and terminal command blocks');
       const canCopy = await commands.first().getAttribute('role') === 'button';
       if (!canCopy) {
-        assert.match(await page.locator('main').innerText(), /Copy needs HTTPS/);
+        assert.match(await page.locator('main').innerText(), /Copying needs HTTPS/);
         for (const command of await commands.all()) {
           assert.equal(await command.getAttribute('role'), null, 'HTTP offers a broken copy button');
-          assert.equal(await command.locator('code').count(), 1, 'Command is not escaped code');
-          const expected = (await command.locator('code').textContent()).trim();
-          const selected = await command.locator('code').evaluate(code => {
+          const expected = (await command.textContent()).trim();
+          const selected = await command.evaluate(code => {
             const range = document.createRange(); range.selectNodeContents(code);
             const selection = window.getSelection(); selection.removeAllRanges(); selection.addRange(range);
             return selection.toString().trim();
@@ -243,49 +257,21 @@ try {
       assert(functionText && functionText.includes('"$@"'), 'Shell function argument quoting missing');
       return {commands: await commands.count(), clipboardVerified: true, actualKeyboardAndClickCopy: true};
     });
-    await check('field help opens by keyboard and closes without submission', async () => {
-      await load(page, 'Settings');
-      const help = page.getByRole('button', {name: 'Help for Job lock files', exact: true});
-      if (!await help.count()) {
-        await livewire(page, () => page.locator('[id="settingsForm.mode-full-quiesced"]').check());
-      }
-      const before = await snapshot();
-      await help.focus();
-      await livewire(page, () => page.keyboard.press('Enter'));
-      const dialog = page.locator('.fi-modal.fi-modal-open');
-      await dialog.getByRole('heading', {name: 'Job lock files', exact: true}).waitFor();
-      assert.match(await dialog.innerText(), /lock paths/);
-      await closeDialog(page);
-      await unchanged(before);
-      await help.click();
-      await dialog.getByRole('heading', {name: 'Job lock files', exact: true}).waitFor();
-      await page.keyboard.press('Escape');
-      await dialog.locator('.fi-modal-heading').waitFor({state: 'hidden'});
-      await unchanged(before);
-      return 'Native help supports Enter, click, Close and Escape';
-    });
-    await check('Directory labels and collapsed HTTP Basic purpose stay readable', async () => {
+    await check('help stays inline and site password purpose stays readable', async () => {
       for (const viewport of [{width:1440,height:1000}, {width:390,height:844}]) {
         const client = await login(metadata.admin_email, viewport); await load(client, 'Settings');
+        assert.equal(await client.getByRole('button', {name: /^Help for /}).count(), 0, 'A field still opens a help dialog');
         assert.equal(await client.getByLabel('Backup directory', {exact:true}).count(), 1);
-        assert.equal(await client.getByLabel('Backup folder', {exact:true}).count(), 0, 'Filesystem label still says Folder');
-        await livewire(client, () => client.locator('[id="settingsForm.mode-full-quiesced"]').check());
-        const heading = client.getByRole('heading', {name:'HTTP Basic authentication (advanced)',exact:true});
-        await heading.waitFor(); const section = client.locator('.fi-section').filter({has:heading});
-        assert.match(await section.innerText(), /web server password prompt[\s\S]*maintenance check/);
-        assert.equal(await client.getByText('These credentials are separate from your Paymenter account login.',{exact:true}).isVisible(), false, 'Advanced HTTP Basic section starts expanded');
-        await shot(client, viewport.width < 640 ? 'mobile-http-basic-collapsed' : 'desktop-http-basic-collapsed');
-        await heading.click(); await client.getByText('These credentials are separate from your Paymenter account login.',{exact:true}).waitFor();
-        assert.match(await section.innerText(), /App URL|https/); await shot(client, viewport.width < 640 ? 'mobile-http-basic-expanded' : 'desktop-http-basic-expanded');
+        const heading = client.getByRole('heading', {name:'Site password (HTTP Basic)',exact:true});
+        if (!await heading.isVisible()) await client.getByRole('heading', {name:'Full backup requirements',exact:true}).click();
+        await heading.waitFor(); const section = client.locator('.fi-section').filter({has:heading}).last();
+        assert.match(await section.innerText(), /asks for a username and password[\s\S]*maintenance page/);
+        await shot(client, viewport.width < 640 ? 'mobile-site-password-collapsed' : 'desktop-site-password-collapsed');
+        await heading.click(); await client.waitForTimeout(300);
+        assert.match(await section.innerText(), /uses http:\/\/|Saved for|Not set/);
+        await shot(client, viewport.width < 640 ? 'mobile-site-password-expanded' : 'desktop-site-password-expanded');
         await client.context().close();
       }
-    });
-    await check('mobile help tap opens a visible dialog without changing settings', async () => {
-      const mobile = await login(metadata.admin_email, {width:390,height:844}); await load(mobile, 'Settings');
-      await livewire(mobile, () => mobile.locator('[id="settingsForm.mode-full-quiesced"]').check());
-      const before = await snapshot(); await livewire(mobile, () => mobile.getByRole('button',{name:'Help for Job lock files',exact:true}).tap());
-      const dialog = mobile.locator('.fi-modal.fi-modal-open'); await dialog.getByRole('heading',{name:'Job lock files',exact:true}).waitFor();
-      assert.match(await dialog.innerText(), /flock|lock paths/); await shot(mobile,'mobile-help-dialog'); await closeDialog(mobile); await unchanged(before); await mobile.context().close();
     });
     await check('settings and create-backup mode explanations', async () => {
       await load(page, 'Settings');
@@ -293,7 +279,7 @@ try {
       assert.match(await page.locator('main').innerText(), /stays online/i);
       for (const tab of ['Backups', 'Settings', 'Help']) {
         await load(page, tab); await livewire(page, () => page.getByRole('button', {name: 'Create backup', exact: true}).first().click());
-        const dialog = page.locator('.fi-modal.fi-modal-open'); await dialog.getByRole('heading', {name: 'Create a backup', exact: true}).waitFor();
+        const dialog = page.locator('.fi-modal.fi-modal-open'); await dialog.getByRole('heading', {name: 'Create backup', exact: true}).waitFor();
         await shot(page, 'create-from-' + tab.toLowerCase());
         assert.match(await dialog.innerText(), /maintenance page|site pauses/i); assert.match(await dialog.innerText(), /stays online/i);
         await closeDialog(page);
@@ -304,100 +290,113 @@ try {
     await check('positive integer server validation preserves all native rows', async () => {
       for (const value of ['0', '-1', '1.5']) {
         await load(page, 'Settings'); const before = await snapshot();
-        await field(page, 'retention_keep').fill(value); await save(page); await unchanged(before);
+        await field(page, 'retention_keep_full').fill(value); await save(page); await unchanged(before);
         assert.match(await page.locator('main').innerText(), /at least 1|greater than zero|integer|whole number/i);
       }
       return '0, negative and fractional Backups to keep rejected before persistence';
     });
     await check('weekly schedule requires a selected day before persistence', async () => {
       await load(page, 'Settings'); const before = await snapshot();
-      await livewire(page, () => page.getByRole('switch', {name: 'Create backups automatically', exact: true}).click());
-      await livewire(page, () => page.getByRole('radio', {name: 'Weekly', exact: true}).check());
+      await selected(page, field(page, 'full_schedule'), 'weekly');
+      // Database backups are off in the fixture, so these are the full backup days.
       for (const checkbox of await page.getByRole('checkbox', {name: /^(Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday)$/}).all()) await checkbox.uncheck();
       await save(page); await unchanged(before); assert.match(await page.locator('main').innerText(), /Choose at least one day/i);
     });
     await check('invalid S3 settings preserve native rows and credential file', async () => {
       for (const invalid of ['endpoint', 'prefix', 'acknowledgement']) {
         await load(page, 'Settings'); const before = await snapshot();
-        await checked(page, page.getByRole('radio', {name: /^This server and S3/}));
+        await uploadToS3(page);
         await field(page, 's3_bucket').fill('fake-browser-bucket');
         await field(page, 's3_endpoint').fill(invalid === 'endpoint' ? 'http://fake.example.invalid?query=bad' : 'https://fake.example.invalid');
         await field(page, 's3_prefix').fill(invalid === 'prefix' ? '../wrong' : 'fixture');
-        await page.getByRole('checkbox', {name: 'I understand archives in S3 are not encrypted', exact: true}).setChecked(invalid !== 'acknowledgement');
+        await setToggle(page, field(page, 's3_encryption'), false);
+        await page.getByRole('checkbox', {name: 'I understand backups in S3 won\'t be encrypted', exact: true}).setChecked(invalid !== 'acknowledgement');
         await save(page); await unchanged(before);
-        assert.match(await page.locator('main').innerText(), /https:\/\/ address|prefix parts|folder names|Confirm this/i);
+        assert.match(await page.locator('main').innerText(), /https:\/\/ API URL|can't contain|Confirm this/i);
       }
     });
   }
   if (phase === 'validation' || phase === 'all') {
     await check('S3 count, age and keep-all expose only relevant retention fields', async () => {
       await load(page,'Settings'); const before = await snapshot();
-      await checked(page, page.getByRole('radio',{name:/^This server and S3/}));
-      const policy = field(page,'s3_retention_policy');
+      await uploadToS3(page);
+      const policy = field(page,'s3_retention_policy_full');
       for (const selected of ['count','age','keep-all','local-count']) {
         if (await policy.inputValue() !== selected) await livewire(page, () => policy.selectOption(selected));
-        assert.equal(await field(page,'s3_retention_keep').isVisible(), selected === 'count');
-        assert.equal(await field(page,'s3_retention_days').isVisible(), selected === 'age');
+        assert.equal(await field(page,'s3_retention_keep_full').isVisible(), selected === 'count');
+        assert.equal(await field(page,'s3_retention_days_full').isVisible(), selected === 'age');
         await shot(page,'s3-retention-'+selected);
       }
       await unchanged(before);
     });
     await check('invalid independent S3 retention values fail before native persistence', async () => {
-      for (const [policy,key] of [['count','s3_retention_keep'],['age','s3_retention_days']]) {
+      for (const [policy,key] of [['count','s3_retention_keep_database'],['age','s3_retention_days_database']]) {
         await load(page,'Settings'); const before = await snapshot();
-        await checked(page, page.getByRole('radio',{name:/^This server and S3/}));
-        await selected(page, field(page,'s3_retention_policy'), policy);
-        await field(page,'s3_bucket').fill('fake-browser-bucket'); await page.getByRole('checkbox',{name:'I understand archives in S3 are not encrypted',exact:true}).check();
+        await uploadToS3(page);
+        await selected(page, field(page,'s3_retention_policy_database'), policy);
+        await field(page,'s3_bucket').fill('fake-browser-bucket'); await setToggle(page, field(page, 's3_encryption'), false);
+        await page.getByRole('checkbox',{name:'I understand backups in S3 won\'t be encrypted',exact:true}).check();
         await field(page,key).fill('0'); await save(page); await unchanged(before);
         assert.match(await page.locator('main').innerText(),/at least 1|greater than zero/i);
       }
     });
   }
   if (phase === 'secrets' || phase === 'all') {
-    await check('secret canaries clear after validation and unrelated Livewire response', async () => {
-      await load(page, 'Settings'); await checked(page, page.getByRole('radio', {name: /^This server and S3/}));
-      if (await page.getByRole('button', {name: 'Replace S3 keys', exact: true}).count()) {
+    await check('secret canaries clear after validation and unrelated Livewire response; one Save stores keys', async () => {
+      await load(page, 'Settings'); await uploadToS3(page);
+      if (await page.getByText('Keys saved.', {exact: true}).isVisible()) {
         // Only this explicitly disposable fixture is accepted above. Reconcile fake
         // keys left by an interrupted earlier secret check through the real UI.
-        await livewire(page, () => page.getByRole('button', {name: 'Remove S3 keys', exact: true}).and(page.locator('button[type="button"]')).click());
-        await livewire(page, () => page.locator('.fi-modal.fi-modal-open').getByRole('button', {name: 'Remove S3 keys', exact: true}).click());
+        await livewire(page, () => page.getByRole('button', {name: 'Remove saved keys', exact: true}).click());
+        await livewire(page, () => page.locator('.fi-modal.fi-modal-open').getByRole('button', {name: 'Remove keys', exact: true}).click());
+        await load(page, 'Settings'); await uploadToS3(page);
       }
+      await field(page, 's3_bucket').fill('fake-browser-bucket');
+      await setToggle(page, field(page, 's3_encryption'), false);
+      await page.getByRole('checkbox', {name: 'I understand backups in S3 won\'t be encrypted', exact: true}).check();
       const access = page.locator('[id="s3KeysForm.access_key"]'); const secret = page.locator('[id="s3KeysForm.secret_key"]');
       const canary = 'FAKE-BROWSER-SECRET-CANARY-42'; await access.fill(canary);
-      await page.locator('form').evaluateAll(forms => forms.forEach(form => form.noValidate = true));
-      let response = await livewire(page, () => page.getByRole('button', {name: 'Save S3 keys', exact: true}).click());
+      const before = await snapshot();
+      let response = await save(page);
       assert(!response.includes(canary), 'Secret echoed in response'); assert.equal(await access.inputValue(), ''); assert.equal(await secret.inputValue(), '');
+      await unchanged(before);
+      assert.match(await page.locator('main').innerText(), /Enter your secret access key/);
       await access.fill(canary); await secret.fill(canary);
-      const rowsBeforeKeySave = (await snapshot()).rows;
-      response = await livewire(page, () => page.getByRole('button', {name: 'Save S3 keys', exact: true}).click());
+      response = await save(page);
       assert(!response.includes(canary), 'Saved secret echoed in response');
-      assert.equal(await page.getByRole('button', {name: 'Replace S3 keys', exact: true}).count(), 1, 'Saved keys were not acknowledged by native UI');
+      await load(page, 'Settings');
+      assert.equal(await page.getByText('Keys saved.', {exact: true}).isVisible(), true, 'Saved keys were not acknowledged by native UI');
+      assert.equal(await access.getAttribute('placeholder'), 'Saved. Leave empty to keep.');
       assert.equal(await access.inputValue(), ''); assert.equal(await secret.inputValue(), '');
-      assert.equal((await snapshot()).rows, rowsBeforeKeySave, 'Saving keys changed native settings');
       const credentialNames = (await readdir(metadata.private_root)).filter(name => /credential|secret/i.test(name));
       assert(credentialNames.length, 'Encrypted credential file missing after save');
       for (const name of credentialNames) {
         const file = path.join(metadata.private_root, name);
         if ((await stat(file)).isFile()) assert(!(await readFile(file, 'utf8')).includes(canary), 'Plaintext canary persisted');
       }
-      await livewire(page, () => page.getByRole('button', {name: 'Remove S3 keys', exact: true}).and(page.locator('button[type="button"]')).click());
+      // A later settings-only save keeps the keys without asking again.
+      const keyFiles = (await snapshot()).files; await field(page, 's3_region').fill('eu-west-1'); await save(page);
+      assert.deepEqual((await snapshot()).files, keyFiles, 'Settings-only save rewrote saved keys');
+      await livewire(page, () => page.getByRole('button', {name: 'Remove saved keys', exact: true}).click());
       let removal = page.locator('.fi-modal.fi-modal-open');
-      await removal.getByRole('heading', {name: 'Remove S3 keys?', exact: true}).waitFor();
-      assert.match(await removal.innerText(), /remove|keys/i); await shot(page, 'remove-keys-confirmation');
+      await removal.getByRole('heading', {name: 'Remove saved S3 keys?', exact: true}).waitFor();
+      assert.match(await removal.innerText(), /Backups already in S3 are kept/); await shot(page, 'remove-keys-confirmation');
       const beforeCancel = await snapshot(); await closeDialog(page); await unchanged(beforeCancel);
-      assert.equal(await page.getByRole('button', {name: 'Replace S3 keys', exact: true}).count(), 1, 'Cancelling removal lost saved keys');
-      await livewire(page, () => page.getByRole('button', {name: 'Remove S3 keys', exact: true}).and(page.locator('button[type="button"]')).click());
-      removal = page.locator('.fi-modal.fi-modal-open'); await removal.getByRole('heading', {name: 'Remove S3 keys?', exact: true}).waitFor();
-      await livewire(page, () => removal.getByRole('button', {name: 'Remove S3 keys', exact: true}).click());
-      assert.equal((await snapshot()).rows, rowsBeforeKeySave, 'Removing keys changed native settings');
-      assert.equal(await page.getByRole('button', {name: 'Save S3 keys', exact: true}).count(), 1, 'Keys remain configured after removal');
-      await access.fill(canary); await secret.fill(canary);
-      response = await save(page); assert(!response.includes(canary)); assert.equal(await access.inputValue(), ''); assert.equal(await secret.inputValue(), '');
+      await livewire(page, () => page.getByRole('button', {name: 'Remove saved keys', exact: true}).click());
+      removal = page.locator('.fi-modal.fi-modal-open'); await removal.getByRole('heading', {name: 'Remove saved S3 keys?', exact: true}).waitFor();
+      const rowsBeforeRemoval = (await snapshot()).rows;
+      await livewire(page, () => removal.getByRole('button', {name: 'Remove keys', exact: true}).click());
+      assert.equal((await snapshot()).rows, rowsBeforeRemoval, 'Removing keys changed native settings');
+      await load(page, 'Settings'); await uploadToS3(page);
+      assert.equal(await page.getByText('Keys saved.', {exact: true}).isVisible(), false, 'Keys remain configured after removal');
+      // Turn uploads off again so later phases start from local storage.
+      await load(page, 'Settings'); await livewire(page, () => field(page, 'upload_s3').uncheck()); await save(page);
       // The fixture address is plain http: no site password form is offered, and the reason is shown.
       await load(page, 'Settings');
-      await livewire(page, () => page.locator('[id="settingsForm.mode-full-quiesced"]').check());
-      await page.getByRole('heading', {name:'HTTP Basic authentication (advanced)',exact:true}).click();
-      assert.match(await page.locator('main').innerText(), /App URL in Paymenter settings uses http:\/\/[\s\S]*HTTP Basic credentials require HTTPS/);
+      const heading = page.getByRole('heading', {name:'Site password (HTTP Basic)',exact:true});
+      if (!await heading.isVisible()) await page.getByRole('heading', {name:'Full backup requirements',exact:true}).click();
+      await heading.click();
+      assert.match(await page.locator('main').innerText(), /Your App URL uses http:\/\/\. A site password can only be sent over https:\/\//);
       assert.equal(await page.locator('[id="siteAccessForm.username"]').count(), 0, 'Site password form offered over http');
     });
   }
@@ -409,7 +408,7 @@ try {
       let dialog = page.locator('.fi-modal.fi-modal-open'); await livewire(page, () => dialog.getByRole('button', {name: 'Create backup', exact: true}).click());
       const pending = await newRequest(before, 'run'); assert.match(await page.locator('main').innerText(), /Waiting|Queued/i);
       await livewire(page, () => page.getByRole('button', {name: 'Cancel', exact: true}).filter({visible: true}).first().click()); dialog = page.locator('.fi-modal.fi-modal-open');
-      assert.match(await dialog.innerText(), /has not started|Nothing is changed/i);
+      assert.match(await dialog.innerText(), /hasn't started/i);
       await livewire(page, () => dialog.getByRole('button', {name: 'Cancel backup', exact: true}).click());
       assert.equal((await requests()).find(r => r.request_id === pending.request_id).status, 'cancelled');
       before = await requests(); await livewire(page, () => page.getByRole('button', {name: 'Create backup', exact: true}).first().click());
@@ -417,7 +416,7 @@ try {
       const capture = await newRequest(before, 'run'); await control('worker', ['--request-id', capture.request_id]); await load(page);
       const completed = (await requests()).find(r => r.request_id === capture.request_id); assert.equal(completed.status, 'complete');
       const link = page.getByRole('link', {name: 'Download', exact: true}).first(); const href = await link.getAttribute('href');
-      const runId = href.split('/').pop(); const archive = await readFile(path.join(metadata.private_root, 'artifacts', runId + '.tar.gz'));
+      const runId = href.split('/').pop(); const archive = await readFile(await archivePath(runId));
       const reply = await page.context().request.get(href); assert.equal(reply.status(), 200);
       assert.match(reply.headers()['content-disposition'], /attachment/); assert.match(reply.headers()['content-disposition'], new RegExp(runId));
       assert.equal(reply.headers()['content-type'], 'application/gzip'); assert.equal(Number(reply.headers()['content-length']), archive.length);
@@ -468,7 +467,7 @@ try {
       while (await page.getByRole('button', {name: 'Verify', exact: true}).count()) {
         const row = page.locator('tr').filter({has: page.getByRole('button', {name: 'Verify', exact: true})}).first();
         const before = await requests(); await menu(page, row, 'Delete');
-        await livewire(page, () => page.locator('.fi-modal.fi-modal-open').getByRole('button', {name: 'Delete selected copies', exact: true}).click());
+        await livewire(page, () => page.locator('.fi-modal.fi-modal-open').getByRole('button', {name: 'Delete', exact: true}).click());
         const pending = await newRequest(before, 'delete'); await control('worker', ['--request-id', pending.request_id]);
         assert.equal((await requests()).find(r => r.request_id === pending.request_id).status, 'complete'); await load(page);
       }
@@ -476,16 +475,17 @@ try {
       while (await page.getByRole('link', {name: 'Download', exact: true}).count() > 1) {
         const link = page.getByRole('link', {name: 'Download', exact: true}).last(); const runId = (await link.getAttribute('href')).split('/').pop();
         const row = await findRow(page, runId); const before = await requests(); await menu(page, row, 'Delete');
-        const dialog = page.locator('.fi-modal.fi-modal-open'); const api = await localDeletionPreview(runId); assert.equal(api.refusal,null); assert(api.local_copy && !api.remote_copy); assert.equal(await dialog.getByRole('button',{name:'Delete selected copies',exact:true}).isVisible(),true); (report.localDeletionPreviews ||= []).push({runId,api,submitVisible:true,localSelected:await dialog.getByRole('radio',{name:'This server only',exact:true}).isChecked()}); assert.match(await dialog.innerText(), /Deletes the archive|Deletes this backup/); assert.match(await dialog.innerText(), /Paymenter's scheduler has not run yet\. Nothing is deleted until it does\./); if (await dialog.getByRole('radio', {name:'This server only',exact:true}).count()) assert.equal(await dialog.getByRole('radio', {name:'This server only',exact:true}).isChecked(),true); await shot(page, 'delete-confirmation');
-        await livewire(page, () => dialog.getByRole('button', {name: 'Delete selected copies', exact: true}).click());
-        const pending = await newRequest(before, 'delete'); assert((await stat(path.join(metadata.private_root, 'artifacts', runId + '.tar.gz'))).isFile(), 'Queued delete removed bytes during FPM request');
+        const dialog = page.locator('.fi-modal.fi-modal-open'); const api = await localDeletionPreview(runId); assert.equal(api.refusal,null); assert(api.local_copy && !api.remote_copy); assert.equal(await dialog.getByRole('button',{name:'Delete',exact:true}).isVisible(),true); (report.localDeletionPreviews ||= []).push({runId,api,submitVisible:true,localSelected:await dialog.getByRole('radio',{name:'This server',exact:true}).isChecked()}); assert.match(await dialog.innerText(), /The backup file on this server|The backup in S3/); if (await dialog.getByRole('radio', {name:'This server',exact:true}).count()) assert.equal(await dialog.getByRole('radio', {name:'This server',exact:true}).isChecked(),true); await shot(page, 'delete-confirmation');
+        const archiveFile = await archivePath(runId);
+        await livewire(page, () => dialog.getByRole('button', {name: 'Delete', exact: true}).click());
+        const pending = await newRequest(before, 'delete'); assert((await stat(archiveFile)).isFile(), 'Queued delete removed bytes during FPM request');
         await control('worker', ['--request-id', pending.request_id]); assert.equal((await requests()).find(r => r.request_id === pending.request_id).status, 'complete');
-        await assert.rejects(stat(path.join(metadata.private_root, 'artifacts', runId + '.tar.gz')), {code: 'ENOENT'}); await load(page);
+        await assert.rejects(stat(archiveFile), {code: 'ENOENT'}); await load(page);
       }
       const link = page.getByRole('link', {name: 'Download', exact: true}).first(); const runId = (await link.getAttribute('href')).split('/').pop();
       const before = await requests(); await menu(page, await findRow(page, runId), 'Delete');
-      const dialog = page.locator('.fi-modal.fi-modal-open'); assert.match(await dialog.innerText(), /cannot be deleted|last verified|only verified|another verified/i);
-      assert.equal(await dialog.getByRole('button', {name: 'Delete selected copies', exact: true}).count(), 0); assert.deepEqual(await requests(), before);
+      const dialog = page.locator('.fi-modal.fi-modal-open'); assert.match(await dialog.innerText(), /Can't delete|only usable backup|no other verified/i);
+      assert.equal(await dialog.getByRole('button', {name: 'Delete', exact: true}).count(), 0); assert.deepEqual(await requests(), before);
       await shot(page, 'last-good-protection'); await closeDialog(page);
     });
     await check('limited admin gets 403 for page and download', async () => {
@@ -517,16 +517,16 @@ try {
       const capture = await newRequest(before, 'run'); await control('worker', ['--request-id', capture.request_id]); await load(page);
       assert.equal((await requests()).find(item => item.request_id === capture.request_id).status, 'complete');
       const href = await page.getByRole('link', {name: 'Download', exact: true}).first().getAttribute('href'); const goodId = href.split('/').pop();
-      const goodPath = path.join(metadata.private_root, 'artifacts', goodId + '.tar.gz'); const bytes = await readFile(goodPath);
+      const goodPath = await archivePath(goodId); const bytes = await readFile(goodPath);
       // A copy whose last full check failed is not counted as a survivor, so the preview refuses.
       // Execution-time refusal for undetected damage stays covered by the engine tests.
       before = await requests(); await menu(page, await findRow(page, goodId), 'Delete'); await shot(page, 'damaged-candidate-preview');
-      const preview = page.locator('.fi-modal.fi-modal-open'); assert.match(await preview.innerText(), /cannot be deleted[\s\S]*only usable backup/);
-      assert.equal(await preview.getByRole('button', {name: 'Delete selected copies', exact: true}).count(), 0); await closeDialog(page);
+      const preview = page.locator('.fi-modal.fi-modal-open'); assert.match(await preview.innerText(), /Can't delete[\s\S]*only usable backup/);
+      assert.equal(await preview.getByRole('button', {name: 'Delete', exact: true}).count(), 0); await closeDialog(page);
       assert.deepEqual(await requests(), before); assert.deepEqual(await readFile(goodPath), bytes);
       const damaged = page.locator('tr').filter({has: page.getByRole('button', {name: 'Verify', exact: true})}).first();
       before = await requests(); await menu(page, damaged, 'Delete'); await shot(page, 'delete-damaged-preview');
-      await livewire(page, () => page.locator('.fi-modal.fi-modal-open').getByRole('button', {name: 'Delete selected copies', exact: true}).click());
+      await livewire(page, () => page.locator('.fi-modal.fi-modal-open').getByRole('button', {name: 'Delete', exact: true}).click());
       const cleanup = await newRequest(before, 'delete'); await control('worker', ['--request-id', cleanup.request_id]);
       assert.equal((await requests()).find(item => item.request_id === cleanup.request_id).status, 'complete'); assert.deepEqual(await readFile(goodPath), bytes);
       await load(page); assert.equal(await page.getByRole('link', {name: 'Download', exact: true}).count(), 1); await shot(page, 'good-survivor');

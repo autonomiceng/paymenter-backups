@@ -13,6 +13,30 @@ import zipfile
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 
 
+def wheel_contents(name, version, permitted, wheelhouse=None):
+    """A supplied wheelhouse is strictly offline, including metadata lookup."""
+    if wheelhouse is not None:
+        wheel_name = re.sub(r'[-_.]+', '_', name)
+        candidates = sorted(pathlib.Path(wheelhouse).glob(wheel_name + '-' + version + '-*-none-any.whl'))
+        verified = []
+        for source in candidates:
+            if source.stat().st_size > 64 * 1024 * 1024:
+                continue
+            contents = source.read_bytes()
+            if hashlib.sha256(contents).hexdigest() in permitted:
+                verified.append(contents)
+        if len(verified) != 1:
+            raise RuntimeError('one hash-locked portable wheel required in offline wheelhouse: ' + name)
+        return verified[0]
+    with urllib.request.urlopen('https://pypi.org/pypi/' + name + '/' + version + '/json', timeout=30) as response:
+        metadata = json.load(response)
+    wheels = [entry for entry in metadata['urls'] if entry['filename'].endswith('-none-any.whl') and entry['digests']['sha256'] in permitted]
+    if len(wheels) != 1:
+        raise RuntimeError('one hash-locked portable wheel required: ' + name)
+    with urllib.request.urlopen(wheels[0]['url'], timeout=120) as response:
+        return response.read(64 * 1024 * 1024 + 1)
+
+
 def build(output, wheelhouse=None):
     with tempfile.TemporaryDirectory(prefix='paymenter-backups-build-') as temporary:
         stage = pathlib.Path(temporary) / 'Backups'
@@ -35,18 +59,7 @@ def build(output, wheelhouse=None):
                 raise RuntimeError('invalid SDK lock')
             name, version = match.groups()
             permitted = set(re.findall(r'--hash=sha256:([a-f0-9]{64})', line))
-            with urllib.request.urlopen('https://pypi.org/pypi/' + name + '/' + version + '/json', timeout=30) as response:
-                metadata = json.load(response)
-            wheels = [entry for entry in metadata['urls'] if entry['filename'].endswith('-none-any.whl') and entry['digests']['sha256'] in permitted]
-            if len(wheels) != 1:
-                raise RuntimeError('one hash-locked portable wheel required: ' + name)
-            entry = wheels[0]
-            source = pathlib.Path(wheelhouse) / entry['filename'] if wheelhouse else None
-            if source and source.exists():
-                contents = source.read_bytes()
-            else:
-                with urllib.request.urlopen(entry['url'], timeout=120) as response:
-                    contents = response.read(64 * 1024 * 1024 + 1)
+            contents = wheel_contents(name, version, permitted, wheelhouse)
             if len(contents) > 64 * 1024 * 1024 or hashlib.sha256(contents).hexdigest() not in permitted:
                 raise RuntimeError('SDK wheel hash mismatch: ' + name)
             import io
