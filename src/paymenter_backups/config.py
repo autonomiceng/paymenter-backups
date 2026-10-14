@@ -1,6 +1,7 @@
 import json
 import pathlib
 import os
+import re
 import shutil
 import subprocess
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -87,11 +88,22 @@ def normalize(settings):
                     raise ValueError()
                 settings[key] = value in (True, "1", "true", 1)
             elif isinstance(default, int):
-                if isinstance(value, bool):
+                # Native rows are digit strings; JSON input is an integer. No floats.
+                if type(value) is not int and not (isinstance(value, str) and re.fullmatch(r"-?[0-9]{1,20}", value)):
                     raise ValueError()
                 settings[key] = int(value)
-            elif isinstance(default, list) and isinstance(value, str):
-                settings[key] = json.loads(value)
+            elif isinstance(default, str):
+                # The native editor stores an emptied text field as NULL.
+                if value is None:
+                    settings[key] = ""
+                elif not isinstance(value, str):
+                    raise ValueError()
+            elif isinstance(default, list):
+                if isinstance(value, str):
+                    value = json.loads(value)
+                if not isinstance(value, list):
+                    raise ValueError()
+                settings[key] = value
         except (TypeError, ValueError):
             raise BackupError("config-invalid") from None
 
@@ -119,10 +131,16 @@ def validate(envelope):
                 raise ValueError()
     except (KeyError, TypeError, ValueError, ZoneInfoNotFoundError):
         raise BackupError("config-invalid") from None
-    if not isinstance(settings["job_lock_paths"], list) or any(not pathlib.Path(item).is_absolute() for item in settings["job_lock_paths"]):
+    if not isinstance(settings["job_lock_paths"], list) or any(not isinstance(item, str) or not item.startswith("/") or "\0" in item for item in settings["job_lock_paths"]):
         raise BackupError("config-invalid")
-    if not isinstance(settings["extra_docroots"], list) or any(not pathlib.Path(item).is_absolute() for item in settings["extra_docroots"]):
+    if not isinstance(settings["extra_docroots"], list) or any(not isinstance(item, str) or not item.startswith("/") or "\0" in item for item in settings["extra_docroots"]):
         raise BackupError("config-invalid")
+    if not isinstance(settings["local_path"], str) or (settings["local_path"] and not settings["local_path"].startswith("/")):
+        raise BackupError("config-invalid")
+    # Same rule as storage.prefix, the native editor and the admin form.
+    prefix = settings["s3_prefix"].strip("/")
+    if "\\" in prefix or any(part in ("", ".", "..") for part in prefix.split("/")):
+        raise BackupError("s3-prefix-invalid")
     if settings["destination"] == "s3":
         if not settings["plaintext_offsite_acknowledged"] or not settings["s3_bucket"]:
             raise BackupError("plaintext-offsite-acknowledgement-required")

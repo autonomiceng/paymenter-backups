@@ -13,6 +13,7 @@ import tarfile
 import time
 import uuid
 
+from . import artifacts
 from .common import BackupError, atomic_json, digest, identity, read_json
 from .maintenance import MARKERS, billing_admission, cleanup, coordination, probe, strict_payload, schedule_admission
 from .process import boot_id, hash_stream, process_identity, run
@@ -288,6 +289,12 @@ def capture(state, envelope, scheduled=False, request_id=None):
             atomic_json(output / (run_id + ".manifest.json"), manifest)
             journal.update({"phase": "complete", "local_complete": True,
                             "archive_path": str(complete), "manifest_path": str(output / (run_id + ".manifest.json"))})
+            # The bytes were fully checked above while this run lock was held.
+            # Record the published descriptor identity so download can rely on it.
+            with artifacts.open_archive(state, run_id, journal) as artifact:
+                journal["verification"] = {"verified_at": time.time(), "source": "capture",
+                                           "sha256": manifest["archive"]["sha256"],
+                                           "identity": artifacts.identity(artifact.info)}
             state.save(journal)
             shutil.rmtree(payload)
             return journal
@@ -310,15 +317,17 @@ def capture(state, envelope, scheduled=False, request_id=None):
 
 
 def check_archive(path, manifest):
+    """Check gzip trailer, layout and payload digests; path may be an opener."""
+    opener = path if callable(path) else (lambda: open(path, "rb"))
     expected = manifest["payloads"]
     seen = set()
     try:
         # Tar EOF precedes gzip footer; consume all compressed bytes to validate
         # CRC/length and detect truncated or corrupted trailer data.
-        with gzip.open(path, "rb") as stream:
+        with opener() as raw, gzip.GzipFile(fileobj=raw, mode="rb") as stream:
             for _ in iter(lambda: stream.read(1024 * 1024), b""):
                 pass
-        with tarfile.open(path, "r:gz") as archive:
+        with opener() as raw, tarfile.open(fileobj=raw, mode="r:gz") as archive:
             for member in archive:
                 name = member.name.removeprefix("./")
                 if member.isdir() and name in ("", "."):
@@ -347,29 +356,48 @@ def check_archive(path, manifest):
     return True
 
 
-def verify(state, run_id, show=False):
-    journal = read_json(state.run_path(run_id) / "journal.json")
-    if not journal.get("local_complete"):
-        raise BackupError("run-incomplete")
-    manifest = read_json(journal["manifest_path"])
-    if manifest.get("installation_uuid") != state.uuid or manifest.get("run_id") != run_id:
-        raise BackupError("artifact-identity-mismatch")
-    archive = pathlib.Path(journal["archive_path"])
-    if archive.stat().st_size != manifest["archive"]["size"] or digest(archive) != manifest["archive"]["sha256"]:
-        raise BackupError("archive-checksum-mismatch")
-    check_archive(archive, manifest)
+def verify(state, run_id, show=False, record=False):
+    """Fully check one owned archive. record=True requires the caller's run lock."""
+    try:
+        with artifacts.open_archive(state, run_id) as artifact:
+            manifest = artifact.manifest
+            if artifact.digest() != manifest["archive"]["sha256"]:
+                raise BackupError("archive-checksum-mismatch")
+            check_archive(artifact.reader, manifest)
+            if not artifact.unchanged():
+                raise BackupError("archive-changed-during-verification")
+            checked = artifacts.identity(artifact.info)
+    except BackupError as error:
+        if record and error.code not in ("run-not-found", "run-incomplete", "artifact-deleted", "invalid-run-id"):
+            journal = artifacts.journal(state, run_id)
+            journal.pop("verification", None)
+            journal["verification_error"] = {"code": error.code, "at": time.time()}
+            state.save(journal)
+        raise
+    if record:
+        journal = artifacts.journal(state, run_id)
+        journal.pop("verification_error", None)
+        journal["verification"] = {"verified_at": time.time(), "source": "verify",
+                                   "sha256": manifest["archive"]["sha256"], "identity": checked}
+        state.save(journal)
     return manifest if show else {"run_id": run_id, "verified": True, "sha256": manifest["archive"]["sha256"]}
 
 
 def export(state, run_id, target):
     manifest = verify(state, run_id, show=True)
-    journal = read_json(state.run_path(run_id) / "journal.json")
+    journal = artifacts.journal(state, run_id)
     target = pathlib.Path(target).resolve()
     state.guard_location(target, "export-destination-unsafe")
     if target.exists() or state.app == target or state.app in target.parents:
         raise BackupError("export-destination-unsafe")
     target.mkdir(mode=0o700)
-    shutil.copyfile(journal["archive_path"], target / "backup.tar.gz")
+    with artifacts.open_archive(state, run_id, journal) as artifact:
+        with artifact.reader() as source, open(target / "backup.tar.gz", "xb") as copy:
+            shutil.copyfileobj(source, copy, 1024 * 1024)
+            copy.flush()
+            os.fsync(copy.fileno())
+        if not artifact.unchanged():
+            raise BackupError("archive-changed-during-export")
     os.chmod(target / "backup.tar.gz", 0o600)
     atomic_json(target / "manifest.json", manifest)
     (target / "RESTORE.txt").write_text("Verify SHA256 in manifest.json. Extract outer backup.tar.gz, then app.tar into a new private application path. Import database.sql with matching MariaDB client. Preserve APP_KEY and Passport keys. Consult project docs/RECOVERY.md before starting cron, queues, webhooks or providers. Re-enter S3 credentials; this kit excludes them. New host needs a new installation UUID.\n")

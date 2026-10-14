@@ -9,7 +9,9 @@ from zoneinfo import ZoneInfo
 from .common import BackupError, atomic_json, read_json
 from .process import detach, process_identity
 
-ACTIONS = ("run", "verify", "deliver", "retention", "destination-test")
+ACTIONS = ("run", "verify", "deliver", "retention", "destination-test", "delete")
+ACTIVE = ("pending", "deferred", "launching", "running")
+MODES = ("full-quiesced", "database-online")
 
 
 def path(state, request_id):
@@ -25,15 +27,38 @@ def create(state, action="run", arguments=None, slot=None):
     if action not in ACTIONS:
         raise BackupError("request-action-invalid")
     arguments = arguments or {}
-    if set(arguments) - {"run_id", "execute"}:
+    if set(arguments) - {"run_id", "execute", "mode", "actor"}:
         raise BackupError("request-arguments-invalid")
-    if action in ("verify", "deliver"):
+    if "mode" in arguments and (action != "run" or arguments["mode"] not in MODES):
+        raise BackupError("request-arguments-invalid")
+    if "actor" in arguments and (type(arguments["actor"]) is not int or arguments["actor"] < 0):
+        raise BackupError("request-arguments-invalid")
+    if action in ("verify", "deliver", "delete"):
         state.run_path(arguments.get("run_id"))
+    if action == "delete" and arguments.get("execute") is not True:
+        raise BackupError("delete-confirmation-required")
     request_id = hashlib.sha256((state.uuid + ":" + slot).encode()).hexdigest()[:32] if slot else uuid.uuid4().hex
     target = path(state, request_id)
     with state.lock("requests.lock"):
         if target.exists():
             return read_json(target)
+        existing = list_requests(state)
+        if not slot:
+            # A repeated click returns the waiting request instead of queueing a copy.
+            comparable = {key: value for key, value in arguments.items() if key != "actor"}
+            for item in existing:
+                if (item.get("status") in ("pending", "deferred") and not item.get("slot") and item.get("action") == action
+                        and {key: value for key, value in item.get("arguments", {}).items() if key != "actor"} == comparable):
+                    return item
+        if action == "delete":
+            from . import artifacts
+            journal = artifacts.journal(state, arguments["run_id"])
+            if journal.get("retained_deleted"):
+                raise BackupError("artifact-deleted")
+            if not journal.get("local_complete") and not journal.get("delete_intent"):
+                raise BackupError("run-incomplete")
+            if any(item.get("status") in ACTIVE and item.get("arguments", {}).get("run_id") == arguments["run_id"] for item in existing):
+                raise BackupError("delete-conflict")
         item = {"schema_version": 1, "request_id": request_id, "installation_uuid": state.uuid,
                 "created_at": time.time(), "action": action, "arguments": arguments,
                 "slot": slot, "status": "pending", "attempts": 0}
@@ -74,6 +99,21 @@ def due_slots(settings, now=None):
         if slot not in seen:
             seen.add(slot)
             yield slot, minute * 60
+
+
+def next_slot(settings, now=None, horizon=8 * 86400):
+    """First future schedule minute, using the same rules as due_slots."""
+    now = time.time() if now is None else now
+    zone = ZoneInfo(settings["schedule_timezone"])
+    start = int(now // 60) + 1
+    for minute in range(start, start + horizon // 60):
+        local = datetime.datetime.fromtimestamp(minute * 60, zone)
+        if local.strftime("%H:%M") != settings["schedule_time"]:
+            continue
+        if settings["schedule_frequency"] == "weekly" and local.weekday() not in settings["schedule_weekdays"]:
+            continue
+        return minute * 60
+    return None
 
 
 def tick(state, envelope, command_prefix):
@@ -119,7 +159,7 @@ def tick(state, envelope, command_prefix):
 
 def worker(state, envelope, request_id):
     from .engine import capture, verify
-    from .storage import deliver, destination_test, retention
+    from .storage import delete_run, deliver, destination_test, retention
     with state.lock("requests.lock"):
         item = read_json(path(state, request_id))
         if item["status"] != "launching":
@@ -129,12 +169,18 @@ def worker(state, envelope, request_id):
     try:
         action, arguments = item["action"], item["arguments"]
         if action == "run":
+            if arguments.get("mode"):
+                envelope["settings"]["mode"] = arguments["mode"]
             journal = capture(state, envelope, scheduled=bool(item.get("slot")), request_id=request_id)
             result = {"run_id": journal["run_id"], "local_complete": journal["local_complete"]}
             if envelope["settings"]["destination"] == "s3":
                 result.update(deliver(state, envelope, journal["run_id"]))
         elif action == "verify":
-            result = verify(state, arguments["run_id"])
+            # Recording a verification needs the run lock; busy work defers.
+            with state.lock():
+                result = verify(state, arguments["run_id"], record=True)
+        elif action == "delete":
+            result = delete_run(state, envelope, arguments["run_id"], request_id)
         elif action == "deliver":
             result = deliver(state, envelope, arguments["run_id"])
         elif action == "retention":
