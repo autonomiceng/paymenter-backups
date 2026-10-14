@@ -1,0 +1,39 @@
+# CodeRabbit configuration. Schema: https://coderabbit.ai/integrations/schema.v2.json
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+language: en-US
+tone_instructions: "Be direct and specific. Use plain, industry-standard language. Point to the exact line and suggest a concrete fix."
+reviews:
+  profile: assertive
+  request_changes_workflow: false
+  high_level_summary: true
+  poem: false
+  review_status: true
+  auto_review:
+    enabled: true
+    drafts: false
+    # Pull requests are stacked: each one targets the branch below it, not only main.
+    base_branches:
+      - ".*"
+  path_filters:
+    - "!dist/**"
+    - "!**/*.zip"
+  path_instructions:
+    - path: "**"
+      instructions: |
+        This is a public open-source repository. Flag anything that should not be public:
+        credentials, tokens, private keys, real hostnames, IP addresses, server paths,
+        database names, personal email addresses, or customer data. Examples and test data
+        must use example.com, documentation IP ranges, and placeholder values.
+    - path: "src/**"
+      instructions: |
+        Python backup engine. Check for data loss, partial writes, unsafe temp files, missing
+        cleanup on error, shell injection, and secrets written to logs or archives.
+    - path: "extension/**"
+      instructions: |
+        Paymenter extension (Laravel/PHP). Check authorization on admin actions, input
+        validation, safe handling of settings that hold secrets, and clear error messages.
+    - path: "tests/**"
+      instructions: |
+        Check that tests assert real behavior and cover failure paths, not only the happy path.
+chat:
+  auto_reply: true
