@@ -113,8 +113,11 @@ class State:
         if initialize:
             with self.lock("identity.lock"):
                 if not self.binding.exists():
+                    if any(path.name != "identity.lock" for path in self.root.iterdir()):
+                        raise BackupError("installation-state-orphaned")
                     atomic_json(self.binding, {"schema_version": 1, "app": str(self.app),
-                                "owner_uid": os.getuid(), "installation_uuid": str(uuid.uuid4())})
+                                "owner_uid": os.getuid(), "installation_uuid": str(uuid.uuid4()),
+                                "default_local_directory": "backups"})
         if not self.binding.exists():
             return
         private_file(self.binding)
@@ -122,6 +125,8 @@ class State:
         if self.installation.get("app") != str(self.app) or self.installation.get("owner_uid") != os.getuid():
             raise BackupError("installation-mismatch")
         self.uuid = self.installation["installation_uuid"]
+        if self.installation.get("default_local_directory", "artifacts") not in ("backups", "artifacts"):
+            raise BackupError("installation-mismatch")
         self.initialized = True
         policy = self.root / "policy.json"
         if policy.exists():
@@ -142,6 +147,9 @@ class State:
         if any(canonical == root or root in canonical.parents for root in self.document_roots):
             raise BackupError(code)
 
+    def default_destination(self):
+        return self.root / (self.installation.get("default_local_directory", "artifacts") if self.installation else "backups")
+
     def apply_policy(self, settings, write=False):
         roots = [pathlib.Path(path).resolve() for path in settings.get("extra_docroots", [])]
         self.document_roots = [(self.app / "public").resolve()] + roots
@@ -150,7 +158,7 @@ class State:
             atomic_json(self.root / "policy.json", {"schema_version": 1, "extra_docroots": [str(path) for path in roots]})
 
     @contextlib.contextmanager
-    def lock(self, name="run.lock", blocking=False, create=True):
+    def lock(self, name="run.lock", blocking=False, create=True, timeout=0):
         if not create and not (self.root / name).exists():
             yield None
             return
@@ -160,10 +168,16 @@ class State:
             info = os.fstat(descriptor)
             if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077:
                 raise BackupError("private-state-permissions")
-            try:
-                fcntl.flock(descriptor, fcntl.LOCK_EX | (0 if blocking else fcntl.LOCK_NB))
-            except BlockingIOError:
-                raise BackupError("busy") from None
+            deadline = time.monotonic() + timeout
+            while True:
+                try:
+                    fcntl.flock(descriptor, fcntl.LOCK_EX | (0 if blocking else fcntl.LOCK_NB))
+                    break
+                except BlockingIOError:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise BackupError("busy") from None
+                    time.sleep(min(0.05, remaining))
             yield descriptor
         finally:
             os.close(descriptor)

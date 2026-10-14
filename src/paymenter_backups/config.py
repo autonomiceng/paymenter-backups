@@ -20,6 +20,7 @@ DEFAULTS = {
     "s3_timeout": 30, "s3_retries": 3, "cooperative_writers_acknowledged": False,
     "external_state_acknowledged": False, "no_concurrent_ddl_acknowledged": False,
     "local_path": "", "extra_docroots": [], "automatic_retention": True,
+    "s3_retention_policy": "local-count", "s3_retention_keep": 30, "s3_retention_days": 90,
 }
 
 
@@ -55,7 +56,8 @@ def bridge(args, verb="read", payload=None):
                          "database-prefix-unsupported", "native-secret-row-refused", "billing-settings-unreadable",
                          "installation-mismatch", "private-root-invalid", "private-file-invalid",
                          "private-root-inside-docroot", "private-pipe-required", "application-unavailable",
-                         "extension-uninstalled", "credentials-invalid", "private-write-failed", "maintenance-probe-credentials-invalid", "maintenance-probe-origin-mismatch"}:
+                         "extension-uninstalled", "credentials-invalid", "private-write-failed", "maintenance-probe-credentials-invalid", "maintenance-probe-origin-mismatch",
+                         "maintenance-probe-origin-invalid", "maintenance-probe-http-saved", "document-roots-invalid"}:
                 raise BackupError(error)
             raise BackupError("bridge-failed")
         value = json.loads(result.stdout)
@@ -114,6 +116,8 @@ def validate(envelope):
         raise BackupError("config-invalid")
     if settings["schedule_frequency"] not in ("daily", "weekly"):
         raise BackupError("config-invalid")
+    if settings["s3_retention_policy"] not in ("local-count", "count", "age", "keep-all"):
+        raise BackupError("config-invalid")
     try:
         hour, minute = settings["schedule_time"].split(":")
         if len(hour) != 2 or len(minute) != 2 or not 0 <= int(hour) < 24 or not 0 <= int(minute) < 60:
@@ -123,7 +127,7 @@ def validate(envelope):
             raise ValueError()
         if settings["enabled"] and settings["schedule_frequency"] == "weekly" and not settings["schedule_weekdays"]:
             raise ValueError()
-        for key in ("local_byte_budget", "capture_timeout", "billing_guard_max_age", "request_max_age", "s3_timeout", "s3_retries", "retention_keep"):
+        for key in ("local_byte_budget", "capture_timeout", "billing_guard_max_age", "request_max_age", "s3_timeout", "s3_retries", "retention_keep", "s3_retention_keep", "s3_retention_days"):
             if isinstance(settings[key], bool) or int(settings[key]) <= 0:
                 raise ValueError()
         for key in ("minimum_free_bytes", "drain_seconds", "lock_timeout", "billing_margin_seconds"):
