@@ -10,6 +10,7 @@ import io
 import json
 import os
 import pathlib
+import re
 import subprocess
 import sys
 import shutil
@@ -19,6 +20,7 @@ import tempfile
 import time
 import unittest
 from unittest.mock import patch
+from types import SimpleNamespace
 
 from paymenter_backups import artifacts, cli, config, discovery, engine, presentation, requests, storage, tools
 from paymenter_backups.common import BackupError, State, atomic_json, read_json
@@ -195,6 +197,41 @@ class ConfigurationTests(PrivateFixture):
                 config.normalize(value)
                 self.validate(value)
 
+    def test_direct_database_config_init_and_schedule_do_not_acquire_launcher_locks(self):
+        self.envelope.update(schema_version=1, owner_uid=os.getuid(), private_root=str(self.state.root))
+        for lock_name in ('scheduler.lock', 'queue.lock'):
+            for command, payload in ((['run', '--execute', '--mode', 'database-online'], None),
+                                     (['config', 'set'], {'settings': {'retention_keep_database': 31}}),
+                                     (['init'], None),
+                                     (['schedule', 'disable', '--kind', 'database'], None)):
+                with self.subTest(lock=lock_name, command=command):
+                    args = cli.parser().parse_args(['--app', str(self.app), '--private-root', str(self.state.root),
+                                                    '--php', '/usr/bin/php', *command])
+                    def publish(arguments, input_bytes, descriptors):
+                        self.settings.update(json.loads(input_bytes))
+                        config.normalize(self.settings)
+                        output = json.dumps({'ok': True, 'receipt': {}, 'snapshot': copy.deepcopy(self.settings)}).encode()
+                        return subprocess.CompletedProcess(arguments, 0, stdout=output, stderr=b'')
+                    with (self.state.root / lock_name).open('r+b') as held:
+                        fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        with patch.object(cli, 'bridge', side_effect=lambda *a, **k: copy.deepcopy(self.envelope)), \
+                             patch.object(config, 'bridge', side_effect=lambda *a, **k: copy.deepcopy(self.envelope)), \
+                             patch.object(cli, 'stdin_json', return_value=payload), \
+                             patch.object(tools, 'checks', side_effect=self.tool_reports), \
+                             patch.object(cli, 'run_native_writer', side_effect=publish), \
+                             patch.object(cli, 'capture', return_value={'run_id': 'stubbed-database', 'archive_path': '/fixture'}) as capture:
+                            result = cli.dispatch(args)
+                        if command[0] == 'run':
+                            self.assertEqual(result['run_id'], 'stubbed-database')
+                            self.assertEqual(capture.call_args.args[1]['settings']['mode'], 'database-online')
+                        else:
+                            capture.assert_not_called()
+                            self.assertTrue(result['initialized'] if command[0] == 'init' else result['updated'])
+                            self.assertFalse(result.get('partial', False))
+                        with (self.state.root / lock_name).open('r+b') as contender:
+                            with self.assertRaises(BlockingIOError):
+                                fcntl.flock(contender, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
     def test_credential_free_check_init_and_path_clear_use_authoritative_reads(self):
         self.envelope.update(schema_version=1, owner_uid=os.getuid(), private_root=str(self.state.root))
         calls = []
@@ -349,7 +386,7 @@ class SchedulerTests(PrivateFixture):
         return requests.create(self.state, arguments={'mode': 'database-online'}, slot='database:slot-' + str(slot_at),
                                scheduled_metadata={'schedule_kind': 'database', 'slot_at': slot_at, 'schedule_fingerprint': 'test', 'schedule_since': 0})
 
-    def test_durable_full_coverage_survives_delivery_error_local_removal_and_restart(self):
+    def test_available_full_coverage_survives_delivery_error_and_restart(self):
         request = self.scheduled_database(100)
         manual = requests.create(self.state, arguments={'mode': 'database-online'})
         self.backup('full', 'full-quiesced')
@@ -360,6 +397,113 @@ class SchedulerTests(PrivateFixture):
         saved = read_json(requests.path(self.state, request['request_id']))
         self.assertEqual((saved['status'], saved['covered_by']), ('satisfied', 'full'))
         self.assertEqual(read_json(requests.path(self.state, manual['request_id']))['status'], 'pending')
+
+    def coverage(self, run_id, lower_bound):
+        item = self.item(run_id)
+        item.update(database_snapshot_lower_bound=lower_bound,
+                    database_coverage={'snapshot_lower_bound': lower_bound, 'verified_at': lower_bound + 1})
+        self.state.save(item)
+
+    def test_outage_deleted_covering_full_does_not_absorb_resumed_database_slot(self):
+        slot = instant('2026-10-02T03:00:00+00:00')
+        self.settings.update(database_schedule='daily', database_time='03:00')
+        config.normalize(self.settings)
+        requests.sync_schedule(self.state, self.settings, now=slot - 3600)
+        self.backup('older-full', 'full-quiesced', slot - 86400)
+        self.coverage('older-full', slot - 86400)
+        self.backup('outage-full', 'full-quiesced', slot + 60)
+        self.coverage('outage-full', slot + 60)
+        # No tick has created the 03:00 obligation during the outage. Manual
+        # deletion at 03:05 is legal because an older full generation survives.
+        with patch.object(storage.time, 'time', return_value=slot + 300):
+            storage.delete_run(self.state, self.envelope, 'outage-full', location='local')
+        self.assertTrue(self.item('outage-full')['retained_deleted'])
+        launched = self.tick(slot + 600)['launched']
+        resumed = requests.list_requests(self.state)
+        self.assertEqual(len(resumed), 1)
+        self.assertEqual(resumed[0]['slot_at'], slot)
+        self.assertEqual(resumed[0]['status'], 'launching')
+        self.assertEqual(launched, [resumed[0]['request_id']])
+        self.assertNotIn('covered_by', resumed[0])
+
+    def test_satisfied_receipt_survives_covering_generation_deletion(self):
+        request = self.scheduled_database(100)
+        self.backup('older-full', 'full-quiesced')
+        self.backup('covering-full', 'full-quiesced', 2)
+        self.coverage('covering-full', 101)
+        requests.reconcile_coverage(self.state, self.envelope)
+        receipt = read_json(requests.path(self.state, request['request_id']))
+        self.assertEqual(receipt['status'], 'satisfied')
+        storage.delete_run(self.state, self.envelope, 'covering-full', location='local')
+        requests.reconcile_coverage(State(self.app, self.state.root, initialize=False), self.envelope)
+        self.assertEqual(read_json(requests.path(self.state, request['request_id'])), receipt)
+
+    def test_coverage_requires_current_bytes_and_defers_during_deletion_lock(self):
+        request = self.scheduled_database(100)
+        archive, _ = self.backup('full', 'full-quiesced')
+        self.coverage('full', 101)
+        with self.state.lock():
+            requests.reconcile_coverage(self.state, self.envelope)
+            self.assertEqual(read_json(requests.path(self.state, request['request_id']))['status'], 'pending')
+        original = archive.read_bytes()
+        archive.write_bytes(b'x' * len(original))
+        requests.reconcile_coverage(self.state, self.envelope)
+        self.assertEqual(read_json(requests.path(self.state, request['request_id']))['status'], 'pending')
+        archive.write_bytes(original)
+        with self.state.lock():
+            requests.reconcile_coverage(self.state, self.envelope, locked=True)
+        self.assertEqual(read_json(requests.path(self.state, request['request_id']))['status'], 'satisfied')
+
+    def test_remote_only_coverage_requires_current_complete_remote_proof(self):
+        self.remote(keep_local=False)
+        self.backup('remote-full', 'full-quiesced', deliver=True)
+        self.coverage('remote-full', 101)
+        self.assertFalse(self.item('remote-full')['local_complete'])
+        request = self.scheduled_database(100)
+        requests.reconcile_coverage(self.state)
+        self.assertEqual(read_json(requests.path(self.state, request['request_id']))['status'], 'pending')
+        remote = self.item('remote-full')['remote']
+        key = (remote['bucket'], remote['archive_key'])
+        saved = self.store.objects.pop(key)
+        requests.reconcile_coverage(self.state, self.envelope)
+        self.assertEqual(read_json(requests.path(self.state, request['request_id']))['status'], 'pending')
+        self.store.objects[key] = saved
+        requests.reconcile_coverage(self.state, self.envelope)
+        self.assertEqual(read_json(requests.path(self.state, request['request_id']))['status'], 'satisfied')
+
+    def test_tick_uses_current_local_verification_and_launches_without_expensive_proof(self):
+        slot = instant('2026-10-02T03:00:00+00:00')
+        self.settings.update(database_schedule='daily', database_time='03:00')
+        config.normalize(self.settings)
+        requests.sync_schedule(self.state, self.settings, now=slot - 3600)
+        self.backup('current-full', 'full-quiesced')
+        self.coverage('current-full', slot + 60)
+        with patch.object(engine, 'verify', side_effect=AssertionError('tick cannot hash archives')), patch.object(storage, 'checked_remote', side_effect=AssertionError('tick cannot contact storage')):
+            self.assertEqual(self.tick(slot + 600)['launched'], [])
+        receipt = requests.list_requests(self.state)[0]
+        self.assertEqual((receipt['status'], receipt['covered_by']), ('satisfied', 'current-full'))
+        # On the next day's outage, historical remote delivery and stale local
+        # verification must not make the bounded tick wait for expensive proof.
+        self.coverage('current-full', slot + 86400 + 60)
+        item = self.item('current-full')
+        item.update(verification=None, remote_delivered=True)
+        self.state.save(item)
+        with patch.object(engine, 'verify', side_effect=AssertionError('tick cannot hash archives')), patch.object(storage, 'checked_remote', side_effect=AssertionError('tick cannot contact storage')):
+            launched = self.tick(slot + 86400 + 600)['launched']
+        fresh = next(item for item in requests.list_requests(self.state) if item['slot_at'] == slot + 86400)
+        self.assertEqual(launched, [fresh['request_id']])
+        self.assertEqual(fresh['status'], 'launching')
+        fresh['status'] = 'complete'
+        atomic_json(requests.path(self.state, fresh['request_id']), fresh)
+        self.coverage('current-full', slot + 2 * 86400 + 60)
+        item = self.item('current-full')
+        item['local_complete'] = False
+        self.state.save(item)
+        with patch.object(engine, 'verify', side_effect=AssertionError('tick cannot hash archives')), patch.object(storage, 'checked_remote', side_effect=AssertionError('tick cannot contact storage')):
+            launched = self.tick(slot + 2 * 86400 + 600)['launched']
+        remote_only = next(item for item in requests.list_requests(self.state) if item['slot_at'] == slot + 2 * 86400)
+        self.assertEqual(launched, [remote_only['request_id']])
+        self.assertEqual(remote_only['status'], 'launching')
 
 
     def test_worker_delivery_failure_cannot_undo_successful_full_coverage(self):
@@ -612,6 +756,65 @@ class StorageTests(PrivateFixture):
 
 
 class DiscoveryTests(PrivateFixture):
+    def test_cron_escaping_is_shared_by_discovery_and_legacy_lock_validation(self):
+        from paymenter_backups.maintenance import _legacy_cron_lock
+        app = self.base / 'app%site'
+        lock = str(self.base / 'private%archive' / 'scheduler.lock')
+        php = str(self.base / 'hosting%php' / 'php')
+        command = f"/usr/bin/flock -n '{lock}' '{php}' '{app}/artisan' schedule:run"
+        line = '* * * * * ' + command.replace('%', r'\%')
+        self.assertEqual(_legacy_cron_lock(line, app, [lock]), lock)
+        self.assertTrue(discovery.relevant(line, app))
+        self.assertFalse(discovery.relevant(line, self.app))
+        self.assertEqual(discovery.parse(line, app)['lock'], lock)
+        self.assertEqual(discovery.parse(command, app, cron=False)['lock'], lock)
+        # Shell quotes do not protect cron's stdin delimiter, and an even number
+        # of backslashes does not escape it either.
+        for invalid in ('* * * * * ' + command, line.replace(r'\%', r'\\%')):
+            with self.subTest(line=invalid):
+                with self.assertRaisesRegex(BackupError, 'job-command-unsupported'):
+                    discovery.parse(invalid, app)
+                with self.assertRaisesRegex(BackupError, 'job-locks-unverified'):
+                    _legacy_cron_lock(invalid, app, [lock])
+                self.assertTrue(discovery.relevant(invalid, self.app))
+                self.assertEqual(discovery.record(invalid, app, 'crontab', 'line 1')['command'], '')
+
+    def test_suggested_cron_jobs_preserve_percent_and_backslash_paths(self):
+        # Cron processes escapes before the shell, without honoring shell quotes.
+        def cron_command(line):
+            def translate(match):
+                value = match.group()
+                self.assertNotEqual(value, '%', 'cron would split the command into stdin')
+                return '%' if value == r'\%' else value
+            return re.sub(r'\\.|%', translate, line.split(' ', 5)[5])
+
+        for index, names in enumerate((('app%site', 'private', 'hosting'),
+                                       ('app', 'private%archive', 'hosting'),
+                                       ('app', 'private', 'hosting%php'),
+                                       (r"app\%site'", r'private\\%archive', r'hosting\%php'),
+                                       ('%app%', '%private%', '%hosting%'))):
+            with self.subTest(names=names):
+                base = self.base / str(index)
+                app, private, hosting = (base / name for name in names)
+                for directory in (app, private, hosting):
+                    directory.mkdir(parents=True)
+                php = hosting / 'php'
+                receipt = hosting / 'arguments.json'
+                php.write_text('#!' + sys.executable + '\nimport json, pathlib, sys\n'
+                               "pathlib.Path(__file__).with_name('arguments.json').write_text(json.dumps(sys.argv[1:]))\n")
+                php.chmod(0o700)
+                state = SimpleNamespace(app=app, root=private)
+                for kind, line in discovery.suggestions(state, {'tools': {'php': str(php)}}).items():
+                    shell = cron_command(line)
+                    result = subprocess.run(['/bin/sh', '-c', shell], check=False, timeout=5)
+                    self.assertEqual(result.returncode, 0)
+                    expected = [str(app / 'artisan'), 'schedule:run'] if kind == 'scheduler' else [str(app / 'artisan'), 'queue:work', '--stop-when-empty', '--max-time=50']
+                    self.assertEqual(json.loads(receipt.read_text()), expected)
+                    item = discovery.parse(line, app)
+                    self.assertEqual(item['lock'], str(private / ('scheduler.lock' if kind == 'scheduler' else 'queue.lock')))
+                    self.assertEqual(item['coordination'], 'coordinated')
+                    self.assertEqual(discovery.parse(item['command'], app, cron=False), item)
+
     def test_every_emitted_suggestion_parses_and_init_locks_are_private(self):
         for key, line in discovery.suggestions(self.state, self.envelope).items():
             item = discovery.parse(line, self.app)
@@ -678,7 +881,7 @@ class DiscoveryTests(PrivateFixture):
         self.assertIn('job-lock-unsafe', [item['code'] for item in discovery.admission(self.envelope, inventory)[0]])
 
     def test_cache_refresh_is_bounded_private_and_overview_never_rediscovers(self):
-        with patch.object(discovery, 'discover', return_value=dict(self.inventory(), app=str(self.app), schema_version=1, parser_version=1)) as discover:
+        with patch.object(discovery, 'discover', return_value=dict(self.inventory(), app=str(self.app), schema_version=1, parser_version=discovery.PARSER_VERSION)) as discover:
             discovery.refresh_cache(self.state, self.envelope)
             discovery.refresh_cache(self.state, self.envelope)
             discover.assert_called_once()
@@ -688,6 +891,11 @@ class DiscoveryTests(PrivateFixture):
         self.assertEqual(result['configuration']['checks']['jobs']['state'], 'ok')
         value = read_json(self.state.root / 'discovery.json')
         self.assertEqual(discovery.cached(self.state, value['checked_at'] + 901)['state'], 'stale')
+
+    def test_cache_from_before_cron_escape_validation_requires_rediscovery(self):
+        old = dict(self.inventory(), app=str(self.app), schema_version=1, parser_version=1)
+        atomic_json(self.state.root / 'discovery.json', old)
+        self.assertEqual(discovery.cached(self.state)['state'], 'unknown')
 
 
     def test_other_absolute_application_jobs_are_not_claimed(self):

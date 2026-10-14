@@ -100,7 +100,7 @@ class CLITests(unittest.TestCase):
         envelope_path.write_text(json.dumps(fixture.envelope))
         bridge = fixture.base / "bridge.py"
         bridge.write_text("import json,pathlib,sys\nenv=json.load(open(" + repr(str(envelope_path)) + "))\nenv['settings'].update(json.load(open(" + repr(str(native_settings)) + ")))\nprint(json.dumps(env))\n")
-        (fixture.app / "artisan").write_text("import json,pathlib,sys\np=pathlib.Path(" + repr(str(native_settings)) + ")\nd=json.loads(p.read_text());d.update(json.load(sys.stdin));p.write_text(json.dumps(d))\n")
+        (fixture.app / "artisan").write_text("import json,pathlib,sys\np=pathlib.Path(" + repr(str(native_settings)) + ")\nd=json.loads(p.read_text());d.update(json.load(sys.stdin));p.write_text(json.dumps(d))\nprint(json.dumps({'ok':True,'receipt':{},'snapshot':d}))\n")
         command = self.command[:-4] + ["--php", sys.executable, "--bridge", str(bridge)]
         self.assertTrue(self.cli("config", "set", input={"settings": {"capture_timeout": 20}}, command=command)["updated"])
         self.assertEqual(json.loads(native_settings.read_text())["capture_timeout"], 20)

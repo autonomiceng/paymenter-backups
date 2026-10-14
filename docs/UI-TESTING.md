@@ -20,7 +20,7 @@ private root and fake credentials created by `tools/native_integration.py` or
 | Malformed rows | Save settings | Defaults written and named in a warning; malformed guard JSON refused | Native `check`; contract test `repair` |
 | S3 keys | Storage, Upload to S3, key fields | `Runtime::saveCredentials()` after settings and `init`; `{"clear":true}` to remove | Native `check`: incomplete pair writes nothing, canaries cleared, encrypted at rest, settings-only save keeps keys, removal keeps the site password; contract test `credentials`, `modals` |
 | Site password | Full backup requirements, Site password (HTTP Basic) | Same Save; origin taken on the server from Paymenter's https URL | Native `check`: browser origin ignored, http refused, removal over http, unreadable store kept; contract test `basic_states` |
-| Recovery key | Storage and Setup: Show, Download, I saved it, Create a new recovery key, Discard | `Runtime::encryptionKey()`, `revealRecoveryKey()` (render only), `recoveryKeyUrl()` | Native `check`: Save offers the key, key only in the dialog partial, confirmation needs the checkbox and activates the key |
+| Recovery key | Storage and Setup: Show, Download, I saved it, Create a new recovery key, Discard | `Runtime::encryptionKey()`, `revealRecoveryKey($fingerprint)` (render only; full granted identity), `recoveryKeyUrl()` | Native `check`: Save offers the key, key only in the dialog partial, confirmation needs the checkbox and activates the key; isolated page/bridge tests refuse replaced or disappeared granted keys |
 | Native fallback | Extensions editor | Same labels and engine-matching rules on stored strings; `updated()` advisory | Native `check`: zero, weekday 7, unsupported hours, relative path refused |
 | Create backup | Header action, type choice | `requests create --action run` with `mode`, `actor` | Native `check`: pending request, no capture in FPM |
 | Cancel waiting task | Row Cancel, or More actions, Cancel | `requests cancel` | Native `check` cancels spooled requests |
@@ -77,9 +77,9 @@ by eye:
   extension stops its tick.
 * The cron check-in is the time of the last engine tick, not a guarantee that
   the server's cron job keeps running.
-* Typing in a key field and then changing a field that updates the form (such
-  as Upload to S3) clears the typed key, because secrets are reset on every
-  response. Enter keys last, then save.
+* Secrets are reset on every response. Form choices show and hide fields in
+  the browser, so they don't clear typed keys; a validation error or table
+  refresh still does, and the page then asks for them again inline.
 * The page cannot move an initialized data directory or run recovery.
 * Browser behaviour (keyboard order, dark mode, 390 px layout, a real download
   event, clipboard) needs a real browser. Livewire tests check state,

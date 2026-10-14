@@ -172,13 +172,17 @@ def admin_history(args, app, checker, cli, private, run, native_url, work):
     if hashlib.sha256(again.read_bytes()).hexdigest() != expected:
         raise RuntimeError('reverified download differs')
     execute(ui + ['delete-refused', run['run_id'], 'only usable backup'])
-    # A second, database-only backup can be deleted; the full backup survives.
+    # V2 deletion requires a survivor of the same kind. Two database copies
+    # exercise retention and deletion without another full capture.
     online = json.loads(execute(cli + ['run', '--execute', '--mode', 'database-online'], timeout=300))
-    # Two verified backups and a limit of one: retention is offered, queued, then cancelled.
-    keep = json.loads(execute(cli + ['config', 'show']))['settings']['retention_keep']
-    execute(cli + ['config', 'set'], input=json.dumps({'settings': {'retention_keep': 1}}).encode())
-    execute(ui + ['retention', 'two verified, keep one'])
-    execute(cli + ['config', 'set'], input=json.dumps({'settings': {'retention_keep': keep}}).encode())
+    survivor = json.loads(execute(cli + ['run', '--execute', '--mode', 'database-online'], timeout=300))
+    survivor_archive = pathlib.Path(survivor['archive_path'])
+    survivor_digest = hashlib.sha256(survivor_archive.read_bytes()).hexdigest()
+    current = json.loads(execute(cli + ['config', 'show']))['settings']
+    keep = {key: current[key] for key in ('retention_keep_full', 'retention_keep_database')}
+    execute(cli + ['config', 'set'], input=json.dumps({'settings': {'retention_keep_full': 1, 'retention_keep_database': 1}}).encode())
+    execute(ui + ['retention', 'two verified database copies, keep one'])
+    execute(cli + ['config', 'set'], input=json.dumps({'settings': keep}).encode())
     execute(ui + ['delete', online['run_id']])
     promote_and_run(cli, private, 'delete')
     journal = json.loads((private / 'runs' / online['run_id'] / 'journal.json').read_text())
@@ -186,10 +190,55 @@ def admin_history(args, app, checker, cli, private, run, native_url, work):
         raise RuntimeError('admin delete did not remove the selected backup')
     if hashlib.sha256(archive.read_bytes()).hexdigest() != expected:
         raise RuntimeError('admin delete changed the surviving backup')
+    if hashlib.sha256(survivor_archive.read_bytes()).hexdigest() != survivor_digest:
+        raise RuntimeError('admin delete changed the same-kind surviving backup')
     execute(ui + ['render', 'Verified'])
     return {'download_matches_archive': True, 'download_audited': True, 'unauthenticated_redirected': True,
             'stale_verification_refused': True, 'queued_verify_restores_download': True,
             'last_backup_delete_refused': True, 'retention_offered_with_real_backups': True, 'queued_delete_removed_selected_only': True}
+
+
+def legacy_configuration_check(cli):
+    """Capture-free v1 probe; the caller must supply its own legacy identity."""
+    current = json.loads(execute(cli + ['config', 'show']))['settings']
+    if current['settings_version'] != 1:
+        raise RuntimeError('legacy compatibility requires an isolated v1 installation')
+    execute(cli + ['config', 'set'], input=json.dumps({'settings': {'enabled': False, 'retention_keep': 3}}).encode())
+    execute(cli + ['schedule', 'set'], input=json.dumps({'schedule_frequency': 'weekly', 'schedule_time': '02:30', 'schedule_weekdays': [0, 2], 'schedule_timezone': 'UTC'}).encode())
+    execute(cli + ['schedule', 'disable'])
+    written = json.loads(execute(cli + ['schedule', 'show']))
+    legacy = json.loads(execute(cli + ['config', 'show']))['settings']
+    if legacy['settings_version'] != 1 or legacy['retention_keep'] != 3 or written['enabled'] or written['schedule_weekdays'] != [0, 2] or written['schedule_time'] != '02:30':
+        raise RuntimeError('legacy v1 CLI configuration compatibility changed')
+    return {'settings_version': 1, 'total_retention_readable': True, 'singleton_schedule_writable': True}
+
+
+def legacy_configuration_fixture(work, app, php, checker):
+    """Separate native rows, application identity and private root; never downgrade v2."""
+    legacy_app = work / 'legacy-app'
+    legacy_private = work / 'legacy-private'
+    # Runtime/application source is copied; the immutable dependency tree may be
+    # shared. Laravel caches and storage remain owned by this separate app.
+    shutil.copytree(app, legacy_app, ignore=shutil.ignore_patterns('vendor', '.git'))
+    (legacy_app / 'vendor').symlink_to(app / 'vendor', target_is_directory=True)
+    for cached in (legacy_app / 'bootstrap/cache').glob('*.php'):
+        if cached.name not in ('packages.php', 'services.php'):
+            cached.unlink()
+    env = (legacy_app / '.env').read_text()
+    if env.count('/paymenter_fixture?') != 1:
+        raise RuntimeError('legacy fixture database binding unavailable')
+    env = env.replace('/paymenter_fixture?', '/paymenter_legacy_fixture?')
+    (legacy_app / '.env').write_text(env)
+    execute([php, 'artisan', 'migrate', '--force', '--seed'], cwd=legacy_app)
+    execute([php, checker, legacy_app, 'seed', 'http://127.0.0.1:1'])
+    # Seed legacy rows before installing defaults or initializing private state.
+    # This separate native record never contains marker/schema-2 schedule state.
+    execute([php, checker, legacy_app, 'legacy-install', legacy_private, sys.executable])
+    bridge = legacy_app / 'extensions/Others/Backups/bridge.php'
+    legacy_cli = [sys.executable, '-I', '-B', legacy_app / 'extensions/Others/Backups/runtime/cli.py',
+                  '--app', legacy_app, '--private-root', legacy_private, '--bridge', bridge, '--php', php]
+    execute(legacy_cli + ['init'])
+    return legacy_configuration_check(legacy_cli)
 
 
 def main():
@@ -235,7 +284,7 @@ def main():
         private = work / 'private'
         private.mkdir(mode=0o700)
         with maria(work) as sock:
-            execute(['mariadb', '--no-defaults', '--socket=' + str(sock), '-uroot', '-e', "CREATE DATABASE paymenter_fixture; CREATE DATABASE paymenter_restore; CREATE USER 'paymenter_fixture_user'@'localhost' IDENTIFIED BY 'paymenter-fixture-password'; GRANT SELECT,INSERT,UPDATE,DELETE,CREATE,ALTER,INDEX,DROP,REFERENCES ON paymenter_fixture.* TO 'paymenter_fixture_user'@'localhost'; GRANT SELECT,INSERT,UPDATE,DELETE,CREATE,ALTER,INDEX,DROP,REFERENCES ON paymenter_restore.* TO 'paymenter_fixture_user'@'localhost';"])
+            execute(['mariadb', '--no-defaults', '--socket=' + str(sock), '-uroot', '-e', "CREATE DATABASE paymenter_fixture; CREATE DATABASE paymenter_restore; CREATE DATABASE paymenter_legacy_fixture; CREATE USER 'paymenter_fixture_user'@'localhost' IDENTIFIED BY 'paymenter-fixture-password'; GRANT SELECT,INSERT,UPDATE,DELETE,CREATE,ALTER,INDEX,DROP,REFERENCES ON paymenter_fixture.* TO 'paymenter_fixture_user'@'localhost'; GRANT SELECT,INSERT,UPDATE,DELETE,CREATE,ALTER,INDEX,DROP,REFERENCES ON paymenter_restore.* TO 'paymenter_fixture_user'@'localhost'; GRANT SELECT,INSERT,UPDATE,DELETE,CREATE,ALTER,INDEX,DROP,REFERENCES ON paymenter_legacy_fixture.* TO 'paymenter_fixture_user'@'localhost';"])
             sys.path.insert(0, str(ROOT / 'tests/integration'))
             from database_visibility import check_visibility
             visibility = check_visibility(work, sock)
@@ -275,7 +324,7 @@ def main():
             if regular_output.returncode == 0 or rejected.stat().st_size or b'private-pipe-required' not in regular_output.stderr:
                 raise RuntimeError('internal secret envelope permits ordinary file output')
             # Fresh native process discovers command and actual schedule.
-            settings = {'private_root': str(private), 'python': sys.executable, 'schedule_time': '02:00', 'schedule_weekdays': '[0,2]', 'local_byte_budget': 2 * 1024**3, 'minimum_free_bytes': 1024**2, 'drain_seconds': 1, 'capture_timeout': 120, 'no_concurrent_ddl_acknowledged': True, 'cooperative_writers_acknowledged': True, 'external_state_acknowledged': True}
+            settings = {'settings_version': 2, 'private_root': str(private), 'python': sys.executable, 'mode': 'full-quiesced', 'full_time': '02:00', 'full_weekdays': '[0,2]', 'local_byte_budget': 2 * 1024**3, 'minimum_free_bytes': 1024**2, 'drain_seconds': 1, 'capture_timeout': 120, 'no_concurrent_ddl_acknowledged': True, 'full_host_assumptions_acknowledged': True}
             execute([args.php, 'artisan', 'backups:config-set'], cwd=app, input=json.dumps(settings).encode())
             php_alias = work / 'php-alias'
             php_alias.symlink_to(pathlib.Path(args.php).resolve())
@@ -396,11 +445,11 @@ def main():
                 execute([args.php, checker, app, 'app-url', native_url])
             execute(cli + ['config', 'show'])
             execute(cli + ['schedule', 'show'])
-            execute(cli + ['config', 'set'], input=json.dumps({'settings': {'retention_keep': 5}}).encode())
+            execute(cli + ['config', 'set'], input=json.dumps({'settings': {'retention_keep_full': 5, 'retention_keep_database': 25}}).encode())
             # This is the installed CLI's real config.lock/tick.lock path. The
             # audited Artisan write must not recursively run init under tick.lock.
             persisted_config = json.loads(execute(cli + ['config', 'show']))['settings']
-            if persisted_config['retention_keep'] != 5:
+            if persisted_config['settings_version'] != 2 or persisted_config['retention_keep_full'] != 5 or persisted_config['retention_keep_database'] != 25:
                 raise RuntimeError('installed CLI config-set under tick.lock did not persist')
             if not (private / 'schedule.json').is_file() or not (private / 'policy.json').is_file():
                 raise RuntimeError('installed CLI config-set did not publish policy and schedule state')
@@ -408,7 +457,7 @@ def main():
             # Direct Artisan use keeps its normal init/update behavior.
             advisory_path = private / 'configuration-advisory.json'
             advisory_before = advisory_path.stat()
-            execute([args.php, 'artisan', 'backups:config-set'], cwd=app, input=json.dumps({'retention_keep': '5'}).encode())
+            execute([args.php, 'artisan', 'backups:config-set'], cwd=app, input=json.dumps({'retention_keep_full': '5', 'retention_keep_database': '25'}).encode())
             advisory_after = advisory_path.stat()
             if (advisory_before.st_ino, advisory_before.st_mtime_ns) == (advisory_after.st_ino, advisory_after.st_mtime_ns):
                 raise RuntimeError('direct Artisan config-set skipped normal update behavior')
@@ -416,12 +465,14 @@ def main():
             if not advisory.get('valid'):
                 raise RuntimeError('direct Artisan config-set no longer initializes and validates')
             results['direct_artisan_config_set_initializes'] = True
-            execute(cli + ['schedule', 'set'], input=json.dumps({'schedule_frequency': 'weekly', 'schedule_time': '02:30', 'schedule_weekdays': [0, 2], 'schedule_timezone': 'UTC'}).encode())
-            execute(cli + ['schedule', 'enable'])
-            execute(cli + ['schedule', 'disable'])
-            written = json.loads(execute(cli + ['schedule', 'show']))
-            if written['enabled'] or written['schedule_weekdays'] != [0, 2] or written['schedule_time'] != '02:30':
-                raise RuntimeError('native CLI schedule write did not persist')
+            for kind in ('full', 'database'):
+                execute(cli + ['schedule', 'set', '--kind', kind], input=json.dumps({'frequency': 'weekly', 'time': '02:30', 'weekdays': [0, 2], 'timezone': 'UTC'}).encode())
+                execute(cli + ['schedule', 'enable', '--kind', kind])
+                execute(cli + ['schedule', 'disable', '--kind', kind])
+                written = json.loads(execute(cli + ['schedule', 'show', '--kind', kind]))['schedules'][kind]
+                if written['schedule'] != 'off' or written['weekdays'] != [0, 2] or written['time'] != '02:30':
+                    raise RuntimeError('native v2 CLI schedule write did not persist for ' + kind)
+            results['legacy_v1_configuration'] = legacy_configuration_fixture(work, app, args.php, checker)
             execute(cli + ['plan'])
             execute([args.php, checker, app, 'billing', time.strftime('%H:%M', time.gmtime())])
             current_guard = json.loads(execute([args.php, 'artisan', 'backups:guard'], cwd=app))
@@ -465,7 +516,7 @@ def main():
                 except urllib.error.HTTPError as error:
                     if error.code != 419:
                         raise RuntimeError('unexpected native CSRF response: ' + str(error.code))
-                execute(capture_cli + ['run', '--execute'], env=execution_env, timeout=300)
+                execute(capture_cli + ['run', '--execute', '--mode', 'full-quiesced'], env=execution_env, timeout=300)
                 runs = list((private / 'runs').glob('*/journal.json'))
                 journals = [json.loads(path.read_text()) for path in runs]
                 successful = [journal for journal in journals if journal.get('local_complete')]

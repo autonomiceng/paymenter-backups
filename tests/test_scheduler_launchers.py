@@ -2,6 +2,7 @@
 import json
 import os
 import pathlib
+import shlex
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -34,6 +35,13 @@ class LauncherTests(unittest.TestCase):
         with patch("paymenter_backups.maintenance.run", side_effect=self.response):
             self.assertEqual(systemd_locks(self.app, [self.lock], {"systemctl": "/usr/bin/true"}), {self.lock})
         self.assertTrue(self.invocations)
+
+    def test_systemd_paths_keep_literal_percent_and_backslashes(self):
+        self.app = self.app.with_name(r"paymenter\%site")
+        self.lock = str(self.app.parent / r'jobs\%archive.lock')
+        self.command = shlex.join(['/usr/bin/flock', self.lock, '/hosting%php/php', str(self.app / 'artisan'), 'schedule:run'])
+        with patch('paymenter_backups.maintenance.run', side_effect=self.response):
+            self.assertEqual(systemd_locks(self.app, [self.lock], {'systemctl': '/usr/bin/true'}), {self.lock})
 
     def test_unlocked_or_shell_wrapped_own_timer_refuses(self):
         for command in (f"/usr/bin/php {self.app}/artisan schedule:run", f"/bin/sh -c /usr/bin/flock {self.lock} /usr/bin/php {self.app}/artisan schedule:run"):

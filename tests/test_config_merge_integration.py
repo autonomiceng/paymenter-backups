@@ -9,8 +9,8 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from paymenter_backups import config, tools
-from paymenter_backups.common import BackupError
+from paymenter_backups import config, key_cli, tools
+from paymenter_backups.common import BackupError, State
 import test_archive_keys as archive_keys
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -27,7 +27,9 @@ class MergedBridgeTests(unittest.TestCase):
         self.private.mkdir(mode=0o700)
         self.runner = self.base / 'transaction.php'
         bridge = (ROOT / 'extension/Backups/bridge.php').read_text()
-        transaction = bridge[bridge.index('    $readEnvelope ='):bridge.index('} catch (Throwable $error) {\n    $safe =')]
+        # Include privacy and billing dispatch, not just credential transactions:
+        # export must exercise the PHP branch that once required cronjob_time.
+        transaction = bridge[bridge.index("    if ($verb === 'document-roots') {"):bridge.index('} catch (Throwable $error) {\n    $safe =')]
         harness = archive_keys.HARNESS.replace(
             "require $argv[1] . '/extension/Backups/ArchiveEncryption.php';",
             "require $argv[1] . '/extension/Backups/ArchiveEncryption.php';\n"
@@ -37,11 +39,22 @@ class MergedBridgeTests(unittest.TestCase):
                                   "public function __construct(private string $key, string $cipher) {\n"
                                   "if (getenv('FIXTURE_REFUSE_ENCRYPTER')) { throw new RuntimeException('encrypter-constructed'); }\n}")
         prelude = (
-            "$base = $argv[1];\n"
+            "$base = $identity['app'] ?? $argv[1];\n"
             "$db = ['driver' => 'mysql', 'database' => 'fixture', 'username' => 'fixture', 'password' => 'fake-db-secret'];\n"
             "$settings = json_decode(" + json.dumps(json.dumps(config.DEFAULTS)) + ", true);\n"
             "$extension = ['enabled' => true];\n"
-            "$billing = ['daily_time' => '02:00', 'timezone' => 'UTC'];\n")
+            "$prefix = '';\n"
+            "$pdo = new class {\n"
+            "    public function query(string $query): object {\n"
+            "        return new class {\n"
+            "            public function fetchAll(int $mode): array {\n"
+            "                $rows = ['app_url' => 'https://example.test', 'timezone' => 'UTC'];\n"
+            "                if (!getenv('FIXTURE_MISSING_BILLING')) { $rows['cronjob_time'] = '02:00'; }\n"
+            "                return $rows;\n"
+            "            }\n"
+            "        };\n"
+            "    }\n"
+            "};\n")
         self.runner.write_text(harness.replace('__TRANSACTION__', prelude + transaction))
 
     def call(self, verb, value=None, check=True, env=None):
@@ -55,6 +68,49 @@ class MergedBridgeTests(unittest.TestCase):
 
     def saved(self):
         return self.call('fixture-read')
+
+    def test_recovery_key_export_and_key_lifecycle_do_not_require_billing_row(self):
+        from paymenter_backups.cli import parser
+        app = self.base / 'app'
+        (app / 'public').mkdir(parents=True)
+        state = State(app, self.private)
+        output_directory = self.base / 'export'
+        output_directory.mkdir(mode=0o700)
+        output = output_directory / 'recovery-key.json'
+        pending = self.call('archive-key-import', {
+            'passphrase': archive_keys.SECRET, 'fingerprint': archive_keys.PARAMETERS})
+        missing_billing = dict(os.environ, FIXTURE_MISSING_BILLING='1')
+        calls = []
+
+        def bridge(_args, verb, payload=None):
+            calls.append(verb)
+            result = self.call(verb, payload, check=False, env=missing_billing)
+            if result.returncode:
+                raise BackupError(json.loads(result.stderr)['error'])
+            return json.loads(result.stdout)
+
+        args = parser().parse_args(['--app', str(app), '--private-root', str(self.private),
+                                   'recovery-key', 'export', '--output', str(output)])
+        result = key_cli.dispatch(args, state, bridge, lambda: {})
+        self.assertEqual(calls, ['document-roots', 'archive-key-export'])
+        self.assertEqual(result, {'exported': True, 'fingerprint': pending['fingerprint']})
+        self.assertNotIn(archive_keys.SECRET, json.dumps(result))
+        record = json.loads(output.read_text())
+        self.assertEqual(record['secret'], archive_keys.SECRET)
+        self.assertEqual(record['parameters'], archive_keys.PARAMETERS)
+        self.assertEqual(record['installation_uuid'], state.uuid)
+        self.assertEqual(output.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(bridge(None, 'archive-key-status')['state'], 'pending')
+        self.assertEqual(bridge(None, 'archive-key-reveal', {'fingerprint': pending['fingerprint']})['secret'], archive_keys.SECRET)
+        self.assertEqual(bridge(None, 'archive-key-acknowledge', {
+            'fingerprint': pending['fingerprint']})['state'], 'active')
+        rotated = bridge(None, 'archive-key-generate')
+        self.assertEqual(rotated['state'], 'pending')
+        bridge(None, 'archive-key-discard-pending')
+        self.assertEqual(bridge(None, 'credentials-rewrap'), {'ok': True})
+        for verb in ('read', 'read-settings'):
+            with self.subTest(verb=verb), self.assertRaisesRegex(BackupError, 'billing-settings-unreadable'):
+                bridge(None, verb)
 
     def test_settings_read_never_constructs_encrypter_or_reads_corrupt_archive_store(self):
         self.call('archive-key-generate')
@@ -141,11 +197,12 @@ class MergedRuntimeTests(unittest.TestCase):
                 "public function __call($name, $args) { if ($name === 'where') { $this->key = $args[1]; } return $this; }")
             combined = r'''
     \Symfony\Component\Process\Process::$success = true;
+    \Symfony\Component\Process\Process::$response = ['updated' => true, 'credentials_updated' => true];
     \Paymenter\Extensions\Others\Backups\Runtime::saveCredentials([
         's3' => ['access_key' => 'fake', 'secret_key' => ' fake secret '], 'site' => null,
     ]);
     $result['combined'] = array_values(array_filter(\Symfony\Component\Process\Process::$calls,
-        static fn ($entry) => ($entry[0][2] ?? null) === 'credentials-merge'));
+        static fn ($entry) => array_slice($entry[0], -2) === ['config', 'set']));
 '''
             source = source.replace('    echo json_encode($result);', combined + '    echo json_encode($result);')
             script = base / 'runtime.php'
@@ -157,8 +214,11 @@ class MergedRuntimeTests(unittest.TestCase):
             self.assertEqual(result['generated']['state'], 'pending')
             self.assertEqual(result['generic-command'], 'sensitive-command-refused')
             self.assertEqual(len(result['combined']), 1)
-            self.assertEqual(json.loads(result['combined'][0][1]), {
-                's3': {'access_key': 'fake', 'secret_key': ' fake secret '}, 'site': None})
+            combined_input = json.loads(result['combined'][0][1])
+            self.assertEqual(combined_input['settings'], {})
+            self.assertEqual(combined_input['credentials'], {'access_key': 'fake', 'secret_key': ' fake secret '})
+            self.assertIsNone(combined_input['maintenance_probe_credentials'])
+            self.assertEqual(combined_input['_actor'], 42)
 
 
 class MergedConfigurationTests(unittest.TestCase):

@@ -24,7 +24,7 @@ try {
         if (!$condition) { throw new RuntimeException($message); }
     }
     $selected = $argv[2] ?? 'all';
-    testCheck(in_array($selected, ['all', 'permission', 'validation', 'credentials', 'basic_states', 'root', 'baseline', 'repair', 'cli_config', 'download', 'download_anchor', 'delete_gate', 'modals', 'field_help', 'presentation', 'first_use', 'runtime'], true), 'Unknown test phase');
+    testCheck(in_array($selected, ['all', 'permission', 'validation', 'credentials', 'recovery_key', 'cron_fallback', 'basic_states', 'root', 'baseline', 'repair', 'cli_config', 'download', 'download_anchor', 'delete_gate', 'modals', 'field_help', 'presentation', 'first_use', 'runtime'], true), 'Unknown test phase');
     function testPhase(string $name): bool {
         global $selected;
         return $selected === 'all' || $selected === $name;
@@ -248,7 +248,77 @@ try {
         $page = submitSettings($class, ['retention_keep_full' => $desired]);
         testCheck((int) $record->settings()->where('key', 'retention_keep_full')->value('value') === $desired, 'Valid setting did not persist');
         testCheck(App\Models\Audit::count() > $auditBefore, 'Native audited setting write did not emit an audit');
+        testCheck((int) App\Models\Audit::orderByDesc('id')->first()->user_id === (int) Illuminate\Support\Facades\Auth::id(),
+                    'Coordinated native writer lost the authenticated audit actor');
+        $writer = Paymenter\Extensions\Others\Backups\SettingsWriter::class;
+        $auditBeforeUnchanged = App\Models\Audit::count();
+        testCheck($writer::write($record, ['retention_keep_full' => (string) $desired]) === [],
+                    'Native writer returned a results for an unchanged row');
+        testCheck(App\Models\Audit::count() === $auditBeforeUnchanged, 'Unchanged native row emitted a write audit');
+        $databaseBefore = $record->settings()->where('key', 'retention_keep_database')->value('value');
+        $gpgBefore = $record->settings()->where('key', 'gpg')->first();
+        $gpgAttributes = $gpgBefore?->getAttributes();
+        if ($gpgBefore) { $gpgBefore->delete(); }
+        try {
+            $nativeReceipt = $writer::write($record, ['retention_keep_full' => (string) ($desired + 1),
+                'retention_keep_database' => (string) ((int) $databaseBefore + 1), 'gpg' => '/fixture/results-gpg']);
+            // The native Extensions editor does not take extension locks. Its
+            // later row publication must still survive our rollback.
+            $record->settings()->where('key', 'retention_keep_full')->first()->update(['value' => (string) ($desired + 2)]);
+            $auditsBeforeRestore = App\Models\Audit::count();
+            $skipped = $writer::restore($record, $nativeReceipt);
+            testCheck($skipped === ['retention_keep_full'], 'Native compare/restore did not distinguish a concurrent editor');
+            testCheck((int) $record->settings()->where('key', 'retention_keep_full')->value('value') === $desired + 2,
+                        'Native rollback overwrote a concurrent editor');
+            testCheck((string) $record->settings()->where('key', 'retention_keep_database')->value('value') === (string) $databaseBefore,
+                        'Native rollback failed to restore an unchanged published row');
+            testCheck(!$record->settings()->where('key', 'gpg')->exists(), 'Native rollback manufactured a formerly absent row');
+            testCheck(App\Models\Audit::count() > $auditsBeforeRestore, 'Native rollback bypassed Eloquent auditing');
+        } finally {
+            $writer::write($record, ['retention_keep_full' => (string) $desired]);
+            if ($gpgAttributes !== null) {
+                $record->settings()->updateOrCreate(['key' => 'gpg'], array_intersect_key($gpgAttributes, array_flip(['value', 'type', 'encrypted'])));
+            }
+        }
         $results['native_auditing'] = true;
+        $results['native_compare_restore_preserves_concurrent_and_absent_rows'] = true;
+        $snapshot = Illuminate\Support\Facades\DB::transaction(static fn () => $writer::snapshot($record));
+        $editor = null;
+        try {
+            $writer::finalize($record, $snapshot, function () use (&$editor, $base, $record, $desired) {
+                $script = <<<'PHP'
+require $argv[1] . '/vendor/autoload.php';
+$app = require $argv[1] . '/bootstrap/app.php';
+$app->make(Illuminate\Contracts\Console\Kernel::class)->bootstrap();
+$record = App\Models\Extension::findOrFail((int) $argv[2]);
+$row = $record->settings()->where('key', 'retention_keep_full')->firstOrFail();
+echo "editor-ready\n"; flush();
+$row->update(['value' => $argv[3]]);
+echo "editor-published\n";
+PHP;
+                $editor = new Symfony\Component\Process\Process([PHP_BINARY, '-r', $script, $base, (string) $record->id, (string) ($desired + 3)], $base);
+                $editor->setTimeout(10);
+                $editor->start();
+                $output = '';
+                $deadline = microtime(true) + 8;
+                while (!str_contains($output, 'editor-ready') && $editor->isRunning() && microtime(true) < $deadline) {
+                    $output .= $editor->getIncrementalOutput(); usleep(20000);
+                }
+                testCheck(str_contains($output, 'editor-ready'), 'Concurrent native editor did not reach its row update');
+                usleep(150000);
+                testCheck($editor->isRunning() && !str_contains($editor->getOutput(), 'editor-published'),
+                            'Native editor crossed the locked credential publication callback');
+            });
+            $editor->wait();
+            testCheck($editor->isSuccessful() && str_contains($editor->getOutput(), 'editor-published'),
+                        'Concurrent native editor did not resume after credential publication');
+            testCheck((int) $record->settings()->where('key', 'retention_keep_full')->value('value') === $desired + 3,
+                        'Concurrent native editor publication disappeared after finalization');
+        } finally {
+            if ($editor?->isRunning()) { $editor->stop(1); }
+            $writer::write($record, ['retention_keep_full' => (string) $desired]);
+        }
+        $results['native_editor_waits_through_credential_publication_callback'] = true;
         }
 
         if (testPhase('basic_states')) {
@@ -322,9 +392,24 @@ try {
         Paymenter\Extensions\Others\Backups\PrivateStore::atomic($credentialFile, $unreadable);
         $damaged = file_get_contents($credentialFile);
         $page = Livewire\Livewire::test($class);
-        $page->update(calls: [['method' => 'saveSettings', 'params' => []]], updates: ['s3Keys' => $keys]);
+        $beforeRefusal = rowValues($record);
+        testCheck(!is_file($root . '/config-save.json'), 'Unreadable-store scenario started with an earlier save guard');
+        session()->forget(['filament.notifications', 'filament.claimed_notifications']);
+        $page->update(calls: [['method' => 'saveSettings', 'params' => []]], updates: [
+            'settings.retention_keep_full' => ((int) $beforeRefusal['retention_keep_full']) + 1,
+            's3Keys' => $keys,
+        ]);
         testSecretReset($page);
+        $refusalNotices = array_merge(session()->pull('filament.claimed_notifications') ?? [], session()->pull('filament.notifications') ?? []);
+        testCheck($page->instance()->getErrorBag()->isEmpty(), 'Unreadable-store scenario stopped at form validation');
+        testCheck(array_filter($refusalNotices, static fn ($n) => ($n['status'] ?? null) === 'danger'
+            && ($n['title'] ?? null) === 'Settings not saved'
+            && ($n['body'] ?? null) === Paymenter\Extensions\Others\Backups\Messages::error('credentials-unreadable')) !== [],
+            'Unreadable store did not report complete Save refusal');
+        testCheck(array_filter($refusalNotices, static fn ($n) => ($n['status'] ?? null) === 'success') === [], 'Unreadable-store refusal reported success');
+        testCheck(rowValues($record) === $beforeRefusal, 'Unreadable-store refusal changed native settings');
         testCheck(file_get_contents($credentialFile) === $damaged, 'Unreadable bound credentials were replaced');
+        testCheck(!is_file($root . '/config-save.json'), 'Definite unreadable-store refusal left an uncertain-save guard');
         file_put_contents($credentialFile, $encrypted);
         chmod($credentialFile, 0600);
         $results['unreadable_store_preserved'] = true;
@@ -361,7 +446,7 @@ try {
             $record->settings()->where('key', $key)->update(['value' => $malformed]);
             $page = Livewire\Livewire::test($class);
             $page->update(calls: [['method' => 'saveSettings', 'params' => []]], updates: []);
-            testCheck($page->instance()->getErrorBag()->isEmpty(), 'Visible default could not repair malformed native row: ' . $key);
+            testCheck($page->instance()->getErrorBag()->isEmpty(), json_encode($page->instance()->getErrorBag()->toArray()) . " " . 'Visible default could not repair malformed native row: ' . $key);
             $expected = is_array($defaults[$key]) ? json_encode($defaults[$key])
                 : (is_bool($defaults[$key]) ? ($defaults[$key] ? '1' : '0') : (string) $defaults[$key]);
             if ($record->settings()->where('key', $key)->value('value') !== $expected) {
@@ -585,6 +670,106 @@ try {
             testCheck(str_contains($html, 'id="' . $anchor . '"'), 'Deep-link target missing: ' . $anchor);
         }
         $results['inline_help_and_deep_link_targets'] = true;
+        }
+
+        if (testPhase('cron_fallback')) {
+        $currentPhase = 'cron_fallback';
+        foreach (['test%cron-private', 'test\\%cron-private'] as $name) {
+            $cronRoot = $work . '/' . $name;
+            testCheck(!file_exists($cronRoot), 'Cron fallback requires an uninitialized private folder');
+            $record->settings()->where('key', 'private_root')->update(['value' => $cronRoot]);
+            $page = Livewire\Livewire::test($class);
+            $document = new DOMDocument;
+            $previousErrors = libxml_use_internal_errors(true);
+            try { $document->loadHTML($page->html()); }
+            finally { libxml_clear_errors(); libxml_use_internal_errors($previousErrors); }
+            $lines = [];
+            foreach ((new DOMXPath($document))->query('//*[@data-backups-command]') as $node) {
+                $line = trim($node->textContent);
+                if (str_starts_with($line, '* * * * * ')) { $lines[] = $line; }
+            }
+            testCheck(count($lines) >= 2, 'Uninitialized page did not render fallback cron suggestions');
+            // Interpret cron's percent handling before shell tokenization. No
+            // suggested command executes; the exact two lock paths must survive.
+            $python = <<<'PYTHON'
+import json, shlex, sys
+data = json.load(sys.stdin)
+kinds = set()
+for line in data['lines']:
+    result = []
+    index = 0
+    while index < len(line):
+        char = line[index]
+        if char == '%':
+            sys.exit(1)
+        if char == '\\' and index + 1 < len(line):
+            index += 1
+            char = line[index]
+            if char != '%':
+                result.append('\\')
+        result.append(char)
+        index += 1
+    words = shlex.split(''.join(result))
+    kind = 'scheduler' if 'schedule:run' in words else 'queue'
+    assert words[5:8] == ['/usr/bin/flock', '-n', data['root'] + '/' + kind + '.lock']
+    assert words[9] == data['artisan']
+    kinds.add(kind)
+assert kinds == {'scheduler', 'queue'}
+PYTHON;
+            $check = new Symfony\Component\Process\Process(['/usr/bin/python3', '-c', $python], $base, null,
+                json_encode(['lines' => $lines, 'root' => $cronRoot, 'artisan' => $base . '/artisan'], JSON_THROW_ON_ERROR));
+            $check->run();
+            testCheck($check->isSuccessful(), 'Fallback cron suggestion changes percent-bearing private path');
+            testCheck(!file_exists($cronRoot), 'Rendering fallback cron initialized storage');
+        }
+        $record->settings()->where('key', 'private_root')->update(['value' => $initialRows['private_root']]);
+        $results['cron_fallback_preserves_percent_and_backslash_percent_paths'] = true;
+        }
+
+        if (testPhase('recovery_key')) {
+        $currentPhase = 'recovery_key';
+        // This valid imported passphrase also proves native HTML/JS escaping.
+        $passphrase = '  TEST-SECRET-CANARY-<key> "quoted" \\ café  ';
+        $runtime = Paymenter\Extensions\Others\Backups\Runtime::class;
+        $runtime::encryptionKey('import', ['passphrase' => $passphrase]);
+        Illuminate\Support\Facades\URL::forceScheme('https');
+        try {
+            $page = Livewire\Livewire::test($class);
+            $page->call('mountAction', 'showRecoveryKey')->call('callMountedAction');
+            testCheck(($page->get('mountedActions')[0]['name'] ?? null) === 'recoveryKey', 'Confirmed Show did not open recovery key modal');
+            $document = new DOMDocument;
+            $previousErrors = libxml_use_internal_errors(true);
+            try { $document->loadHTML('<?xml encoding="UTF-8">' . (modalPartial($page) ?? $page->html())); }
+            finally { libxml_clear_errors(); libxml_use_internal_errors($previousErrors); }
+            $nodes = (new DOMXPath($document))->query('//*[@data-backups-command]');
+            testCheck($nodes->length === 1, 'Recovery key modal has no unique key value');
+            $node = $nodes->item(0);
+            $valueNode = $node->getElementsByTagName('span')->item(0);
+            testCheck($valueNode !== null && $valueNode->textContent === $passphrase,
+                        'Recovery key display changed imported passphrase bytes');
+            testCheck(str_contains($valueNode->getAttribute('style'), 'white-space: pre-wrap'), 'Recovery key display collapses significant whitespace');
+            testCheck($node->getAttribute('role') === 'button' && $node->getAttribute('tabindex') === '0', 'Recovery key Copy is inaccessible');
+            testCheck($node->getAttribute('x-on:keydown.enter.prevent') === '$el.click()'
+                        && $node->getAttribute('x-on:keydown.space.prevent') === '$el.click()', 'Recovery key keyboard Copy diverges from click');
+            $handler = $node->getAttribute('x-on:click');
+            testCheck(str_contains($handler, 'clipboard.writeText'), 'Recovery key Copy was not enabled over HTTPS');
+            // Execute the exact native click handler with a private clipboard
+            // sink. No secret is placed in argv, output or fixture results.
+            $javascript = <<<'JS'
+const fs = require('fs');
+const input = JSON.parse(fs.readFileSync(0, 'utf8'));
+let copied;
+const window = {navigator: {clipboard: {writeText: value => { copied = value; }}}};
+new Function('window', '$tooltip', '$store', input.handler)(window, () => {}, {theme: 'light'});
+if (copied !== input.expected) process.exit(1);
+JS;
+            $copy = new Symfony\Component\Process\Process(['node', '-e', $javascript], $base, null,
+                json_encode(['handler' => $handler, 'expected' => $passphrase], JSON_THROW_ON_ERROR));
+            $copy->run();
+            testCheck($copy->isSuccessful(), 'Recovery key Copy changed imported passphrase bytes');
+            testCheck(!str_contains(json_encode($page->snapshot), 'TEST-SECRET-CANARY'), 'Revealed passphrase entered Livewire state');
+            $results['recovery_key_show_and_copy_preserve_exact_passphrase'] = true;
+        } finally { Illuminate\Support\Facades\URL::forceScheme(null); }
         }
 
         if (testPhase('modals')) {

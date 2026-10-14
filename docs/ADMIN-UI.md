@@ -210,12 +210,20 @@ These rules bind the page to the engine. The engine stays authoritative.
    only when entered; S3 keys must be a complete pair, and are required only
    when uploads are on and no keys are saved. The page then compares submitted
    values with native rows read on the server, sends the changes to
-   `config check`, writes changed native rows through Eloquent (audited) and
-   runs `init`. If `init` fails, the rows are put back and the page says the
-   settings were not saved. Only then does it call `Runtime::saveCredentials()`
-   for entered secrets and `Runtime::encryptionKey()` for a requested key. A
-   failure there is reported honestly: "Settings saved" with a warning naming
-   what was not saved, and the secrets must be entered again.
+   `config check`, then calls `Runtime::saveConfiguration()` with settings and
+   entered secret groups. The backend takes bounded configuration/tick locks,
+   rereads the native baseline, publishes changed rows through audited Eloquent,
+   initializes private state, publishes credentials while native settings rows
+   are locked, and synchronizes schedules. A definite failure before credential
+   commit restores only unchanged rows, preserving concurrent edits and absent
+   rows. Rejected saves preserve existing schedule epochs and waiting requests.
+   Partial outcomes name what completed. If a child loses its commit response,
+   a durable private intent pauses credential-bearing backup work; refresh shows
+   setup required and the administrator resubmits the intended settings and each
+   uncertain credential group to complete Save. Recovery-key creation follows
+   as a separate `Runtime::encryptionKey()` operation; its failure warns that
+   settings were saved and the key was not created. Secret inputs are cleared
+   on every response.
 4. **Settings versions.** Rows with `settings_version` absent or 1 keep their
    0.3 meaning. The page shows them through `Settings::fromLegacy()`, the PHP
    half of the shared v1-to-v2 adapter, and proposes encryption on. The first
@@ -234,14 +242,29 @@ These rules bind the page to the engine. The engine stays authoritative.
    through embedded schemas, without nested `<form>` elements. The site
    password's address is Paymenter's own https origin, taken on the server; an
    http address offers no site password field. Saving secrets never creates
-   private storage.
-7. **The recovery key never enters Livewire state.** `Runtime::revealRecoveryKey()`
+   private storage. Show and hide inside the form run in the browser
+   (`visibleJs`), so choosing options never makes a round trip that clears
+   typed secrets. If a response does clear typed secrets unsaved (for example
+   a validation error), an inline note asks for them again, and a later Save
+   says the saved keys weren't changed.
+7. **The recovery key never enters Livewire state.** `Runtime::revealRecoveryKey($fingerprint)`
    is called only while rendering the confirmed "Recovery key" dialog and is
    cached for that request only. The key is in that dialog's HTML and nowhere
    else: not in public properties, action data, notifications or the overview.
-   Table polling pauses while any dialog is open. Only the nonsecret
-   fingerprint is kept (locked) to bind the confirmation to the key that was
-   shown. Opening the acknowledgement dialog freezes that exact fingerprint;
+   Table polling pauses while any dialog is open. The dialog renders only with
+   a one-time grant that the confirmed "Show the recovery key?" step (or a
+   confirmed rotation) puts in the session, bound to the administrator and the
+   key's full fingerprint, valid for 30 seconds and then for two minutes on that
+   component; a direct mount or `?action=recoveryKey` link shows nothing.
+   The displayed value and Copy preserve exact UTF-8 bytes, including leading,
+   repeated and trailing spaces in an imported passphrase. HTML is escaped;
+   only the value preserves whitespace, so native template indentation is not
+   displayed or copied. Click, Enter and Space use the same native Copy handler.
+   Only the nonsecret fingerprint is kept (locked) to bind the confirmation to the key that was
+   shown. The bridge checks the granted fingerprint under its credential lock;
+   replacement or disappearance refuses disclosure. Runtime and the renderer
+   also check the returned fingerprint. Opening the acknowledgement dialog
+   freezes that exact fingerprint;
    replacement of the pending key requires a new confirmation and never
    redirects an existing confirmation to the replacement key. Download uses `Runtime::recoveryKeyUrl()`, a fresh five-minute signed
    link opened by a server action, outside SPA navigation.

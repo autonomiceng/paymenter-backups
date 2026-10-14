@@ -53,10 +53,24 @@ namespace Paymenter\Extensions\Others\Backups {
         public static array $calls = [];
         public static function encryptionKey($action, $input) { self::$calls[] = [$action, $input]; return []; }
         public static function command(...$args) { self::$calls[] = $args; throw new \RuntimeException('unexpected-write'); }
-        public static function revealRecoveryKey() { throw new \RuntimeException('unexpected-reveal'); }
+        public static ?string $fingerprint = null;
+        public static array $revealResponse = [];
+        public static function recoveryKeyFingerprint() { return self::$fingerprint; }
+        public static function revealRecoveryKey($fingerprint = null) {
+            self::$calls[] = ['reveal', ['fingerprint' => $fingerprint]];
+            return self::$revealResponse;
+        }
     }
 }
 namespace {
+function session() {
+    static $session;
+    return $session ??= new class {
+        public array $values = [];
+        public function put($key, $value) { $this->values[$key] = $value; }
+        public function pull($key) { $value = $this->values[$key] ?? null; unset($this->values[$key]); return $value; }
+    };
+}
 function filled($value) { return $value !== null && $value !== '' && $value !== []; }
 function abort_unless($condition, $status) { if (!$condition) { throw new \RuntimeException('unauthorized'); } }
 require $argv[1] . '/extension/Backups/Settings.php';
@@ -81,7 +95,19 @@ foreach ($input['forms'] ?? [] as $name => $state) {
         public function getState() { return $this->state; }
     };
 }
-if ($input['method'] === 'acknowledge-flow') {
+if ($input['method'] === 'reveal-flow') {
+    \Paymenter\Extensions\Others\Backups\Runtime::$fingerprint = $input['confirmed_fingerprint'];
+    $class->getMethod('grantReveal')->invoke($page);
+    $class->getMethod('revealAllowed')->invoke($page);
+    if (array_key_exists('current_fingerprint', $input)) {
+        \Paymenter\Extensions\Others\Backups\Runtime::$fingerprint = $input['current_fingerprint'];
+    }
+    \Paymenter\Extensions\Others\Backups\Runtime::$revealResponse = $input['reveal_response'];
+    $allowed = $class->getMethod('revealAllowed')->invoke($page);
+    $key = $class->getMethod('revealKey')->invoke($page);
+    $result = ['allowed' => $allowed, 'grant' => $page->revealGrantKey, 'key' => $key,
+               'calls' => \Paymenter\Extensions\Others\Backups\Runtime::$calls];
+} elseif ($input['method'] === 'acknowledge-flow') {
     $action = $page->acknowledgeRecoveryKeyAction();
     $halted = false;
     try {
@@ -201,6 +227,35 @@ class PageEngineContracts(PrivateFixture):
                            properties={'recoveryFingerprint': original})
         self.assertFalse(result['halted'])
         self.assertEqual(result['calls'], [['acknowledge', {'fingerprint': original}]])
+
+    def test_reveal_grant_freezes_full_identity_and_refuses_replacement_or_disappearance(self):
+        original = 'a' * 64
+        replacement = original[:16] + 'b' * 48  # Equal short identities are not authority.
+        response = {'secret': 'synthetic-replacement-secret', 'fingerprint': replacement}
+        for current in (replacement, None):
+            with self.subTest(current=current):
+                result = self.page(self.pending_configuration(original), 'reveal-flow',
+                                   confirmed_fingerprint=original, current_fingerprint=current,
+                                   reveal_response=response)
+                self.assertFalse(result['allowed'])
+                self.assertEqual(result['grant'], original)
+                self.assertEqual(result['calls'], [])
+                self.assertNotIn('secret', result['key'])
+
+    def test_reveal_checks_identity_returned_after_the_permission_check(self):
+        original, replacement = 'a' * 64, 'b' * 64
+        result = self.page(self.pending_configuration(original), 'reveal-flow',
+                           confirmed_fingerprint=original,
+                           reveal_response={'secret': 'synthetic-replacement-secret', 'fingerprint': replacement})
+        self.assertTrue(result['allowed'])
+        self.assertEqual(result['key'], {'error': 'archive-key-mismatch'})
+        self.assertEqual(result['calls'], [['reveal', {'fingerprint': original}]])
+        result = self.page(self.pending_configuration(original), 'reveal-flow',
+                           confirmed_fingerprint=original,
+                           reveal_response={'secret': 'synthetic-confirmed-secret', 'fingerprint': original})
+        self.assertEqual(result['grant'], original)
+        self.assertEqual(result['key']['fingerprint'], original)
+        self.assertEqual(result['key']['secret'], 'synthetic-confirmed-secret')
 
     def test_missing_or_changed_pending_metadata_cannot_reveal_or_acknowledge(self):
         original, replacement = 'a' * 64, 'b' * 64

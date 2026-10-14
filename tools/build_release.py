@@ -112,7 +112,7 @@ def build(output, wheelhouse=None):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--output', default='dist/Backups-0.3.0.zip')
+    parser.add_argument('--output', default='dist/Backups-0.4.0.zip')
     parser.add_argument('--wheelhouse')
     args = parser.parse_args()
     artifact, digest = build(args.output, args.wheelhouse)
