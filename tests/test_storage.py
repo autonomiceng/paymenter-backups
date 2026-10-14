@@ -190,12 +190,13 @@ class S3ProtocolTests(unittest.TestCase):
         fixture, first = self.capture_fixture()
         fixture.settings.update(destination="local", retention_keep=1)
         second = capture(fixture.state, fixture.envelope)
-        unlink = pathlib.Path.unlink
-        def fault(path, *args, **kwargs):
-            if str(path) == first["archive_path"]:
+        unlink = os.unlink
+        def fault(path, *args, dir_fd=None, **kwargs):
+            # Removal is relative to the verified directory descriptor.
+            if dir_fd is not None and path == pathlib.Path(first["archive_path"]).name:
                 raise OSError("disposable fault")
-            return unlink(path, *args, **kwargs)
-        with patch.object(pathlib.Path, "unlink", fault):
+            return unlink(path, *args, dir_fd=dir_fd, **kwargs)
+        with patch("os.unlink", fault):
             with self.assertRaisesRegex(BackupError, "retention-local-delete-failed"):
                 retention(fixture.state, fixture.envelope, True)
         self.assertFalse(pathlib.Path(first["manifest_path"]).exists())
