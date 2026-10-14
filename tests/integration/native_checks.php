@@ -39,84 +39,150 @@ if ($mode === 'upload') {
     Illuminate\Support\Facades\Auth::login($admin);
     Filament\Facades\Filament::setCurrentPanel(Filament\Facades\Filament::getPanel('admin'));
     check(Paymenter\Extensions\Others\Backups\Admin\Pages\Backups::canAccess(), 'admin denied');
-    // Exercise actual Livewire response serialization, including unrelated action.
-    $livewire = Livewire\Livewire::test(Paymenter\Extensions\Others\Backups\Admin\Pages\Backups::class);
-    $secrets = ['accessKey' => 'ACCESS-CREDENTIAL-CANARY', 'secretKey' => 'SECRET-CREDENTIAL-CANARY', 'sessionToken' => 'TOKEN-CREDENTIAL-CANARY'];
-    $livewire->update(calls: [['method' => 'saveCredentials', 'params' => []]], updates: $secrets);
-    check(str_contains($livewire->get('message'), 'Credentials saved'), 'bundled credential submit failed');
-    check($livewire->get('accessKey') === '' && $livewire->get('secretKey') === '' && $livewire->get('sessionToken') === '', 'write-only secrets not cleared');
-    $credentialDigest = hash_file('sha256', $root . '/credentials.json');
+    $page = Paymenter\Extensions\Others\Backups\Admin\Pages\Backups::class;
+    $nativeRows = fn () => $record->settings()->pluck('value', 'key')->all();
+    // Replay the exact schema action context a browser sends from rendered HTML.
+    $schemaAction = function ($livewire, string $name) {
+        $html = $livewire->html();
+        check((bool) preg_match("/mountAction\('" . preg_quote($name, '/') . "', \{\}, JSON\.parse\('([^']*)'\)\)/", $html, $match), 'rendered action missing: ' . $name);
+        return json_decode(json_decode('"' . $match[1] . '"'), true, 8, JSON_THROW_ON_ERROR);
+    };
+    $digest = fn () => hash_file('sha256', $root . '/credentials.json');
+    $secretFields = fn ($livewire) => array_filter([...array_values($livewire->get('s3Keys') ?? []), $livewire->get('siteAccess.username'), $livewire->get('siteAccess.password')], fn ($value) => $value !== null && $value !== '');
+
+    // Settings: engine-matching field rules refuse before any native write.
+    $livewire = Livewire\Livewire::test($page);
+    $before = $nativeRows();
+    foreach ([['settings.retention_keep', 0, 'settings.retention_keep'], ['settings.local_byte_budget', 0, 'settings.local_byte_budget'],
+              ['settings.capture_timeout', '1.5', 'settings.capture_timeout'], ['settings.job_lock_paths', "relative.lock", 'settings.job_lock_paths'],
+              ['settings.s3_endpoint', 'http://fixture.invalid', null]] as [$field, $value, $errorKey]) {
+        $attempt = Livewire\Livewire::test($page);
+        $attempt->update(calls: [['method' => 'saveSettings', 'params' => []]], updates: [$field => $value]);
+        if ($errorKey) { check($attempt->instance()->getErrorBag()->has($errorKey), 'invalid setting accepted: ' . $field); }
+        check($nativeRows() === $before, 'invalid setting reached native rows: ' . $field);
+    }
+    $weekly = Livewire\Livewire::test($page);
+    $weekly->update(calls: [['method' => 'saveSettings', 'params' => []]], updates: ['settings.enabled' => true, 'settings.schedule_frequency' => 'weekly', 'settings.schedule_weekdays' => []]);
+    check($weekly->instance()->getErrorBag()->has('settings.schedule_weekdays') && $nativeRows() === $before, 'weekly schedule without days accepted');
+    // Engine-only refusal: a full-mode schedule over Paymenter's observed billing minute.
+    check(Illuminate\Support\Facades\Artisan::call('backups:guard') === 0, 'billing guard refresh failed');
+    $overlap = Livewire\Livewire::test($page);
+    $overlap->update(calls: [['method' => 'saveSettings', 'params' => []]], updates: ['settings.enabled' => true, 'settings.schedule_frequency' => 'daily', 'settings.schedule_time' => '23:59', 'settings.mode' => 'full-quiesced']);
+    check($overlap->instance()->getErrorBag()->has('settings.schedule_time') && $nativeRows() === $before, 'engine schedule refusal not mapped before persistence');
+
+    // Valid save writes only changed native rows and never touches credentials.
+    config(['audit.console' => true]); // This CLI process stands in for an admin web request.
+    $credentialDigest = $digest();
+    $changedKeys = ['enabled', 'schedule_frequency', 'schedule_weekdays', 'retention_keep', 'job_lock_paths'];
+    $livewire->update(calls: [['method' => 'saveSettings', 'params' => []]], updates: ['settings.enabled' => true, 'settings.schedule_frequency' => 'weekly',
+        'settings.schedule_weekdays' => ['6', '0'], 'settings.retention_keep' => 4, 'settings.job_lock_paths' => "/fixture/a.lock\n\n /fixture/b.lock "]);
+    check($livewire->instance()->getErrorBag()->isEmpty(), 'valid page settings refused: ' . json_encode($livewire->instance()->getErrorBag()->toArray()));
+    $after = $nativeRows();
+    check($after['enabled'] === '1' && $after['schedule_frequency'] === 'weekly' && $after['retention_keep'] === '4' && $after['schedule_weekdays'] === '[0,6]'
+        && $after['job_lock_paths'] === '["/fixture/a.lock","/fixture/b.lock"]', 'page settings not persisted in engine form: ' . json_encode(array_intersect_key($after, array_flip($changedKeys))));
+    check(array_diff_key($after, array_flip($changedKeys)) === array_diff_key($before, array_flip($changedKeys)), 'page save changed unrelated rows');
+    check(str_contains($livewire->html(), 'Next automatic backup') && !str_contains($livewire->html(), 'Off. Turn on automatic backups'), 'enabled schedule not summarized');
+    $livewire->update(calls: [['method' => 'saveSettings', 'params' => []]], updates: ['settings.enabled' => false]);
+    check($nativeRows()['enabled'] === '0' && $nativeRows()['schedule_weekdays'] === '[0,6]', 'schedule could not be turned off');
+    check($after['local_byte_budget'] === $before['local_byte_budget'], 'unchanged byte limit rewritten');
+    check($digest() === $credentialDigest, 'settings save touched credentials');
+    check(App\Models\Audit::where('auditable_type', (new App\Models\Setting)->getMorphClass())->where('new_values', 'like', '%[0,6]%')->exists(), 'page settings bypassed native auditing');
+    $livewire->update(calls: [['method' => 'saveSettings', 'params' => []]], updates: ['settings.job_lock_paths' => '']);
+    check($nativeRows()['job_lock_paths'] === '[]', 'line list could not be cleared');
+
+    // S3 keys appear after choosing S3 and are write-only.
+    $livewire->update(calls: [['method' => 'saveSettings', 'params' => []]], updates: ['settings.destination' => 's3', 'settings.s3_bucket' => 'fixture-bucket', 'settings.plaintext_offsite_acknowledged' => true]);
+    check($livewire->instance()->getErrorBag()->isEmpty() && $nativeRows()['destination'] === 's3', 'S3 settings not saved');
+    check(str_contains($livewire->html(), 'S3 access keys'), 'S3 key section not revealed');
+    $secrets = ['s3Keys.access_key' => 'ACCESS-CREDENTIAL-CANARY', 's3Keys.secret_key' => 'SECRET-CREDENTIAL-CANARY', 's3Keys.session_token' => 'TOKEN-CREDENTIAL-CANARY'];
+    $livewire->update(calls: [['method' => 'saveS3Keys', 'params' => []]], updates: ['s3Keys.access_key' => 'FAILURE-CREDENTIAL-CANARY', 's3Keys.secret_key' => '']);
+    check($livewire->instance()->getErrorBag()->has('s3Keys.secret_key'), 'missing secret key accepted');
+    check($secretFields($livewire) === [] && !str_contains($livewire->html(), 'CREDENTIAL-CANARY'), 'validation error returned secret input');
+    check($digest() === $credentialDigest, 'failed key save changed credentials');
+    $livewire->update(calls: [['method' => 'saveS3Keys', 'params' => []]], updates: $secrets);
+    check($livewire->instance()->getErrorBag()->isEmpty() && $secretFields($livewire) === [], 'S3 key save failed or kept input');
+    $process->mustRun();
+    $bound = json_decode($process->getOutput(), true);
+    check($bound['credentials'] === ['access_key' => 'ACCESS-CREDENTIAL-CANARY', 'secret_key' => 'SECRET-CREDENTIAL-CANARY', 'session_token' => 'TOKEN-CREDENTIAL-CANARY'], 'S3 keys not stored');
+    check(!str_contains(file_get_contents($root . '/credentials.json'), 'CREDENTIAL-CANARY'), 'private credentials not encrypted');
+    $livewire->update(calls: [['method' => 'saveSettings', 'params' => []]], updates: $secrets);
+    check($secretFields($livewire) === [] && !str_contains($livewire->html(), 'CREDENTIAL-CANARY'), 'unrelated response returned S3 input');
+
+    // Site password: origin binding, unreadable-store preservation, explicit removal.
     $originalUrl = App\Models\Setting::whereNull('settingable_type')->where('key', 'app_url')->value('value');
     App\Models\Setting::whereNull('settingable_type')->where('key', 'app_url')->update(['value' => 'https://fixture.example.invalid']);
     App\Providers\SettingsProvider::flushCache();
-    $probeSecrets = ['probeOrigin' => 'https://fixture.example.invalid:443', 'probeUsername' => 'PROBE-USER-CREDENTIAL-CANARY', 'probePassword' => 'PROBE-PASSWORD-CREDENTIAL-CANARY'];
     try {
-        $livewire->update(calls: [['method' => 'saveProbeCredentials', 'params' => []]], updates: $probeSecrets);
-        $probeResponseStatus = (new ReflectionProperty($livewire, 'lastState'))->getValue($livewire)->getResponse()->getStatusCode();
-        check($probeResponseStatus === 200, 'native probe update HTTP status: ' . $probeResponseStatus);
-        check(str_contains($livewire->get('message'), 'probe credentials saved'), 'native probe submit failed: ' . $livewire->get('message'));
-        foreach (array_keys($probeSecrets) as $field) { check($livewire->get($field) === '', 'probe write-only secret not cleared'); }
-        $encryptedBackup = json_decode(file_get_contents($root . '/credentials.json'), true);
-        $unreadable = array_replace($encryptedBackup, ['payload' => 'unreadable-fixture-ciphertext']);
-        Paymenter\Extensions\Others\Backups\PrivateStore::atomic($root . '/credentials.json', $unreadable);
-        $unreadableDigest = hash_file('sha256', $root . '/credentials.json');
-        foreach (['saveProbeCredentials', 'clearProbeCredentials'] as $action) {
-            $livewire->update(calls: [['method' => $action, 'params' => []]], updates: $probeSecrets);
-            check(hash_file('sha256', $root . '/credentials.json') === $unreadableDigest, 'unreadable probe store overwritten');
-            foreach (array_keys($probeSecrets) as $field) { check($livewire->get($field) === '', 'unreadable store failure returned secrets'); }
-        }
-        Paymenter\Extensions\Others\Backups\PrivateStore::atomic($root . '/credentials.json', $encryptedBackup);
-        $credentialDigest = hash_file('sha256', $root . '/credentials.json');
+        $probe = Livewire\Livewire::test($page);
+        check(str_contains($probe->html(), 'Full backups load https://fixture.example.invalid'), 'site address not shown from app URL');
+        // The browser cannot choose the address; a sent origin is ignored.
+        $probeSecrets = ['siteAccess.origin' => 'https://other.invalid', 'siteAccess.username' => 'PROBE-USER-CREDENTIAL-CANARY', 'siteAccess.password' => 'PROBE-PASSWORD-CREDENTIAL-CANARY'];
+        $probe->update(calls: [['method' => 'saveSitePassword', 'params' => []]], updates: $probeSecrets);
+        check($probe->instance()->getErrorBag()->isEmpty() && $secretFields($probe) === [], 'site password save failed or kept input');
         $process->mustRun();
         $bound = json_decode($process->getOutput(), true);
-        check($bound['maintenance_probe_credentials'] === ['origin' => 'https://fixture.example.invalid', 'username' => $probeSecrets['probeUsername'], 'password' => $probeSecrets['probePassword']], 'probe namespace not bound/encrypted');
-        check($bound['credentials']['access_key'] === $secrets['accessKey'], 'probe save lost S3 credentials');
-        check(!str_contains(file_get_contents($root . '/credentials.json'), 'CREDENTIAL-CANARY'), 'private credentials not encrypted');
-        foreach (['https://other.invalid', 'http://fixture.example.invalid', 'https://fixture.example.invalid#'] as $badOrigin) {
-            $livewire->update(calls: [['method' => 'saveProbeCredentials', 'params' => []]], updates: array_replace($probeSecrets, ['probeOrigin' => $badOrigin]));
-            check(hash_file('sha256', $root . '/credentials.json') === $credentialDigest, 'failed probe save changed credentials');
-            foreach (array_keys($probeSecrets) as $field) { check($livewire->get($field) === '', 'failed probe save leaked input'); }
-        }
-        $livewire->update(calls: [['method' => 'refreshStatus', 'params' => []]], updates: $probeSecrets);
-        foreach (array_keys($probeSecrets) as $field) { check($livewire->get($field) === '', 'unrelated response returned probe secrets'); }
-        check(!str_contains($livewire->html(), 'CREDENTIAL-CANARY'), 'probe snapshot leaked input');
-        $livewire->update(calls: [['method' => 'saveCredentials', 'params' => []]], updates: $secrets);
+        check($bound['maintenance_probe_credentials'] === ['origin' => 'https://fixture.example.invalid', 'username' => 'PROBE-USER-CREDENTIAL-CANARY', 'password' => 'PROBE-PASSWORD-CREDENTIAL-CANARY'], 'probe namespace not bound');
+        check($bound['credentials']['access_key'] === 'ACCESS-CREDENTIAL-CANARY', 'probe save lost S3 keys');
+        $credentialDigest = $digest();
+        // Paymenter on plain http: no site password is sent or saved.
+        App\Models\Setting::whereNull('settingable_type')->where('key', 'app_url')->update(['value' => 'http://fixture.example.invalid']);
+        App\Providers\SettingsProvider::flushCache();
+        $plain = Livewire\Livewire::test($page);
+        check(str_contains($plain->html(), 'does not use https://'), 'http address not explained');
+        $plain->update(calls: [['method' => 'saveSitePassword', 'params' => []]], updates: $probeSecrets);
+        check($digest() === $credentialDigest && $secretFields($plain) === [], 'http address changed credentials or kept input');
+        App\Models\Setting::whereNull('settingable_type')->where('key', 'app_url')->update(['value' => 'https://fixture.example.invalid']);
+        App\Providers\SettingsProvider::flushCache();
+        $probe = Livewire\Livewire::test($page);
+        $encryptedBackup = json_decode(file_get_contents($root . '/credentials.json'), true);
+        Paymenter\Extensions\Others\Backups\PrivateStore::atomic($root . '/credentials.json', array_replace($encryptedBackup, ['payload' => 'unreadable-fixture-ciphertext']));
+        $unreadable = $digest();
+        $probe->update(calls: [['method' => 'saveSitePassword', 'params' => []]], updates: $probeSecrets);
+        $probe->update(calls: [['method' => 'saveS3Keys', 'params' => []]], updates: $secrets);
+        check($digest() === $unreadable && $secretFields($probe) === [], 'unreadable store overwritten or input kept');
+        Paymenter\Extensions\Others\Backups\PrivateStore::atomic($root . '/credentials.json', $encryptedBackup);
+        $removal = Livewire\Livewire::test($page);
+        $context = $schemaAction($removal, 'removeSitePassword');
+        $removal->call('mountAction', 'removeSitePassword', [], $context)->call('callMountedAction');
         $process->mustRun();
-        check(json_decode($process->getOutput(), true)['maintenance_probe_credentials'] === $bound['maintenance_probe_credentials'], 'S3 save lost probe namespace');
-        $credentialDigest = hash_file('sha256', $root . '/credentials.json');
+        $cleared = json_decode($process->getOutput(), true);
+        check($cleared['maintenance_probe_credentials'] === [] && $cleared['credentials']['secret_key'] === 'SECRET-CREDENTIAL-CANARY', 'site password removal lost S3 keys');
+        $probe->update(calls: [['method' => 'saveSitePassword', 'params' => []]], updates: $probeSecrets);
     } finally {
         App\Models\Setting::whereNull('settingable_type')->where('key', 'app_url')->update(['value' => $originalUrl]);
         App\Providers\SettingsProvider::flushCache();
     }
+    $removal = Livewire\Livewire::test($page);
+    $context = $schemaAction($removal, 'removeS3Keys');
+    $removal->call('mountAction', 'removeS3Keys', [], $context)->call('callMountedAction');
+    $process->mustRun();
+    $removed = json_decode($process->getOutput(), true);
+    check($removed['credentials'] === [] && $removed['maintenance_probe_credentials']['username'] === 'PROBE-USER-CREDENTIAL-CANARY', 'S3 key removal lost the probe namespace');
+    $livewire->update(calls: [['method' => 'saveS3Keys', 'params' => []]], updates: $secrets);
+    $livewire->update(calls: [['method' => 'saveSettings', 'params' => []]], updates: ['settings.destination' => 'local']);
+    check($nativeRows()['destination'] === 'local', 'destination not restored');
+    $credentialDigest = $digest();
 
-    $livewire->update(calls: [['method' => 'saveCredentials', 'params' => []]], updates: ['secretKey' => 'FAILURE-CREDENTIAL-CANARY']);
-    check(hash_file('sha256', $root . '/credentials.json') === $credentialDigest, 'failed save changed credentials');
-    check($livewire->get('accessKey') === '' && $livewire->get('secretKey') === '' && $livewire->get('sessionToken') === '', 'write-only secrets not cleared');
-    $livewire->update(calls: [['method' => 'refreshStatus', 'params' => []]], updates: $secrets);
-    check($livewire->get('accessKey') === '' && $livewire->get('secretKey') === '' && $livewire->get('sessionToken') === '', 'write-only secrets not cleared');
-    check(!str_contains($livewire->html(), 'CREDENTIAL-CANARY'), 'credential snapshot leak');
     // Native EditExtension fill/save keeps external secrets and contains no canary.
     $native = Livewire\Livewire::test(App\Admin\Resources\ExtensionResource\Pages\EditExtension::class, ['record' => $record->getRouteKey()]);
     check(!str_contains($native->html(), 'CREDENTIAL-CANARY'), 'native editor secret leak');
+    check(str_contains($native->html(), 'Automatic backups') && str_contains($native->html(), 'Days for weekly backups'), 'native fallback labels missing');
     $native->call('save');
     check($native->instance()->getErrorBag()->isEmpty(), 'native edit save has errors: ' . json_encode($native->instance()->getErrorBag()->toArray()));
-    check(hash_file('sha256', $root . '/credentials.json') === $credentialDigest, 'native editor changed credentials');
-    $process->mustRun();
-    check(json_decode($process->getOutput(), true)['credentials'] === ['access_key' => 'ACCESS-CREDENTIAL-CANARY', 'secret_key' => 'SECRET-CREDENTIAL-CANARY', 'session_token' => 'TOKEN-CREDENTIAL-CANARY'], 'native editor lost decrypted credentials');
+    check($digest() === $credentialDigest, 'native editor changed credentials');
+    foreach (['data.settings.retention_keep' => '0', 'data.settings.schedule_weekdays' => '[7]', 'data.settings.extra_docroots' => '["relative"]'] as $field => $value) {
+        $invalid = Livewire\Livewire::test(App\Admin\Resources\ExtensionResource\Pages\EditExtension::class, ['record' => $record->getRouteKey()]);
+        $invalid->update(calls: [['method' => 'save', 'params' => []]], updates: [$field => $value]);
+        check(!$invalid->instance()->getErrorBag()->isEmpty(), 'native fallback accepted engine-invalid value: ' . $field);
+    }
     $additionalDocroot = dirname($base) . '/additional-site-public';
     if (!is_dir($additionalDocroot)) { mkdir($additionalDocroot, 0700); }
     $native->update(calls: [['method' => 'save', 'params' => []]], updates: ['data.settings.extra_docroots' => json_encode([$additionalDocroot])]);
     check($native->instance()->getErrorBag()->isEmpty(), 'native docroot edit invalid');
     $policy = json_decode(file_get_contents($root . '/policy.json'), true);
     check(in_array(realpath($additionalDocroot), $policy['extra_docroots'], true), 'native GUI docroot did not refresh offline policy');
-    check(hash_file('sha256', $root . '/credentials.json') === $credentialDigest, 'docroot edit changed credentials');
-    $process->mustRun();
-    check(json_decode($process->getOutput(), true)['maintenance_probe_credentials'] === $bound['maintenance_probe_credentials'], 'native editor lost probe namespace');
-    $livewire->update(calls: [['method' => 'clearProbeCredentials', 'params' => []]], updates: $probeSecrets);
-    foreach (array_keys($probeSecrets) as $field) { check($livewire->get($field) === '', 'clear probe credentials leaked inputs'); }
-    $process->mustRun();
-    $cleared = json_decode($process->getOutput(), true);
-    check($cleared['maintenance_probe_credentials'] === [] && $cleared['credentials']['secret_key'] === $secrets['secretKey'], 'clear lost S3 namespace');
+    check($digest() === $credentialDigest, 'docroot edit changed credentials');
+
     $configuredPython = $record->settings()->where('key', 'python')->value('value');
     try {
         $record->settings()->where('key', 'python')->update(['value' => 'python3']);
@@ -124,37 +190,148 @@ if ($mode === 'upload') {
             Paymenter\Extensions\Others\Backups\Runtime::command(['status']);
             throw new RuntimeException('relative Python command accepted');
         } catch (RuntimeException $error) { check($error->getMessage() === 'python-binary-invalid', 'relative Python refusal not explicit'); }
+        $broken = Livewire\Livewire::test($page);
+        check(str_contains($broken->html(), 'The backup engine cannot run from the web server') && !str_contains($broken->html(), 'CREDENTIAL-CANARY'), 'engine failure not explained');
     } finally {
         $record->settings()->where('key', 'python')->update(['value' => $configuredPython]);
     }
-    $beforeRequests = count(glob($root . '/requests/*.json'));
-    foreach (['run', 'verify', 'deliver', 'retention', 'destination-test'] as $action) {
-        $livewire->update(calls: [['method' => 'requestAction', 'params' => [$action]]], updates: ['runId' => 'fixture-run-id', ...$secrets]);
-        check(str_contains($livewire->get('message'), 'Request saved'), 'admin request failed: ' . $action);
-        check($livewire->get('secretKey') === '', 'request returned secret input');
+
+    // Create backup dialog: blocked types explained once; host checks counted once across types.
+    $dialogState = function () use ($page) {
+        $dialog = Livewire\Livewire::test($page);
+        $dialog->call('mountAction', 'createBackup');
+        $instance = $dialog->instance();
+        $schema = (new ReflectionMethod($instance, 'getMountedActionSchema'))->invoke($instance);
+        $state = ['submit' => (bool) $instance->getMountedAction()->getModalSubmitAction(), 'text' => '', 'disabled' => []];
+        foreach ($schema->getFlatComponents() as $component) {
+            if ($component instanceof Filament\Schemas\Components\Callout && $component->isVisible()) {
+                $description = $component->getDescription();
+                $state['text'] .= $description instanceof Illuminate\Contracts\Support\Htmlable ? $description->toHtml() : (string) $description;
+            } elseif ($component instanceof Filament\Forms\Components\Radio) {
+                foreach ($component->getOptions() as $value => $label) { if ($component->isOptionDisabled($value, $label)) { $state['disabled'][] = $value; } }
+                $state['selected'] = $component->getState();
+            }
+        }
+        return $state;
+    };
+    $ddl = $record->settings()->where('key', 'no_concurrent_ddl_acknowledged')->value('value');
+    try {
+        $record->settings()->where('key', 'no_concurrent_ddl_acknowledged')->update(['value' => '0']);
+        $blocked = $dialogState();
+        check(!$blocked['submit'] && str_contains($blocked['text'], 'Full backups need 2 host checks') && !str_contains($blocked['text'], 'that database schema changes never run'),
+              'blocked dialog offers submit or counts host checks twice: ' . strip_tags($blocked['text']));
+        $record->settings()->where('key', 'no_concurrent_ddl_acknowledged')->update(['value' => '1']);
+        $partial = $dialogState();
+        check($partial['submit'] && $partial['disabled'] === ['full-quiesced'] && $partial['selected'] === 'database-online' && str_contains($partial['text'], 'Full backups need 1 host check'),
+              'partially blocked dialog not guided: ' . json_encode(array_diff_key($partial, ['text' => 1])));
+    } finally {
+        $record->settings()->where('key', 'no_concurrent_ddl_acknowledged')->update(['value' => $ddl]);
     }
+
+    // Requests: queued durably with actor and mode; FPM never captures.
+    $beforeRequests = count(glob($root . '/requests/*.json'));
+    $queue = Livewire\Livewire::test($page);
+    $queue->update(calls: [['method' => 'mountAction', 'params' => ['createBackup']]], updates: $secrets);
+    $queue->update(calls: [['method' => 'callMountedAction', 'params' => []]], updates: ['mountedActions.0.data.mode' => 'database-online', ...$secrets]);
+    check($secretFields($queue) === [], 'request returned secret input');
+    $context = $schemaAction($queue, 'testStorage');
+    $queue->call('mountAction', 'testStorage', [], $context);
+    // With nothing to delete, retention is not offered; ui-history covers it with real backups.
+    check(!str_contains($queue->html(), "mountAction('applyRetention'"), 'retention offered with nothing to delete');
     $spooled = array_map(fn ($path) => json_decode(file_get_contents($path), true), glob($root . '/requests/*.json'));
-    check(count($spooled) === $beforeRequests + 5, 'admin requests not durable');
-    foreach ($spooled as $request) { check($request['status'] === 'pending', 'FPM launched heavy work'); }
+    check(count($spooled) === $beforeRequests + 2, 'admin requests not durable: ' . count($spooled));
+    $actions = array_count_values(array_column($spooled, 'action'));
+    check(($actions['run'] ?? 0) === 1 && ($actions['destination-test'] ?? 0) === 1, 'unexpected request actions');
+    foreach ($spooled as $request) {
+        check($request['status'] === 'pending' && $request['arguments']['actor'] === $admin->id, 'FPM launched heavy work or lost actor');
+        if ($request['action'] === 'run') { check($request['arguments']['mode'] === 'database-online', 'per-backup mode lost'); }
+    }
+    check(str_contains($queue->html(), 'Queued') && str_contains($queue->html(), 'Waiting for Paymenter&#039;s scheduler'), 'queued backup not shown');
+    // Phones stack history rows and wrap long commands instead of pushing actions or text off screen.
+    check(str_contains($queue->html(), 'fi-ta-table-stacked-on-mobile') && str_contains($queue->html(), 'overflow-wrap: anywhere'), 'mobile history or command wrapping missing');
+    // Copy never promises a start time the host has not shown.
+    foreach (['within a minute', 'under a minute', 'every minute', 'up to '] as $promise) { check(!str_contains($queue->html(), $promise), 'unsupported timing promise: ' . $promise); }
+    check(str_contains($queue->html(), 'Host checks') && str_contains($queue->html(), 'paymenter_backups() {') && str_contains($queue->html(), '/usr/bin/flock -n'), 'settings or help guidance missing');
     check(!file_exists($base . '/storage/framework/down') && !glob($root . '/runs/*/journal.json'), 'FPM started capture');
-    $credentialCanaries = ['PROBE-USER-CREDENTIAL-CANARY', 'PROBE-PASSWORD-CREDENTIAL-CANARY', base64_encode('PROBE-USER-CREDENTIAL-CANARY:PROBE-PASSWORD-CREDENTIAL-CANARY')];
+    foreach ($spooled as $request) {
+        Paymenter\Extensions\Others\Backups\Runtime::command(['requests', 'cancel', $request['request_id']]);
+    }
+    $credentialCanaries = ['PROBE-USER-CREDENTIAL-CANARY', 'PROBE-PASSWORD-CREDENTIAL-CANARY', base64_encode('PROBE-USER-CREDENTIAL-CANARY:PROBE-PASSWORD-CREDENTIAL-CANARY'), 'SECRET-CREDENTIAL-CANARY'];
     foreach (new RecursiveIteratorIterator(new RecursiveDirectoryIterator($base . '/storage', FilesystemIterator::SKIP_DOTS)) as $file) {
         if (!$file->isFile()) { continue; }
         $bytes = file_get_contents($file->getPathname());
-        foreach ($credentialCanaries as $canary) { check(!str_contains($bytes, $canary), 'probe credential persisted in native storage'); }
+        foreach ($credentialCanaries as $canary) { check(!str_contains($bytes, $canary), 'credential persisted in native storage'); }
     }
     check(config('app.debug') === false, 'native credential fixture debug must be disabled');
     $limited = App\Models\Role::create(['name' => 'no-backups-permission', 'permissions' => ['admin.extensions.viewAny']]);
     $admin->role_id = $limited->id; $admin->save(); $admin->unsetRelation('role');
     check(!Paymenter\Extensions\Others\Backups\Admin\Pages\Backups::canAccess(), 'missing permission admitted');
-    $page = new Paymenter\Extensions\Others\Backups\Admin\Pages\Backups;
-    foreach (['refreshStatus', 'saveCredentials', 'saveProbeCredentials', 'clearProbeCredentials'] as $action) {
-        try { $page->$action(); throw new RuntimeException('missing permission action admitted'); }
+    $denied = new Paymenter\Extensions\Others\Backups\Admin\Pages\Backups;
+    foreach (['mount', 'saveSettings', 'saveS3Keys', 'saveSitePassword'] as $action) {
+        try { $denied->$action(); throw new RuntimeException('missing permission action admitted: ' . $action); }
         catch (Symfony\Component\HttpKernel\Exception\HttpException $error) { check($error->getStatusCode() === 403, 'unexpected permission status'); }
     }
-    try { $page->requestAction('run'); throw new RuntimeException('missing permission request admitted'); }
-    catch (Symfony\Component\HttpKernel\Exception\HttpException $error) { check($error->getStatusCode() === 403, 'unexpected request permission status'); }
-    echo json_encode(['native_settings' => true, 'cold_matches' => true, 'livewire_secrets_clear' => true, 'permission_denied' => true, 'fpm_actions_spooled' => true, 'gui_docroot_policy' => true, 'relative_python_refused' => true, 'probe_credentials_bound' => true, 'probe_namespace_preserved' => true, 'probe_livewire_secrets_clear' => true]) . "\n";
+    try { (new Paymenter\Extensions\Others\Backups\Http\DownloadController)('fixture-run'); throw new RuntimeException('download admitted without permission'); }
+    catch (Symfony\Component\HttpKernel\Exception\HttpException $error) { check($error->getStatusCode() === 403, 'unexpected download permission status'); }
+    $route = app('router')->getRoutes()->getByName('filament.admin.pages.backups.download');
+    check($route !== null && in_array(Filament\Http\Middleware\Authenticate::class, $route->gatherMiddleware(), true), 'download route outside panel authentication');
+    $admin->role_id = App\Models\Role::where('name', 'integration-admin')->value('id'); $admin->save();
+    echo json_encode(['native_settings' => true, 'cold_matches' => true, 'page_settings_validated_before_persist' => true, 'engine_refusal_mapped' => true,
+        'livewire_secrets_clear' => true, 'permission_denied' => true, 'fpm_actions_spooled' => true, 'gui_docroot_policy' => true,
+        'relative_python_refused' => true, 'probe_credentials_bound' => true, 'create_dialog_guided' => true, 'probe_namespace_preserved' => true, 'native_fallback_validated' => true,
+        'download_route_authenticated' => true]) . "\n";
+} elseif ($mode === 'ui-history') {
+    $admin = App\Models\User::where('email', 'fixture@example.invalid')->firstOrFail();
+    Illuminate\Support\Facades\Auth::login($admin);
+    Filament\Facades\Filament::setCurrentPanel(Filament\Facades\Filament::getPanel('admin'));
+    $page = Paymenter\Extensions\Others\Backups\Admin\Pages\Backups::class;
+    $livewire = Livewire\Livewire::test($page);
+    $html = $livewire->html();
+    $action = $argv[3];
+    if ($action === 'render') {
+        foreach (array_slice($argv, 4) as $expected) { check(str_contains($html, $expected), 'history missing: ' . $expected); }
+        foreach (['archive_path', 'manifest_path', '.tar.gz"', 'owned_markers', 'IDENTIFIED'] as $forbidden) { check(!str_contains($html, $forbidden), 'history exposes ' . $forbidden); }
+        echo json_encode(['history_rendered' => true]) . "\n";
+    } elseif (in_array($action, ['verifyFirst', 'verify', 'delete'], true)) {
+        $before = count(glob(Paymenter\Extensions\Others\Backups\Runtime::privateRoot() . '/requests/*.json'));
+        // Actions without a confirmation run on mount; confirmed ones wait for submit.
+        $livewire->call('mountAction', $action, [], ['table' => true, 'recordKey' => $argv[4]]);
+        if ($livewire->get('mountedActions') !== []) { $livewire->call('callMountedAction'); }
+        check(count(glob(Paymenter\Extensions\Others\Backups\Runtime::privateRoot() . '/requests/*.json')) === $before + 1, 'table action did not queue: ' . $action);
+        echo json_encode(['queued' => $action]) . "\n";
+    } elseif ($action === 'retention') {
+        // Offered only when verified local backups exceed the number to keep; queues on confirmation.
+        check((bool) preg_match("/mountAction\('applyRetention', \{\}, JSON\.parse\('([^']*)'\)\)/", $html, $match), 'retention not offered: ' . $argv[4]);
+        $root = Paymenter\Extensions\Others\Backups\Runtime::privateRoot();
+        $before = glob($root . '/requests/*.json');
+        $livewire->call('mountAction', 'applyRetention', [], json_decode(json_decode('"' . $match[1] . '"'), true, 8, JSON_THROW_ON_ERROR));
+        check(glob($root . '/requests/*.json') === $before, 'retention queued before confirmation');
+        $livewire->call('callMountedAction');
+        $added = array_values(array_diff(glob($root . '/requests/*.json'), $before));
+        check(count($added) === 1 && json_decode(file_get_contents($added[0]), true)['action'] === 'retention', 'retention not queued');
+        Paymenter\Extensions\Others\Backups\Runtime::command(['requests', 'cancel', json_decode(file_get_contents($added[0]), true)['request_id']]);
+        echo json_encode(['retention_offered' => true]) . "\n";
+    } elseif ($action === 'delete-refused') {
+        $livewire->call('mountAction', 'delete', [], ['table' => true, 'recordKey' => $argv[4]]);
+        $mounted = $livewire->instance()->getMountedAction();
+        $description = $mounted->getModalDescription();
+        check(str_contains($description instanceof Illuminate\Contracts\Support\Htmlable ? $description->toHtml() : (string) $description, $argv[5]), 'delete refusal not explained');
+        check(!$mounted->getModalSubmitAction(), 'refused delete still offers submit');
+        echo json_encode(['delete_refused' => true]) . "\n";
+    } elseif ($action === 'download') {
+        $response = (new Paymenter\Extensions\Others\Backups\Http\DownloadController)($argv[4]);
+        if (!$response instanceof Symfony\Component\HttpFoundation\StreamedResponse) {
+            check($response->getStatusCode() === 302, 'refused download did not redirect');
+            echo json_encode(['download' => 'refused', 'notice' => session('filament.notifications')[0]['body'] ?? null]) . "\n";
+        } else {
+            $output = fopen($argv[5], 'xb');
+            ob_start(static function ($buffer) use ($output) { fwrite($output, $buffer); return ''; }, 65536);
+            $response->sendContent();
+            ob_end_clean();
+            fclose($output);
+            echo json_encode(['download' => 'streamed', 'length' => (int) $response->headers->get('Content-Length'), 'disposition' => $response->headers->get('Content-Disposition'), 'cache' => $response->headers->get('Cache-Control')]) . "\n";
+        }
+    }
 } elseif ($mode === 'open-basedir') {
     check(ini_get('open_basedir') !== '', 'restricted policy missing');
     $record = App\Models\Extension::where('extension', 'Backups')->firstOrFail();
@@ -170,7 +347,7 @@ if ($mode === 'upload') {
     Illuminate\Support\Facades\Auth::login($admin);
     Filament\Facades\Filament::setCurrentPanel(Filament\Facades\Filament::getPanel('admin'));
     $page = Livewire\Livewire::test(Paymenter\Extensions\Others\Backups\Admin\Pages\Backups::class);
-    check($page->get('backupStatus')['initialized'] === true && !str_contains($page->get('message'), 'unavailable'), 'restricted native admin status unavailable');
+    check(!str_contains($page->html(), 'The backup engine cannot run from the web server') && str_contains($page->html(), 'Backup history'), 'restricted native admin status unavailable');
     try {
         // A PHP alias to the same executable remains valid under the restrictive policy.
         $record->settings()->where('key', 'php')->update(['value' => $argv[3]]);
