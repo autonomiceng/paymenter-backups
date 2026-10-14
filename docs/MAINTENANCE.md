@@ -8,7 +8,7 @@ usable, but accepting a SDK update requires testing its declared Python floor.
 Never update production dependencies with pip or alter root Composer files.
 
 Run the unit tests, build twice and compare SHA256, then run
-`python3 tools/native_integration.py --release dist/Backups-0.2.0.zip`.
+`python3 tools/native_integration.py --release dist/Backups-0.3.0.zip`.
 The fixture fetches and verifies the official Paymenter v1.5.9 archive digest,
 creates its own MariaDB datadir/socket, uses fake credentials, restores into a
 second app/schema and removes its isolated processes. Host schemas, live apps

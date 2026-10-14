@@ -22,7 +22,8 @@ Release ZIP layout: `extensions/Others/Backups` or native uploader-compatible
 
 Public CLI workflows: `config show|set|validate|check`, `schedule show|set|enable|disable`,
 `plan`, `run`, `list`, `status`, `overview [--offline]`, `verify [--show] [--record]`,
-idempotent `deliver`, `retention plan|apply`, `delete ID [--execute]`,
+idempotent `deliver`, `retrieve ID [--execute]`, `retention plan|apply`,
+`delete ID [--location local|s3|all] [--execute]`,
 `destination-test`, `requests list|create|cancel`, `recover [--auto|--execute]`,
 `recover acknowledge --run ID`, and `export` of a verified recovery kit. All
 mutations require an explicit command or `--execute` as appropriate. `run` and
@@ -102,7 +103,7 @@ Settings saved on the page pass plain Laravel field rules that match the engine
 enabled weekly schedule, path lists are absolute, the S3 prefix has no empty,
 `.` or `..` parts or backslashes), then `config check`, which
 runs engine normalization, validation, schedule/billing admission and the
-backup-folder location rule without writing. Only keys that differ from the
+backup-directory location rule without writing. Only keys that differ from the
 stored rows, read on the server at save time, are then written through native
 Eloquent, so native auditing records them. The browser cannot supply that
 baseline. The page then runs `init`; if it fails, the written rows are put
@@ -160,18 +161,23 @@ between body reads; total transfer time is unbounded so slow clients still
 finish. On refusal, idle timeout, client disconnect or early request end it
 closes the pipes, gives the engine two seconds to record the interruption,
 then sends SIGTERM and, after two more seconds, SIGKILL before reaping it.
-Remote-only download is not implemented; the page offers local archives only.
+S3-only backups offer a queued Retrieve from S3 action. The worker verifies the
+remote archive and manifest, then publishes a local copy through a held,
+no-follow directory descriptor without overwriting existing names. Retrieval
+uses the local byte budget and disk reserve. A successful retrieval protects
+that local copy from automatic retention for 24 hours, and does not immediately
+run retention. The native Download link becomes available afterward. PHP never
+waits for an S3 transfer or exposes storage credentials or provider URLs.
 
-`delete ID` previews which local files and S3 objects one backup's deletion
-removes and returns the first refusal. Queued and `--execute` deletion holds
-the run lock and refuses an incomplete or deleted run, a remote copy outside
-the configured bucket and installation prefix, the newest copy in the
-configured S3 prefix, any other active request for that run, or the absence of
-another backup that passes a full verification at that moment, checked on
-every attempt. It records `delete_intent` with the owned manifest before
-removing anything, verifies remote objects match or are gone, removes S3
-manifest then archive, then removes the local manifest then archive relative
-to the verified directory descriptor. Before each unlink it re-reads the name
+`delete ID` previews the selected local, S3 or both copies. The default location
+is `all` for CLI compatibility. Execution holds the run lock and requires
+another fully verified survivor at every location being removed. It refuses
+unbound or changed remote locations and conflicting tasks. Local-only deletion
+can proceed while an earlier S3 destination remains outside the current scope.
+Each location has its own durable deletion intent and manifest snapshot.
+The worker removes the manifest before its archive at each location. An
+interrupted S3-only deletion leaves a usable local Download available.
+Before each local unlink it re-reads the name
 with `fstatat` through that descriptor and requires the full identity (device,
 inode, size, mtime_ns, ctime_ns) that the same attempt checked, so a file
 modified in place or recreated on a reused inode number is not mistaken for the
@@ -179,15 +185,32 @@ checked one; a replaced or modified file is kept and the attempt fails with
 `delete-local-verification-failed`. The stat-to-unlink step is not atomic
 against a hostile same-UID writer; the owner-private directory assumption
 still applies. A failed attempt resumes from its
-intent. Retention ignores runs with a manual delete intent, and per-backup
+intent. Whole-run deletion is recorded only when no known copy remains.
+Retention ignores runs with a manual delete intent, and per-backup
 deletion never changes retention settings.
 
 ## Scheduling and admission
 
 The native tick runs every minute with `evenInMaintenanceMode`; register lazily
-in console boot after Schedule resolution. It computes due requests and missed
-slots through the Python module. Request files are atomic/fsynced, identified
-by installation and schedule slot, and durable across deferred/busy runs.
+in console boot after Schedule resolution. Paymenter's server setup owns the
+systemd timer or cron job that invokes its scheduler. Backups never installs,
+enables, disables or edits those host jobs. Help links to Paymenter's
+installation guide and explains this ownership.
+
+Saving a changed schedule records a private fingerprint and start time.
+Enabling or editing the schedule starts with the next future slot. After an
+outage, the tick chooses only the latest due slot and queues one fresh snapshot,
+without creating a backlog for earlier slots. A weekly lookup is bounded to
+eight days; queued task expiry starts at creation, not at the old slot's time.
+Unstarted requests from a disabled, edited or superseded schedule are cancelled.
+Request files are atomic/fsynced, identified by installation, schedule epoch
+and slot, and durable across deferred/busy runs.
+Scheduled metadata is part of the first locked request write, so cancellation
+cannot be overwritten by a later metadata update. CLI configuration writes
+hold the scheduler lock through schedule synchronization and refuse before
+writing if the lock stays busy for ten seconds. Settings initialization also
+waits at most ten seconds for this short scheduler lock. The launcher and initialization re-read settings
+after acquiring that lock so an earlier read cannot restore an older schedule.
 Initial maintenance causes scheduled capture to skip, not reopen the site.
 Tick performs only guarded auto-recovery while maintenance is active.
 
@@ -247,7 +270,7 @@ caller SIGALRM timer is preserved and causes proof refusal. Only exact 503/templ
 401, ordinary pages and redirects refuse. Credential writes serialize the entire
 read/merge/encrypt/atomic-write under one owner-private flock, preserving S3 and
 probe namespaces independently; explicit probe clear preserves S3. Open configured job locks without creation,
-verify owner/type and actual account crontab use, then verify app scheduler/worker
+verify owner/type and actual account crontab or systemd timer service use, then verify app scheduler/worker
 processes are drained after acquisition. Full mode refuses unverified job locks
 or forced/uncoordinated workers; document prerequisite setup for other hosts.
 Foreground capture starting in strict pre-existing maintenance preserves it;
@@ -300,7 +323,10 @@ an operator recovery case; no always-on watchdog guarantee is claimed.
 Restore prior service state and release coordination locks after safe capture,
 then compress immutable payloads into one tar.gz. Full content/roundtrip checks,
 delivery and retries happen after reopening. Publish complete artifacts only
-after integrity verification and fsync; retain failed/unresolved runs separately.
+after integrity verification and fsync. Retain failed/unresolved journals for
+recovery evidence, but remove owned temporary payloads and unpublished partial
+archives after failure. Published archives and recovery markers remain subject
+to their separate ownership checks.
 
 ## Storage and retention
 
@@ -311,9 +337,43 @@ policies to `when_required` for compatibility. Verify whole-object SHA256 throug
 streamed GET; never substitute multipart ETag/composite checksums. Manifest is
 published last. Preserve local data on delivery failure.
 
-Prefix includes installation UUID. Retention previews then deletes only verified
-owned run/object IDs, obeys configured local/remote policy and preserves the last
-known good copy. Track incomplete multipart work. Destination-test is explicitly
+New installation bindings choose `PRIVATE_ROOT/backups`; existing bindings
+without the new directory field continue to use `PRIVATE_ROOT/artifacts`.
+Explicit `local_path` overrides either default. No files or identity are moved.
+Space accounting includes earlier journaled archive directories after a path
+change, as well as the private data directory.
+
+Prefix includes installation UUID. Remote ownership records endpoint, region,
+bucket, prefix and addressing style before upload. A changed destination never
+silently changes the recorded ownership. Legacy unbound copies cannot authorize
+destruction; an explicit verified delivery retry can bind the current location.
+A surviving legacy archive can restore a missing manifest from its owned intent
+only after full verification and safe descriptor-relative publication.
+Multipart work carries the same provider binding before upload. Legacy unbound
+multipart records refuse before provider calls and retain their journal. The
+operator can resolve them through the known provider or a bucket rule that
+aborts incomplete multipart uploads; changing settings cannot establish that
+missing ownership evidence.
+
+`retention_keep` is the local newest-N policy. Independent S3 policies are
+`local-count`, `count`, `age` and `keep-all`. The compatibility default
+`local-count` preserves the previous configured count. `s3_retention_keep=30`
+and `s3_retention_days=90` are inactive until their policy is selected. Age is
+measured from backup creation in UTC seconds. Cleanup runs after successful
+capture/delivery or an explicit Apply retention request; it does not configure
+bucket lifecycle rules or promise deletion at an exact expiration instant.
+
+Retention deletes only verified owned copies and protects a fully verified
+survivor independently at each location. Failed uploads preserve their local
+sources. Damaged, missing and out-of-scope copies are reported and skipped
+without blocking unrelated cleanup. Local and remote intents resume separately.
+Kept S3 copies use cheap presence checks; full archive proofs are reserved for
+deletion targets, required survivors and local-removal delivery checks, cached
+within the held-lock attempt. Lifecycle disappearance repairs the latest-copy
+pointer using an available verified survivor. Retention reports skipped copies
+to the overview. If admission fails only because the local budget is full,
+automatic local retention runs once before capture re-admits, without entering
+maintenance first. Track incomplete multipart work. Destination-test is explicitly
 requested and performs owned probe/readback/cleanup only. Bucket policy is never
 modified. Document least-privilege credentials, optional versioning/Object Lock,
 and plaintext archives containing private data and APP_KEY.

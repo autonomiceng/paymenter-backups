@@ -38,7 +38,8 @@ command emits JSON; failures emit only a safe error code to stderr and exit 1.
 | `verify ID --record` | Same check under the run lock; records the identity that enables admin download |
 | `deliver ID` | Idempotent S3 delivery; repairs missing/corrupt remote markers |
 | `retention plan`, `retention apply` | Preview or explicitly delete verified owned artifacts |
-| `delete ID`, `delete ID --execute` | Preview, or delete one backup's owned local and S3 copies |
+| `delete ID [--location local\|s3\|all] [--execute]` | Preview or remove selected copies, protecting a survivor at each location |
+| `retrieve ID [--execute]` | Preview or retrieve and verify an S3-only backup for local download |
 | `destination-test` | Owned local/S3 probe, readback, cleanup |
 | `requests create --action ACTION` | Durable admin-style request; JSON stdin arguments, including `delete` |
 | `requests list`, `requests cancel ID` | Inspect or cancel pending/deferred requests |
@@ -73,23 +74,24 @@ printf '%s\n' '{"run_id":"RUN-ID"}' |
 ```
 
 Request arguments are `run_id` for `verify`, `deliver` and `delete`, `execute`
-(`true` is required for `retention` deletion and for `delete`), `mode`
+(`true` is required for `retention` deletion and for `delete`), `location`
+(`local`, `s3` or `all`, for deletion), `mode`
 (`full-quiesced` or `database-online`, `run` only) and `actor`, a numeric
 administrator ID recorded for audit. Repeating an identical waiting manual
 request returns the waiting request. A `delete` request is refused while
 another request for that backup is active.
 
-`delete ID` prints which local files and S3 objects the deletion removes and
-the first refusal, if any: the only remaining backup, the newest copy in the
-configured S3 prefix, a remote copy outside the configured bucket and prefix,
-or another active task for that backup. Execution holds the run lock, fully
-verifies another backup on every attempt, records `delete_intent` before
-removing anything and resumes from it after a failure. It never changes
-retention settings. Example:
+`delete ID` previews both copies by default. Use `--location local` or
+`--location s3` to remove one copy. Execution holds the run lock, fully verifies
+another survivor at each affected location, records a separate intent for each
+copy and resumes after failure. It refuses conflicting tasks and uncertain or
+changed S3 locations. Local deletion remains available when an older S3 copy
+is outside the current settings. It never changes retention settings. Example:
 
 ```sh
 bin/paymenter-backups --app /srv/paymenter delete RUN-ID
 bin/paymenter-backups --app /srv/paymenter delete RUN-ID --execute
+bin/paymenter-backups --app /srv/paymenter delete RUN-ID --location local --execute
 ```
 
 `overview` is the administrator page's status source and a compact terminal
@@ -127,14 +129,18 @@ still requires exact native 503/template bytes; 401/200/404/redirect refuse.
 Defaults and prerequisites:
 
 * Schedule disabled; daily at 02:00 UTC when enabled. Weekly weekdays use Monday
-  0 to Sunday 6. Missed requests defer for `request_max_age`, default 24 hours.
+  0 to Sunday 6. Enabling or editing starts at the next future slot. After an
+  outage, one fresh backup is queued instead of a backlog. Unstarted tasks
+  expire `request_max_age` after creation, default 24 hours.
   Local DST gaps skip nonexistent slots; repeated wall slots execute once.
 * Mode `full-quiesced`, destination `local`, seven retained runs. Automatic
   retention follows successful run/delivery publication; set
   `automatic_retention=false` to require explicit retention apply. Failed
   remote delivery keeps its local copy, and deletion intent is durable/retryable.
   Local artifacts
-  default to `PRIVATE_ROOT/artifacts`; `local_path` may choose another canonical
+  default to `PRIVATE_ROOT/backups` for new installations. Existing installations
+  keep `PRIVATE_ROOT/artifacts` when their binding has no directory field.
+  `local_path` may choose another canonical
   owner-private location outside the app and every hosting document root.
   Declare every additional hosting document root with `extra_docroots` (JSON
   absolute path list). Canonical app/public is always excluded. This policy is
@@ -156,7 +162,10 @@ Defaults and prerequisites:
   `cd APP && flock PATH php artisan …`. Exclusive `-x`, nonblocking `-n`, wait
   `-w N` and exit code `-E N` are recognized. Shared locks, force workers,
   compound shell tails, fd locks and unverified cron forms refuse full mode.
-  Verify cron/service semantics and request/worker bounds on the deployment.
+  Existing systemd timer services can also use the same explicit flock command.
+  The runner reads their service command and Unix user, with a bounded discovery
+  deadline. It never installs or changes jobs. Verify cron/service semantics
+  and request/worker bounds on the deployment.
 
 Refresh a terminal billing guard with the booted native command:
 
@@ -189,10 +198,34 @@ Grant only the installation prefix: PutObject/GetObject/DeleteObject and
 multipart create/upload/complete/abort permissions. Do not change bucket policy
 through this extension. Versioning and Object Lock are optional operator
 choices; DeleteObject under versioning creates delete markers rather than
-purging old versions. Retention preserves the latest good copy and never scans
+purging old versions. Retention preserves a good copy at each location and never scans
 or deletes other installation prefixes. Failed/unresolved runs remain outside
 retention until reviewed. Tracked incomplete multipart work is visible in its
 journal and aborts on delivery retry; resolve a changed destination explicitly.
+
+Configure retention independently:
+
+```json
+{"settings":{"retention_keep":7,"s3_retention_policy":"age","s3_retention_days":90}}
+```
+
+`retention_keep` controls this server. S3 policies are `local-count` to keep the
+same number, `count` with `s3_retention_keep`, `age` with `s3_retention_days`, or
+`keep-all`. The default is `local-count`; the default 30-copy and 90-day values
+do not activate those policies. Age uses the backup's creation time. Cleanup
+runs after successful capture/delivery or `retention apply`. Failed uploads,
+damaged copies and freshly retrieved copies may temporarily exceed the count.
+Skipped copies and partial cleanup are visible in overview and run details.
+Bucket lifecycle can remove objects independently; this extension does not
+manage that policy, old object versions or Object Lock.
+
+For an S3-only backup, `retrieve ID` previews and `retrieve ID --execute` verifies
+and publishes a local copy under the disk limits. That copy is protected from
+automatic cleanup for 24 hours. The page queues the same workflow and offers
+Download when it finishes. `verify ID --record` checks the local copy when one
+exists, or the recorded S3 copy when it does not. Old remote records without
+provider binding require an explicit verified delivery retry before destructive
+operations. Fully deleted historical records remain deleted.
 
 The legacy S3-only credential bridge reads the expanded encrypted file, but
 its credential save replaces the complete payload and erases the probe namespace.

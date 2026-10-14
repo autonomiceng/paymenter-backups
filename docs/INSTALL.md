@@ -7,8 +7,8 @@ for this extension. Keep Paymenter core and native database definitions stock.
 Build on a separate development machine:
 
 ```sh
-python3 tools/build_release.py --output dist/Backups-0.2.0.zip
-(cd dist && sha256sum -c Backups-0.2.0.zip.sha256)
+python3 tools/build_release.py --output dist/Backups-0.3.0.zip
+(cd dist && sha256sum -c Backups-0.3.0.zip.sha256)
 ```
 
 The deterministic archive has one top-level `Backups/` directory, compatible
@@ -42,11 +42,11 @@ is required. No path in this guide is deployment specific.
 
 After enabling the extension, open **System > Backups**. The Backups tab lists
 what is still needed; the Settings tab edits everything in one form. Set the
-private folder and program paths under Advanced before the first save if the
-defaults do not fit the host. The first save creates the private folder and
-installation ID. Afterwards the private folder can only be moved from the
+private directory and program paths under Advanced before the first save if the
+defaults do not fit the host. The first save creates the private directory and
+installation ID. Afterwards the private directory can only be moved from the
 terminal. The page checks each save with the engine before writing, including
-schedule and billing overlap, S3 endpoint and backup folder location.
+schedule and billing overlap, S3 endpoint and backup directory location.
 
 Non-secret settings are native extension fields, so the native Extensions
 editor also works as a fallback with the same field rules. There, weekdays and
@@ -58,9 +58,18 @@ publication and preserves undelivered/unresolved copies. Enabling the
 extension does not itself enable automatic backups. Settings saves never touch
 the credential file.
 
+New installations store archives under `PRIVATE_ROOT/backups`. Existing
+installations keep their recorded paths and `artifacts` default. Local count
+and S3 retention are independent. S3 defaults to the previous local count;
+choosing count or age explicitly activates its own limit. S3 retrieval runs as
+a queued task before a local Download is offered. HTTP Basic credentials are
+optional advanced settings for web server password prompts, separate from
+Paymenter account login. Saved credential removal never changes host passwords
+or revokes provider keys.
+
 Full-quiesced requires explicit no-concurrent-DDL, cooperative-writer and
 external-state acknowledgements, existing owner-controlled scheduler/worker
-flock files, actual crontab entries using those files, bounded requests/work,
+flock files, registered cron or systemd timer services using those files, bounded requests/work,
 file-backed native maintenance, a fresh observed billing guard and sufficient
 space. The runner checks these prerequisites and refuses an incomplete setup.
 Configure hosting-specific job coordination with the operator before enabling
@@ -74,8 +83,13 @@ python3 -I /path/to/app/extensions/Others/Backups/runtime/cli.py \
 ```
 
 The native every-minute tick observes the actual native billing event and
-launches durable work. Configure the ordinary native `schedule:run` cron with
-its existing cooperative lock. The tick uses no Laravel cache mutex and runs
+launches durable work. Paymenter's server setup owns the systemd timer or cron
+job invoking `schedule:run` each minute. Keep a working existing launcher and
+use exactly one scheduler launcher. Backups never installs, enables or edits
+those jobs. Follow [Paymenter's installation guide](https://paymenter.org/docs/installation/install)
+for the host setup. Full backups additionally require that scheduler and worker
+jobs use the configured cooperative locks. Save Backups settings before creating
+lock files inside its new extension data directory. The tick uses no Laravel cache mutex and runs
 in maintenance for recovery. It is the sole detached launcher; terminal capture
 is foreground. Administrator heavy actions only write durable requests.
 
