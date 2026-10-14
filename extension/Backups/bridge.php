@@ -10,6 +10,9 @@ umask(0077);
 require_once __DIR__ . '/PrivateStore.php';
 require_once __DIR__ . '/Settings.php';
 require_once __DIR__ . '/ProbeCredentials.php';
+require_once __DIR__ . '/ArchiveEncryption.php';
+require_once __DIR__ . '/CredentialInput.php';
+require_once __DIR__ . '/FrameworkStores.php';
 try {
     $outputStat = fstat(STDOUT);
     if (PHP_SAPI !== 'cli' || !$outputStat || !in_array($outputStat['mode'] & 0170000, [0010000, 0140000], true)) {
@@ -41,19 +44,45 @@ try {
     $query->execute([$extension['id'], (new App\Models\Extension)->getMorphClass()]);
     $settings = [];
     foreach ($query->fetchAll(PDO::FETCH_ASSOC) as $row) {
-        if ($row['encrypted'] || preg_match('/access_key|secret_key|session_token|password|maintenance_probe/i', $row['key'])) { throw new RuntimeException('native-secret-row-refused'); }
+        if ($row['encrypted'] || preg_match('/access_key|secret_key|session_token|password|maintenance_probe|archive_encryption|passphrase|recovery_key|recovery_secret/i', $row['key'])) { throw new RuntimeException('native-secret-row-refused'); }
         $settings[$row['key']] = $row['value'];
     }
+    // Inspect the persisted marker before defaults can mask an existing install.
+    $settings['settings_version'] ??= 1;
     $settings = \Paymenter\Extensions\Others\Backups\Settings::normalize($settings, preserveInvalidJson: true);
     $root = PrivateStore::root($base, $arguments['--private-root'] ?? ($settings['private_root'] ?? null), false, $settings['extra_docroots']);
-    $billingRows = $pdo->query("SELECT `key`,value FROM {$prefix}settings WHERE settingable_type IS NULL AND `key` IN ('cronjob_time','timezone','app_url')")->fetchAll(PDO::FETCH_KEY_PAIR);
-    if (!isset($billingRows['cronjob_time'])) { throw new RuntimeException('billing-settings-unreadable'); }
-    $billing = ['daily_time' => $billingRows['cronjob_time'], 'timezone' => $billingRows['timezone'] ?? $config->get('app.timezone', 'UTC')];
     $identityPath = $root . '/installation.json';
     $identity = ['app' => $base, 'owner_uid' => posix_geteuid(), 'installation_uuid' => null];
     if (file_exists($identityPath)) {
         $identity = PrivateStore::read($identityPath);
         if (($identity['app'] ?? null) !== $base || ($identity['owner_uid'] ?? null) !== posix_geteuid() || !is_string($identity['installation_uuid'] ?? null)) { throw new RuntimeException('installation-mismatch'); }
+    }
+    if ($verb === 'document-roots') {
+        // Export privacy must reflect native rows even if capture init failed.
+        // Do not require billing settings, capture tools or decrypt credentials.
+        echo json_encode([
+            'schema_version' => 1, 'app' => $base, 'owner_uid' => posix_geteuid(),
+            'private_root' => $root, 'installation_uuid' => $identity['installation_uuid'],
+            'settings' => ['extra_docroots' => array_map('realpath', $settings['extra_docroots'])],
+        ], JSON_THROW_ON_ERROR | JSON_UNESCAPED_SLASHES) . "\n";
+        exit;
+    }
+    $billingRows = $pdo->query("SELECT `key`,value FROM {$prefix}settings WHERE settingable_type IS NULL AND `key` IN ('cronjob_time','timezone','app_url')")->fetchAll(PDO::FETCH_KEY_PAIR);
+    if (!isset($billingRows['cronjob_time'])) { throw new RuntimeException('billing-settings-unreadable'); }
+    $billing = ['daily_time' => $billingRows['cronjob_time'], 'timezone' => $billingRows['timezone'] ?? $config->get('app.timezone', 'UTC')];
+    // Settings reads share the envelope but never open or decrypt the credential store.
+    $readEnvelope = static function (array $credentials = []) use ($base, $root, $identity, $db, $settings, $extension, $config, $billingRows, $billing): array {
+        return [
+            'schema_version' => 1, 'app' => $base, 'owner_uid' => posix_geteuid(), 'private_root' => $root, 'installation_uuid' => $identity['installation_uuid'], 'docroots' => array_values(array_unique([$base . '/public', ...array_map('realpath', $settings['extra_docroots'])])),
+            'database' => ['driver' => $db['driver'], 'host' => $db['host'] ?? 'localhost', 'port' => $db['port'] ?? 3306, 'socket' => $db['unix_socket'] ?? '', 'name' => $db['database'], 'user' => $db['username'], 'password' => $db['password']],
+            'settings' => array_replace($settings, ['extension_enabled' => (bool) $extension['enabled']]), 'credentials' => array_intersect_key($credentials, array_flip(['access_key', 'secret_key', 'session_token'])), 'maintenance_probe_credentials' => $credentials['maintenance_probe'] ?? [], 'archive_encryption_credentials' => \Paymenter\Extensions\Others\Backups\ArchiveEncryption::wire($credentials['archive_encryption'] ?? []),
+            'framework' => ['stores' => \Paymenter\Extensions\Others\Backups\FrameworkStores::describe($base, $config), 'maintenance_driver' => $config->get('app.maintenance.driver', 'file'), 'cache_driver' => $config->get('cache.default'), 'session_driver' => $config->get('session.driver'), 'queue_driver' => $config->get('queue.default'), 'filesystem_driver' => $config->get('filesystems.default'), 'app_url' => $billingRows['app_url'] ?? $config->get('app.url'), 'timezone' => $billingRows['timezone'] ?? $config->get('app.timezone'), 'app_key' => $config->get('app.key'), 'cipher' => $config->get('app.cipher', 'AES-256-CBC')],
+            'billing' => $billing, 'tools' => ['php' => $settings['php'] ?: PHP_BINARY, 'python' => $settings['python'] ?? '', 'dump' => $settings['dump'] ?? '', 'mysql' => $settings['mysql'] ?? '', 'tar' => $settings['tar'] ?? '', 'gzip' => $settings['gzip'] ?? '', 'gpg' => $settings['gpg'] ?? ''],
+        ];
+    };
+    if ($verb === 'read-settings') {
+        echo json_encode($readEnvelope(), JSON_THROW_ON_ERROR | JSON_UNESCAPED_SLASHES) . "\n";
+        exit;
     }
     $decodeKey = static fn ($key) => str_starts_with($key, 'base64:') ? base64_decode(substr($key, 7), true) : $key;
     $key = $decodeKey($config->get('app.key', ''));
@@ -62,13 +91,18 @@ try {
     $encrypter = new Encrypter($key, $cipher);
     $encrypter->previousKeys($previous);
     $fingerprint = static fn ($candidate) => hash_hmac('sha256', 'paymenter-backups-key-v1:' . $identity['installation_uuid'], $candidate);
-    // Serialize read/merge/write across both web and CLI credential writers.
-    if (in_array($verb, ['credentials-write', 'maintenance-probe-credentials-write'], true)) {
+    $archiveActions = ['generate', 'import', 'acknowledge', 'discard-pending', 'reveal', 'export', 'status'];
+    $archiveAction = str_starts_with($verb, 'archive-key-') ? substr($verb, strlen('archive-key-')) : null;
+    if ($archiveAction !== null && !in_array($archiveAction, $archiveActions, true)) { throw new RuntimeException('bridge-command-invalid'); }
+    // Activation takes run.lock first, so a transfer never receives a new key midway.
+    if ($archiveAction === 'acknowledge') {
         if (!$identity['installation_uuid']) { throw new RuntimeException('installation-missing'); }
-        $lockPath = $root . '/credentials.lock';
-        if (is_link($lockPath) || (file_exists($lockPath) && (!is_file($lockPath) || fileowner($lockPath) !== posix_geteuid() || (fileperms($lockPath) & 077) !== 0))) { throw new RuntimeException('private-file-invalid'); }
-        $credentialLock = fopen($lockPath, 'c+b');
-        if (!$credentialLock || !flock($credentialLock, LOCK_EX)) { throw new RuntimeException('private-write-failed'); }
+        $archiveRunLock = \Paymenter\Extensions\Others\Backups\ArchiveEncryption::lock($root . '/run.lock', false);
+    }
+    // Serialize read/merge/write across all web and CLI credential namespaces.
+    if ($archiveAction !== null || $verb === 'credentials-rewrap' || in_array($verb, ['credentials-write', 'maintenance-probe-credentials-write', 'credentials-merge'], true)) {
+        if (!$identity['installation_uuid']) { throw new RuntimeException('installation-missing'); }
+        $credentialLock = \Paymenter\Extensions\Others\Backups\ArchiveEncryption::lock($root . '/credentials.lock');
     }
     $credentialPath = $root . '/credentials.json';
     $credentials = [];
@@ -80,15 +114,46 @@ try {
             }
             $credentials = json_decode($encrypter->decryptString($stored['payload']), true, 8, JSON_THROW_ON_ERROR);
             if (!is_array($credentials)) { throw new RuntimeException('credentials-unreadable'); }
+            if (array_key_exists('archive_encryption', $credentials)) {
+                if (!is_array($credentials['archive_encryption'])) { throw new RuntimeException('credentials-unreadable'); }
+                \Paymenter\Extensions\Others\Backups\ArchiveEncryption::namespace($credentials['archive_encryption']);
+            }
         } catch (Throwable $error) { throw new RuntimeException('credentials-unreadable'); }
     }
-    if (in_array($verb, ['credentials-write', 'maintenance-probe-credentials-write'], true)) {
+    if ($archiveAction !== null || $verb === 'credentials-rewrap') {
+        $input = stream_get_contents(STDIN, 65537);
+        if (strlen($input) > 65536) { throw new RuntimeException('archive-key-invalid'); }
+        try { $new = json_decode($input === '' ? '{}' : $input, true, 8, JSON_THROW_ON_ERROR); }
+        catch (Throwable $error) { throw new RuntimeException('archive-key-invalid'); }
+        if (!is_array($new) || array_diff(array_keys($new), ['actor', 'passphrase', 'fingerprint'])
+            || (isset($new['actor']) && (!is_int($new['actor']) || $new['actor'] < 0))) { throw new RuntimeException('archive-key-invalid'); }
+        if (isset($credentials['archive_encryption']) && !is_array($credentials['archive_encryption'])) { throw new RuntimeException('archive-key-invalid'); }
+        if ($verb === 'credentials-rewrap') {
+            if (!file_exists($credentialPath)) { throw new RuntimeException('credentials-unreadable'); }
+            $result = ['ok' => true];
+            \Paymenter\Extensions\Others\Backups\ArchiveEncryption::audit($root, 'rewrap', null, $new['actor'] ?? null);
+        } else {
+            [$namespace, $result] = \Paymenter\Extensions\Others\Backups\ArchiveEncryption::change($credentials['archive_encryption'] ?? null, $archiveAction, $new);
+            if ($archiveAction !== 'status') {
+                \Paymenter\Extensions\Others\Backups\ArchiveEncryption::audit($root, $archiveAction, $result['fingerprint'] ?? null, $new['actor'] ?? null);
+            }
+            if (!in_array($archiveAction, ['reveal', 'export', 'status'], true)) { $credentials['archive_encryption'] = $namespace; }
+            if ($archiveAction === 'export') { $result['installation_uuid'] = $identity['installation_uuid']; }
+        }
+        if ($verb === 'credentials-rewrap' || !in_array($archiveAction, ['reveal', 'export', 'status'], true)) {
+            PrivateStore::atomic($credentialPath, ['schema_version' => 1, 'installation_uuid' => $identity['installation_uuid'], 'cipher' => $cipher, 'key_fingerprint' => $fingerprint($key), 'payload' => $encrypter->encryptString(\Paymenter\Extensions\Others\Backups\ArchiveEncryption::payload($credentials))]);
+        }
+        echo json_encode($result, JSON_THROW_ON_ERROR) . "\n"; exit;
+    }
+    if (in_array($verb, ['credentials-write', 'maintenance-probe-credentials-write', 'credentials-merge'], true)) {
         if (!$identity['installation_uuid']) { throw new RuntimeException('installation-missing'); }
         $input = stream_get_contents(STDIN, 65537);
         if (strlen($input) > 65536) { throw new RuntimeException('credentials-invalid'); }
         $new = json_decode($input, true, 8, JSON_THROW_ON_ERROR);
         if (!is_array($new)) { throw new RuntimeException('credentials-invalid'); }
-        if ($verb === 'credentials-write' && $new === ['clear' => true]) {
+        if ($verb === 'credentials-merge') {
+            $credentials = \Paymenter\Extensions\Others\Backups\CredentialInput::merge($credentials, $new, $billingRows['app_url'] ?? $config->get('app.url', ''));
+        } elseif ($verb === 'credentials-write' && $new === ['clear' => true]) {
             // Explicit S3 removal keeps the independent probe namespace.
             $credentials = array_diff_key($credentials, array_flip(['access_key', 'secret_key', 'session_token']));
         } elseif ($verb === 'credentials-write') {
@@ -101,19 +166,13 @@ try {
         } else {
             $credentials['maintenance_probe'] = \Paymenter\Extensions\Others\Backups\ProbeCredentials::validate($new, $billingRows['app_url'] ?? $config->get('app.url', ''));
         }
-        PrivateStore::atomic($credentialPath, ['schema_version' => 1, 'installation_uuid' => $identity['installation_uuid'], 'cipher' => $cipher, 'key_fingerprint' => $fingerprint($key), 'payload' => $encrypter->encryptString(json_encode($credentials, JSON_THROW_ON_ERROR))]);
+        PrivateStore::atomic($credentialPath, ['schema_version' => 1, 'installation_uuid' => $identity['installation_uuid'], 'cipher' => $cipher, 'key_fingerprint' => $fingerprint($key), 'payload' => $encrypter->encryptString(\Paymenter\Extensions\Others\Backups\ArchiveEncryption::payload($credentials))]);
         echo json_encode(['ok' => true]) . "\n"; exit;
     }
     if ($verb !== 'read') { throw new RuntimeException('bridge-command-invalid'); }
-    echo json_encode([
-        'schema_version' => 1, 'app' => $base, 'owner_uid' => posix_geteuid(), 'private_root' => $root, 'installation_uuid' => $identity['installation_uuid'], 'docroots' => array_values(array_unique([$base . '/public', ...array_map('realpath', $settings['extra_docroots'])])),
-        'database' => ['driver' => $db['driver'], 'host' => $db['host'] ?? 'localhost', 'port' => $db['port'] ?? 3306, 'socket' => $db['unix_socket'] ?? '', 'name' => $db['database'], 'user' => $db['username'], 'password' => $db['password']],
-        'settings' => array_replace($settings, ['extension_enabled' => (bool) $extension['enabled']]), 'credentials' => array_intersect_key($credentials, array_flip(['access_key', 'secret_key', 'session_token'])), 'maintenance_probe_credentials' => $credentials['maintenance_probe'] ?? [],
-        'framework' => ['maintenance_driver' => $config->get('app.maintenance.driver', 'file'), 'cache_driver' => $config->get('cache.default'), 'session_driver' => $config->get('session.driver'), 'queue_driver' => $config->get('queue.default'), 'filesystem_driver' => $config->get('filesystems.default'), 'app_url' => $billingRows['app_url'] ?? $config->get('app.url'), 'timezone' => $billingRows['timezone'] ?? $config->get('app.timezone'), 'app_key' => $config->get('app.key'), 'cipher' => $cipher],
-        'billing' => $billing, 'tools' => ['php' => $settings['php'] ?: PHP_BINARY, 'python' => $settings['python'] ?? '/usr/bin/python3', 'dump' => $settings['dump'] ?? '/usr/bin/mariadb-dump', 'mysql' => $settings['mysql'] ?? '/usr/bin/mariadb', 'tar' => $settings['tar'] ?? '/usr/bin/tar', 'gzip' => $settings['gzip'] ?? '/usr/bin/gzip'],
-    ], JSON_THROW_ON_ERROR | JSON_UNESCAPED_SLASHES) . "\n";
+    echo json_encode($readEnvelope($credentials), JSON_THROW_ON_ERROR | JSON_UNESCAPED_SLASHES) . "\n";
 } catch (Throwable $error) {
-    $safe = ['private-pipe-required', 'application-unavailable', 'database-driver-unsupported', 'database-tls-unsupported', 'database-prefix-unsupported', 'extension-uninstalled', 'native-secret-row-refused', 'private-root-invalid', 'document-roots-invalid', 'private-root-unavailable', 'billing-settings-unreadable', 'installation-mismatch', 'installation-missing', 'credentials-unreadable', 'credentials-invalid', 'bridge-command-invalid', 'private-file-invalid', 'private-write-failed', 'maintenance-probe-credentials-invalid', 'maintenance-probe-origin-invalid', 'maintenance-probe-origin-mismatch'];
+    $safe = ['private-pipe-required', 'application-unavailable', 'database-driver-unsupported', 'database-tls-unsupported', 'database-prefix-unsupported', 'extension-uninstalled', 'native-secret-row-refused', 'private-root-invalid', 'document-roots-invalid', 'private-root-unavailable', 'billing-settings-unreadable', 'installation-mismatch', 'installation-missing', 'credentials-unreadable', 'credentials-invalid', 'bridge-command-invalid', 'private-file-invalid', 'private-write-failed', 'maintenance-probe-credentials-invalid', 'maintenance-probe-origin-invalid', 'maintenance-probe-origin-mismatch', 'archive-key-invalid', 'archive-key-mismatch', 'archive-key-required', 'archive-key-change-busy', 'archive-key-pending-exists', 'archive-key-already-exists', 'archive-key-limit', 'archive-key-audit-failed'];
     $code = in_array($error->getMessage(), $safe, true) ? $error->getMessage() : 'bridge-unavailable';
     fwrite(STDERR, json_encode(['error' => $code]) . "\n"); exit(1);
 }
