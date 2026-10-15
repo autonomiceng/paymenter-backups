@@ -43,6 +43,23 @@ state.
 Run `tools/browser_ui_checks.mjs` against a disposable `ui-` fixture, then check
 by eye:
 
+`--phase all --allow-fixture-mutations` exercises Settings,
+recovery-key download/confirmation, history lifecycle and damaged-survivor edge,
+manual cleanup, Upload to S3 and S3-only retrieval with an actual Download event.
+Every manual capture explicitly selects **Database backup**; seeded captures
+also pass `--mode database-online`. This browser lane never opts into full
+captures. Its workers always use `--loopback-s3`, whose fixture-only SDK transport
+refuses bindings other than `https://browser-s3.invalid`, the fake browser bucket
+and fixed fake keys. Objects and request traces stay under the owned fixture.
+These checks establish browser/protocol behavior; they do not validate provider
+TLS, real S3 or full-backup admission. The downloaded recovery key and screenshots
+are private fixture output and must stay out of Git.
+
+Settings choices use deferred browser state and `visibleJs`; the harness awaits
+field visibility/state after changing them. It waits for a Livewire POST only
+for Save and actions that run on the server. Waiting for a POST after a schedule,
+storage or encryption choice would hang a valid client-only interaction.
+
 * Backups tab on a fresh fixture: Setup names the cron line, copyable over
   HTTPS and selectable over HTTP; database backups read Ready or Not ready
   without listing full-only items; nothing is counted.
@@ -70,6 +87,17 @@ by eye:
   deleted backups, Delete preview names what is removed and refuses the last
   usable backup.
 * Light and dark, keyboard focus, no horizontal overflow at 390 px.
+
+The browser fixture's `worker` control admits capture requests only when their
+durable arguments explicitly select `database-online`. Full, omitted and
+unrecognized modes refuse before request promotion, leaving the pending/deferred
+request and attempt count unchanged and starting no engine process. Database
+captures and non-capture actions remain available. `worker --allow-full` is an
+explicit opt-in for an authorized disposable full-capture drill; it defaults off.
+The guard tests mock execution even when checking that opt-in. The fixture
+corruption helper resolves the installation-bound journal and owned artifact
+location, confined to its recorded default directory (`backups` for new
+bindings, `artifacts` for legacy bindings).
 
 ## Remaining limits
 

@@ -5,10 +5,16 @@ import re
 
 from .common import BackupError
 from .encryption import FORMAT, SCHEME, ITERATIONS
+from .engine import DiskReserve
 
 PLAINTEXT = 'plaintext-v1'
 LIMIT = 1024 * 1024 + 65536
 DESCRIPTOR_LIMIT = 16384
+
+
+def proof_timeout(size):
+    """After reopening: five minutes plus one second per 256 KiB, max one day."""
+    return min(86400, 300 + (size + 262143) // 262144)
 
 
 def encode(value):
@@ -160,6 +166,7 @@ def _write_spool(state, envelope, item, kind, chunks):
         if (os.fstat(directory).st_dev, os.fstat(directory).st_ino) != location.key:
             raise BackupError('delivery-ciphertext-unavailable')
         available = output_limit(state, envelope['settings'])
+        reserve = DiskReserve(state, envelope['settings'], location[0])
         fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600, dir_fd=directory)
         total, hasher = 0, hashlib.sha256()
         with os.fdopen(os.dup(fd), 'wb') as output:
@@ -170,9 +177,11 @@ def _write_spool(state, envelope, item, kind, chunks):
                 output.write(chunk)
                 output.flush()
                 hasher.update(chunk)
-                space(state, envelope['settings'])
+                reserve.check(total)
             output.flush()
             os.fsync(output.fileno())
+        reserve.check(total, force=True)
+        space(state, envelope['settings'])
         os.fsync(directory)
         receipt = {'name': name, 'identity': artifacts.identity(os.fstat(fd))}
         item['delivery_intent']['spools'][kind] = receipt
@@ -259,23 +268,23 @@ def _prepare(state, envelope, item, manifest):
             with HashReader(raw, manifest['archive']) as source:
                 receipt, cipher = _write_spool(state, envelope, item, 'archive',
                     encryption.transform(envelope, source, record['secret'], maximum=output_limit(state, envelope['settings']),
-                                         budget_check=lambda: space(state, envelope['settings'])))
+                                         timeout=proof_timeout(manifest['archive']['size'])))
         if not artifact.unchanged():
             raise BackupError('archive-changed-during-delivery')
     remote['spools']['archive'], remote['archive_ciphertext'] = receipt, cipher
     state.save(item)
     with _spool_reader(state, item, 'archive')() as source:
         with encryption.Reader(encryption.transform(envelope, source, record['secret'], decrypt=True,
-                                maximum=manifest['archive']['size'])) as plain:
+                                maximum=manifest['archive']['size'], timeout=proof_timeout(manifest['archive']['size']))) as plain:
             check_archive(lambda: HashReader(plain, manifest['archive']), manifest)
     recovery_bytes = encode(recovery(state.uuid, item['run_id'], remote, manifest))
     if len(recovery_bytes) > LIMIT:
         raise BackupError('remote-descriptor-invalid')
     receipt, cipher = _write_spool(state, envelope, item, 'recovery',
-                                  encryption.transform(envelope, io.BytesIO(recovery_bytes), record['secret']))
+                                  encryption.transform(envelope, io.BytesIO(recovery_bytes), record['secret'], timeout=proof_timeout(len(recovery_bytes))))
     remote['spools']['recovery'], remote['recovery_ciphertext'] = receipt, cipher
     with _spool_reader(state, item, 'recovery')() as source:
-        plain = b''.join(encryption.transform(envelope, source, record['secret'], decrypt=True, maximum=LIMIT))
+        plain = b''.join(encryption.transform(envelope, source, record['secret'], decrypt=True, maximum=LIMIT, timeout=proof_timeout(LIMIT)))
     if plain != recovery_bytes:
         raise BackupError('archive-integrity-failed')
     remote['descriptor'] = descriptor(state.uuid, item['run_id'], remote)
@@ -309,7 +318,7 @@ def validate_remote_metadata(state, envelope, item, s3, remote, manifest):
     if record['fingerprint'] != remote['key']:
         raise BackupError('archive-key-mismatch')
     cipher = _get(s3, remote, remote['recovery_key'], remote['recovery_ciphertext'], LIMIT + 4096)
-    plain = b''.join(encryption.transform(envelope, io.BytesIO(cipher), record['secret'], decrypt=True, maximum=LIMIT))
+    plain = b''.join(encryption.transform(envelope, io.BytesIO(cipher), record['secret'], decrypt=True, maximum=LIMIT, timeout=proof_timeout(LIMIT)))
     validate_recovery(decode(plain), state.uuid, item['run_id'], remote, manifest)
     return record
 
@@ -414,7 +423,7 @@ def checked_remote(state, envelope, item, record=False, directory=None, director
             record_key = validate_remote_metadata(state, envelope, item, s3, remote, manifest)
             with storage.RemoteReader(s3, remote, remote['archive_ciphertext']) as source:
                 with encryption.Reader(encryption.transform(envelope, source, record_key['secret'], decrypt=True,
-                                       maximum=manifest['archive']['size'])) as raw:
+                                       maximum=manifest['archive']['size'], timeout=proof_timeout(remote['archive_ciphertext']['size']))) as raw:
                     with HashReader(raw, manifest['archive']) as plain:
                         if directory is None:
                             check_archive(lambda: contextlib.nullcontext(plain), manifest)
@@ -424,6 +433,8 @@ def checked_remote(state, envelope, item, record=False, directory=None, director
                             available = output_limit(state, envelope['settings'], pathlib.Path(directory))
                             if manifest['archive']['size'] > available:
                                 raise BackupError('local-byte-budget-exceeded')
+                            reserve = DiskReserve(state, envelope['settings'], pathlib.Path(directory))
+                            total = 0
                             temporary = pathlib.Path(directory) / ('.remote-' + uuid.uuid4().hex + '.partial')
                             item['retrieve_work'] = {'temporary': temporary.name, 'scope': remote['scope'], 'identity': None}
                             state.save(item)
@@ -433,10 +444,15 @@ def checked_remote(state, envelope, item, record=False, directory=None, director
                             state.save(item)
                             with os.fdopen(os.dup(fd), 'wb') as output:
                                 for chunk in iter(lambda: plain.read(65536), b''):
+                                    total += len(chunk)
+                                    if total > available:
+                                        raise BackupError('local-byte-budget-exceeded')
                                     output.write(chunk)
                                     output.flush()
-                                    space(state, envelope['settings'])
+                                    reserve.check(total)
                                 os.fsync(output.fileno())
+                            reserve.check(total, force=True)
+                            space(state, envelope['settings'])
             if fd is not None:
                 def reader():
                     os.lseek(fd, 0, os.SEEK_SET)
@@ -552,7 +568,7 @@ def destination_test(state, envelope):
     import os
     record = encryption.key(envelope, active=True)
     payload = os.urandom(1024)
-    cipher = b''.join(encryption.transform(envelope, io.BytesIO(payload), record['secret'], maximum=16384))
+    cipher = b''.join(encryption.transform(envelope, io.BytesIO(payload), record['secret'], maximum=16384, timeout=proof_timeout(16384)))
     s3 = storage.client(envelope)
     import uuid
     name = storage.prefix(state, envelope) + 'probes/' + uuid.uuid4().hex + '.gpg'
@@ -562,7 +578,7 @@ def destination_test(state, envelope):
         s3.put_object(Bucket=bucket, Key=name, Body=cipher, ContentLength=len(cipher))
         remote = {'bucket': bucket}
         received = _get(s3, remote, name, digest(cipher), 16384)
-        plain = b''.join(encryption.transform(envelope, io.BytesIO(received), record['secret'], decrypt=True, maximum=len(payload)))
+        plain = b''.join(encryption.transform(envelope, io.BytesIO(received), record['secret'], decrypt=True, maximum=len(payload), timeout=proof_timeout(len(payload))))
         if plain != payload:
             raise BackupError('destination-readback-mismatch')
     except Exception as error:
@@ -602,5 +618,5 @@ def check_pending_source(state, envelope, item, manifest):
     with _spool_reader(state, item, 'archive')() as source:
         with HashReader(source, remote['archive_ciphertext']) as cipher:
             with encryption.Reader(encryption.transform(envelope, cipher, record['secret'], decrypt=True,
-                                    maximum=manifest['archive']['size'])) as plain:
+                                    maximum=manifest['archive']['size'], timeout=proof_timeout(remote['archive_ciphertext']['size']))) as plain:
                 check_archive(lambda: HashReader(plain, manifest['archive']), manifest)

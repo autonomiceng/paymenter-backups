@@ -208,7 +208,7 @@ def install(work, metadata, release):
     return {**results, 'release_sha256': metadata['release_sha256']}
 
 
-def run_worker(work, metadata, request_id):
+def run_worker(work, metadata, request_id, *, allow_full=False, loopback_s3=False):
     import fcntl
     private = pathlib.Path(metadata['private_root'])
     if not request_id or any(char not in 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-' for char in request_id) or len(request_id) > 100:
@@ -221,18 +221,58 @@ def run_worker(work, metadata, request_id):
         item = json.loads(target.read_text())
         if item['status'] not in ('pending', 'deferred'):
             raise RuntimeError('request is not pending/deferred')
+        arguments = item.get('arguments')
+        if (item.get('action') == 'run' and not allow_full
+                and (not isinstance(arguments, dict) or arguments.get('mode') != 'database-online')):
+            raise RuntimeError('fixture worker refuses non-database capture without --allow-full')
         item.update(status='launching', attempts=item['attempts'] + 1)
         write_json(target, item)
-    return json.loads(execute(command_prefix(metadata) + ['request-worker', request_id, '--execute'], timeout=300))
+    command = command_prefix(metadata)
+    if loopback_s3:
+        command[3] = ROOT / 'tools/native_ui_s3_worker.py'
+    return json.loads(execute(command + ['request-worker', request_id, '--execute'], timeout=300))
+
+
+def corrupt_artifact(metadata, run_id):
+    # Resolve through the engine's journal identity, location and ownership guards.
+    sys.path.insert(0, str(ROOT / 'src'))
+    from paymenter_backups import artifacts
+    from paymenter_backups.common import State
+    state = State(metadata['app'], metadata['private_root'], initialize=False)
+    with state.lock():
+        item = artifacts.journal(state, run_id)
+        location = artifacts.locations(state, item)
+        if location[0] != state.default_destination():
+            raise RuntimeError('artifact outside disposable default backup directory')
+        directory_fd = artifacts.open_directory(location[0])
+        try:
+            directory_info = os.fstat(directory_fd)
+            if (directory_info.st_dev, directory_info.st_ino) != location.key:
+                raise RuntimeError('artifact directory changed')
+            descriptor = os.open(location[1].name, os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC,
+                                 dir_fd=directory_fd)
+            with os.fdopen(descriptor, 'r+b') as output:
+                info = os.fstat(output.fileno())
+                if not artifacts.owned_file(info) or not info.st_size:
+                    raise RuntimeError('artifact is not an owner-private regular file')
+                output.seek(info.st_size // 2)
+                byte = output.read(1)
+                output.seek(-1, 1)
+                output.write(bytes([byte[0] ^ 1]))
+                output.flush()
+                os.fsync(output.fileno())
+        finally:
+            os.close(directory_fd)
+    return {'corrupted_fixture_artifact': run_id}
 
 
 def seed_runs(work, metadata, count):
     cli = command_prefix(metadata)
     execute(cli + ['config', 'set'], input=json.dumps({'settings': {
-        'mode': 'database-online', 'destination': 'local', 'automatic_retention': False,
+        'mode': 'database-online', 'destination': 'local', 'keep_local': True, 'upload_s3': False, 'automatic_retention': False,
         'no_concurrent_ddl_acknowledged': True, 'external_state_acknowledged': True,
     }}).encode())
-    result = [json.loads(execute(cli + ['run', '--execute'], timeout=300)) for _ in range(count)]
+    result = [json.loads(execute(cli + ['run', '--mode', 'database-online', '--execute'], timeout=300)) for _ in range(count)]
     write_json(work / 'ui-runs.json', result)
     return result
 
@@ -332,7 +372,11 @@ def main():
         item.add_argument('--work', required=True)
         if action == 'install': item.add_argument('--release', required=True)
         if action == 'seed-runs': item.add_argument('--count', type=int, default=3)
-        if action == 'worker': item.add_argument('--request-id', required=True)
+        if action == 'worker':
+            item.add_argument('--request-id', required=True)
+            item.add_argument('--loopback-s3', action='store_true', help='route fake S3 worker traffic to the isolated loopback protocol fixture')
+            item.add_argument('--allow-full', action='store_true',
+                              help='explicitly allow full or unspecified capture modes in this disposable fixture')
         if action == 'corrupt': item.add_argument('--run-id', required=True)
     args = parser.parse_args()
     if args.action == 'serve':
@@ -344,31 +388,12 @@ def main():
     work, metadata = controlled_metadata(args.work)
     if args.action == 'install': result = install(work, metadata, args.release)
     elif args.action == 'seed-runs': result = seed_runs(work, metadata, args.count)
-    elif args.action == 'worker': result = run_worker(work, metadata, args.request_id)
+    elif args.action == 'worker': result = run_worker(work, metadata, args.request_id, allow_full=args.allow_full, loopback_s3=args.loopback_s3)
     elif args.action == 'stop':
         (work / 'STOP').touch(mode=0o600)
         result = {'stop_requested': True}
     else:
-        # Resolve through the genuine engine State grammar/ownership guards.
-        sys.path.insert(0, str(ROOT / 'src'))
-        from paymenter_backups.common import State
-        state = State(metadata['app'], metadata['private_root'])
-        journal = json.loads((state.run_path(args.run_id) / 'journal.json').read_text())
-        archive = pathlib.Path(journal['archive_path'])
-        if archive != state.root / 'artifacts' / (args.run_id + '.tar.gz') or archive.is_symlink() or archive.parent.is_symlink():
-            raise RuntimeError('artifact outside disposable private artifacts')
-        descriptor = os.open(archive, os.O_RDWR | os.O_NOFOLLOW)
-        with os.fdopen(descriptor, 'r+b') as output:
-            info = os.fstat(output.fileno())
-            if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077 or not info.st_size:
-                raise RuntimeError('artifact is not an owner-private regular file')
-            output.seek(info.st_size // 2)
-            byte = output.read(1)
-            output.seek(-1, 1)
-            output.write(bytes([byte[0] ^ 1]))
-            output.flush()
-            os.fsync(output.fileno())
-        result = {'corrupted_fixture_artifact': args.run_id}
+        result = corrupt_artifact(metadata, args.run_id)
     print(json.dumps(result), flush=True)
 
 

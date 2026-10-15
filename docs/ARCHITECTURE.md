@@ -452,6 +452,16 @@ Private roots bind canonical app identity, UID and immutable installation UUID;
 directories are0700, files0600, process umask077. Enforce canonical destinations,
 private-root byte budget, minimum reserve and bounded outputs. Filesystem free
 space does not establish a subscription quota; document quota assumptions.
+Capture children calculate a remaining output ceiling at admission and enforce
+it with the inherited file-size limit. Each poll checks the current output's
+size and, during full capture, the absolute deadline. Filesystem reserve checks
+run at most once per second or per 64 MiB; polling never rescans private history.
+Every successful child forces a reserve check and full private-history
+accounting before advancing or publishing. Full capture checks
+its same absolute maintenance deadline after admission accounting, while polling,
+and after completion accounting. Accounting grants no new capture deadline;
+expiry refuses advancement or completion under the original bound. Synchronous
+filesystem or accounting work can delay the start of cleanup after expiry.
 
 Atomic/fsynced journals record phase, initial state, safe error code, exact
 maintenance marker `(device,inode,size,mtime_ns,ctime_ns,SHA256)`, process/child
@@ -546,7 +556,9 @@ without blocking unrelated cleanup. Local and remote intents resume separately.
 Kept S3 copies use cheap presence checks; full archive proofs are reserved for
 deletion targets, required survivors and local-removal delivery checks, cached
 within the held-lock attempt. Lifecycle disappearance repairs the latest-copy
-pointer using an available verified survivor. Retention reports skipped copies
+pointer using an available present copy. This pointer is untrusted discovery
+metadata; it never substitutes for full survivor, retrieval or deletion proof.
+Retention reports skipped copies
 to the overview. If admission fails only because the local budget is full,
 automatic local retention runs once before capture re-admits, without entering
 maintenance first. Track incomplete multipart work. Destination-test is explicitly
@@ -555,6 +567,15 @@ modified. Document least-privilege credentials, optional versioning/Object Lock,
 and plaintext local archives containing private data and APP_KEY.
 
 ### Encrypted remote artifacts
+
+Capture and storage mutation entry points reload the current configuration and credentials
+after acquiring the run lock. Automatic retention also checks the current
+automatic-retention setting under that lock, after capture/delivery, so a Save
+that changes storage or retention while capture runs governs subsequent cleanup.
+Callers retaining a read envelope supply its loader when concurrent Saves are
+possible. Capture preserves the requested backup type while refreshing its
+settings before admission and budget-triggered cleanup. A configuration Save after that reload applies to the next operation;
+an admitted operation uses its consistent snapshot.
 
 `encryption.py` owns the pinned GnuPG profile and private subprocess transport;
 `remote_artifacts.py` owns versioned object names, public descriptors, encrypted
@@ -575,8 +596,22 @@ AES256, SEIPD v1/MDC, salted iterated S2K mode 3/SHA256/count 65011712, no extra
 compression, source filename, recipients or signatures. `--rfc4880` precedes
 algorithm options. Secrets travel over private pipes, never arguments,
 environment or temporary passphrase files. GnuPG uses an owner-private home,
-bounded concurrent input/output/status/stderr draining and deadlines. Only
-owned helpers may be supervised or stopped; personal GnuPG state and account
+bounded concurrent input/output/status/stderr draining and deadlines.
+Agent readiness uses the socket path reported by the trusted adjacent gpgconf,
+including runtime-directory socket placement. Cleanup removes only this unique
+homedir's socket directory after its owned agent stops. Encryption accepts the
+optional zero AEAD status field used by newer GnuPG, while refusing nonzero AEAD
+and any profile other than AES256 with MDC.
+Ciphertext spools and plaintext or encrypted retrieval outputs calculate remaining byte budget once
+before opening the output, enforce that ceiling while writing, and account the
+complete private history again before publication. In-stream reserve checks
+inspect filesystem free space at most once per second or per 64 MiB, plus
+completion; they never reread journals per chunk. Encrypted transforms/proofs
+run outside the maintenance and billing hold with a separate deadline: five
+minutes plus one second per 256 KiB of the recorded input, capped at 24 hours.
+The capture deadline remains unchanged. Per-request S3 network timeouts still
+apply, and output publication requires the unchanged complete checksum/archive/MDC proof.
+Only owned helpers may be supervised or stopped; personal GnuPG state and account
 wide helper shutdown are prohibited. Successful decryption requires exit zero,
 expected `DECRYPTION_INFO`, `DECRYPTION_OKAY`, completed decryption, and no MDC
 or profile failure. Early plaintext output is untrusted until completion.

@@ -248,6 +248,8 @@ def main():
     parser.add_argument('--php', default=shutil.which('php'))
     parser.add_argument('--composer', default='/usr/bin/composer', help='Composer PHP script, invoked with the selected PHP binary')
     parser.add_argument('--keep', action='store_true')
+    parser.add_argument('--gpg-writer', default='/usr/bin/gpg')
+    parser.add_argument('--gpg-reader', default='/usr/bin/gpg')
     parser.add_argument('--skip-restore', action='store_true', help='Adapter development only; does not complete release checks')
     args = parser.parse_args()
     workbase = ROOT / '.native-work'
@@ -353,7 +355,7 @@ def main():
                 raise RuntimeError('billing fingerprint mismatch')
             creds = {'access_key': 'ACCESS-CREDENTIAL-CANARY', 'secret_key': 'SECRET-CREDENTIAL-CANARY', 'session_token': 'TOKEN-CREDENTIAL-CANARY'}
             execute([args.php, bridge, 'credentials-write', '--app', app, '--private-root', private], input=json.dumps(creds).encode())
-            results = json.loads(execute([args.php, checker, app, 'check']))
+            results = json.loads(execute([args.php, checker, app, 'check'], timeout=420))
             # Cached config must be honoured without providers; native URL/TZ
             # overrides intentionally differ from .env in this fixture.
             execute([args.php, 'artisan', 'config:cache'], cwd=app)
@@ -499,12 +501,15 @@ def main():
             cron = fakebin / 'crontab'
             cron.write_text('#!/bin/sh\ncat <<\'CRON\'\n* * * * * flock -n ' + str(lock) + ' ' + args.php + ' ' + str(app / 'artisan') + ' schedule:run\nCRON\n')
             cron.chmod(0o700)
+            systemctl = fakebin / 'systemctl'
+            systemctl.write_text('#!/bin/sh\nprintf \'[]\\n\'\n')
+            systemctl.chmod(0o700)
             execute([args.php, 'artisan', 'backups:config-set'], cwd=app, input=json.dumps({'job_lock_paths': json.dumps([str(lock)])}).encode())
             execute([args.php, 'artisan', 'backups:guard'], cwd=app)
             # Adapter envelope instrumentation is confined to this fixture. The
             # production bridge has no configurable crontab override.
             fixture_bridge = work / 'fixture-bridge.php'
-            fixture_bridge.write_text('<?php ob_start(); require ' + json.dumps(str(bridge)) + '; $value=json_decode(ob_get_clean(),true); $value["tools"]["crontab"]=' + json.dumps(str(cron)) + '; echo json_encode($value)."\\n";')
+            fixture_bridge.write_text('<?php ob_start(); require ' + json.dumps(str(bridge)) + '; $value=json_decode(ob_get_clean(),true); $value["tools"]["crontab"]=' + json.dumps(str(cron)) + '; $value["tools"]["systemctl"]=' + json.dumps(str(systemctl)) + '; echo json_encode($value)."\\n";')
             capture_cli = cli[:]
             capture_cli[capture_cli.index('--bridge') + 1] = fixture_bridge
             execution_env = child_environment({'PATH': str(fakebin) + ':' + child_environment()['PATH']})
@@ -516,6 +521,14 @@ def main():
                 except urllib.error.HTTPError as error:
                     if error.code != 419:
                         raise RuntimeError('unexpected native CSRF response: ' + str(error.code))
+                # Incompressible fixture data makes the encrypted drill exercise
+                # a real large generation rather than only small SQL documents.
+                large_payload = app / 'isolated-restore-payload.bin'
+                with large_payload.open('wb') as output:
+                    for _ in range(200):
+                        output.write(os.urandom(1024**2))
+                large_payload.chmod(0o600)
+                large_payload_sha256 = hashlib.sha256(large_payload.read_bytes()).hexdigest()
                 execute(capture_cli + ['run', '--execute', '--mode', 'full-quiesced'], env=execution_env, timeout=300)
                 runs = list((private / 'runs').glob('*/journal.json'))
                 journals = [json.loads(path.read_text()) for path in runs]
@@ -533,6 +546,10 @@ def main():
             if fake_auth_hash in inspected or b'paymenter-fixture-password' in inspected:
                 raise RuntimeError('native manifest leaks SHOW GRANTS authentication hash')
             archive = pathlib.Path(run['archive_path'])
+            encrypted_restore = json.loads(execute([sys.executable, '-I', ROOT / 'tools/native_encrypted_restore.py',
+                '--work', work, '--php', args.php, '--run', run['run_id'],
+                '--gpg-writer', args.gpg_writer, '--gpg-reader', args.gpg_reader], timeout=600))
+            archive = pathlib.Path(encrypted_restore['restore_archive'])
             payload = work / 'restored-payload'
             payload.mkdir()
             with tarfile.open(archive) as backup:
@@ -547,6 +564,8 @@ def main():
                 if len(candidates) != 1:
                     raise RuntimeError('unexpected full app archive layout')
                 restored = candidates[0].parent
+            if hashlib.sha256((restored / 'isolated-restore-payload.bin').read_bytes()).hexdigest() != large_payload_sha256:
+                raise RuntimeError('large encrypted restore payload differs')
             execute(['mariadb', '--no-defaults', '--socket=' + str(sock), '-uroot', 'paymenter_restore'], input=(payload / 'database.sql').read_bytes())
             restored_env = (restored / '.env').read_text().replace('DB_DATABASE=deliberately_unused_database', 'DB_DATABASE=paymenter_restore').replace('/paymenter_fixture?', '/paymenter_restore?')
             if 'APP_KEY=' + app_key not in restored_env:
@@ -569,7 +588,7 @@ def main():
                 raise RuntimeError('native source changed during capture')
             if (work / 'forbidden-config-cache.php').exists() or (work / 'forbidden-routes-cache.php').exists():
                 raise RuntimeError('inherited APP cache path was used')
-            result = {'hostile_parent_environment_ignored': True, 'database_visibility': visibility, 'adapter_checks': results, 'open_basedir': open_basedir_results, 'restore': restored_results, 'full_artifact_sha256': hashlib.sha256(archive.read_bytes()).hexdigest(), 'release_sha256': release_sha256, 'native_login': True, 'native_migrations': 'no pending', 'native_source_unchanged': True}
+            result = {'hostile_parent_environment_ignored': True, 'database_visibility': visibility, 'adapter_checks': results, 'open_basedir': open_basedir_results, 'restore': restored_results, 'encrypted_restore': encrypted_restore, 'full_artifact_sha256': hashlib.sha256(archive.read_bytes()).hexdigest(), 'release_sha256': release_sha256, 'native_login': True, 'native_migrations': 'no pending', 'native_source_unchanged': True}
             (workbase / 'native-integration-last.json').write_text(json.dumps(result, indent=2) + '\n')
             print(json.dumps(result))
     finally:

@@ -135,19 +135,21 @@ if ($mode === 'upload') {
         'settings.job_lock_paths' => "/fixture/a.lock\n\n /fixture/b.lock "]);
     check($livewire->instance()->getErrorBag()->isEmpty(), 'valid page settings refused: ' . json_encode($livewire->instance()->getErrorBag()->toArray()));
     $after = $nativeRows();
-    check($after['full_schedule'] === 'weekly' && $after['retention_keep_database'] === '4' && $after['full_weekdays'] === '[0,6]'
-        && $after['job_lock_paths'] === '["/fixture/a.lock","/fixture/b.lock"]' && $after['settings_version'] === '2', 'page settings not persisted in engine form: ' . json_encode(array_intersect_key($after, array_flip($changedKeys))));
+    check($after['full_schedule'] === 'weekly' && $after['retention_keep_database'] === '4' && json_decode($after['full_weekdays'], true) === [0, 6]
+        && json_decode($after['job_lock_paths'], true) === ['/fixture/a.lock', '/fixture/b.lock'] && $after['settings_version'] === '2', 'page settings not persisted in engine form: ' . json_encode(array_intersect_key($after, array_flip($changedKeys))));
     check(array_diff_key($after, array_flip($changedKeys)) === array_diff_key($before, array_flip($changedKeys)), 'page save changed unrelated rows');
     check(!str_contains(html_entity_decode(Livewire\Livewire::test($page)->html()), 'Next full backup Off'), 'full schedule not summarized');
     $save(['settings.full_schedule' => 'off']);
-    check($nativeRows()['full_schedule'] === 'off' && $nativeRows()['full_weekdays'] === '[0,6]', 'schedule could not be turned off');
+    check($nativeRows()['full_schedule'] === 'off' && json_decode($nativeRows()['full_weekdays'], true) === [0, 6], 'schedule could not be turned off');
     check($after['local_byte_budget'] === $before['local_byte_budget'], 'unchanged byte limit rewritten');
     // Space settings are entered in GiB and stored in bytes.
     $save(['settings.local_byte_budget' => '1.5']);
     check($nativeRows()['local_byte_budget'] === (string) (int) (1.5 * 1073741824), 'GiB space limit not stored in bytes');
     $save(['settings.local_byte_budget' => $before['local_byte_budget'] / 1073741824]);
     check($digest() === $credentialDigest, 'settings save touched credentials');
-    check(App\Models\Audit::where('auditable_type', (new App\Models\Setting)->getMorphClass())->where('new_values', 'like', '%[0,6]%')->exists(), 'page settings bypassed native auditing');
+    check(App\Models\Audit::where('auditable_type', (new App\Models\Setting)->getMorphClass())->get()->contains(
+        static fn ($audit) => json_decode($audit->new_values['value'] ?? '', true) === [0, 6]
+    ), 'page settings bypassed native auditing');
     $save(['settings.job_lock_paths' => '']);
     check($nativeRows()['job_lock_paths'] === '[]', 'line list could not be cleared');
     $notices();

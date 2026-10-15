@@ -184,7 +184,7 @@ class RemoteReader:
 @contextlib.contextmanager
 def checked_remote(state, envelope, item, record=False, directory=None, directory_fd=None):
     """Bounded private spool, complete object/manifest/archive check, no publication."""
-    from .engine import check_archive, output_limit, space
+    from .engine import DiskReserve, check_archive, output_limit, space
     if remote_artifacts.format_of(item.get("remote") or item.get("delivery_intent") or {}) == encryption.FORMAT:
         with remote_artifacts.checked_remote(state, envelope, item, record, directory, directory_fd) as result:
             yield result
@@ -239,9 +239,7 @@ def checked_remote(state, envelope, item, record=False, directory=None, director
             temporary_fd = os.open(temporary.name, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600, dir_fd=directory_fd)
             item["retrieve_work"]["identity"] = artifacts.identity(os.fstat(temporary_fd))
             state.save(item)
-            available = output_limit(state, envelope["settings"], pathlib.Path(directory))
-            if manifest["archive"]["size"] > available:
-                raise BackupError("local-byte-budget-exceeded")
+            reserve = DiskReserve(state, envelope["settings"], pathlib.Path(directory))
             with os.fdopen(os.dup(temporary_fd), "wb") as output:
                 for chunk in iter(lambda: body.read(1024 * 1024), b""):
                     size += len(chunk)
@@ -249,10 +247,11 @@ def checked_remote(state, envelope, item, record=False, directory=None, director
                         raise BackupError("remote-archive-size-mismatch")
                     output.write(chunk)
                     output.flush()
-                    space(state, envelope["settings"])
+                    reserve.check(size)
                     hasher.update(chunk)
                 output.flush()
                 os.fsync(output.fileno())
+            reserve.check(size, force=True)
         finally:
             body.close()
         if (hasher.hexdigest(), size) != (manifest["archive"]["sha256"], manifest["archive"]["size"]):
@@ -993,7 +992,12 @@ def _retention(state, envelope, execute=False, locked=False, local_only=False, m
         return result
 
 
-def retention(state, envelope, execute=False, locked=False, local_only=False):
+def retention(state, envelope, execute=False, locked=False, local_only=False, envelope_loader=None):
+    if envelope_loader is not None:
+        with contextlib.nullcontext() if locked else state.lock(create=execute):
+            current = envelope_loader()
+            state.apply_policy(current['settings'])
+            return retention(state, current, execute, True, local_only)
     if envelope['settings'].get('settings_version', 1) == 1:
         return _retention(state, envelope, execute, locked, local_only)
     with contextlib.nullcontext() if locked else state.lock(create=execute):
@@ -1079,8 +1083,11 @@ def delete_plan(state, envelope, run_id, request_id=None, location="all"):
             "refusal": refusal, "execute_required": True}
 
 
-def delete_run(state, envelope, run_id, request_id=None, location="all"):
+def delete_run(state, envelope, run_id, request_id=None, location="all", envelope_loader=None):
     with state.lock():
+        if envelope_loader is not None:
+            envelope = envelope_loader()
+            state.apply_policy(envelope['settings'])
         item = artifacts.journal(state, run_id)
         if item.get("retained_deleted"):
             return {"run_id": run_id, "deleted": True, "already_deleted": True}
@@ -1245,8 +1252,11 @@ def resume_retrieval(state, item, location, directory_fd):
         os.close(descriptor)
 
 
-def retrieve(state, envelope, run_id):
+def retrieve(state, envelope, run_id, envelope_loader=None):
     with state.lock():
+        if envelope_loader is not None:
+            envelope = envelope_loader()
+            state.apply_policy(envelope['settings'])
         preview = retrieve_plan(state, envelope, run_id)
         if preview["refusal"]:
             raise BackupError(preview["refusal"])

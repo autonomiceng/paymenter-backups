@@ -320,7 +320,8 @@ class Encryption(unittest.TestCase):
         with patch('paymenter_backups.encryption.subprocess.Popen', side_effect=spawn):
             with self.assertRaisesRegex(BackupError, 'child-timeout'):
                 b''.join(encryption.transform(self.envelope, io.BytesIO(b'disposable'), self.record['secret']))
-        self.assertEqual(len(children), 2)
+        self.assertGreaterEqual(len(children), 2)
+        self.assertEqual(sum(pathlib.Path(child.args[0]).name in ('gpg', 'gpg-agent') for child in children), 2)
         self.assertTrue(all(child.poll() is not None for child in children))
 
     @unittest.skipUnless(test_storage.boto3, "isolated S3 SDK unavailable")
@@ -458,12 +459,13 @@ time.sleep(30)
                 while time.monotonic() < deadline:
                     try:
                         records = json.loads(receipt.read_text())
-                        if len(records) == 2:
+                        if sum(pathlib.Path(record['args'][0]).name in ('gpg', 'gpg-agent') for record in records) == 2:
                             break
                     except (FileNotFoundError, ValueError):
                         pass
                     time.sleep(0.02)
-                self.assertEqual(len(records), 2)
+                self.assertGreaterEqual(len(records), 2)
+                self.assertEqual(sum(pathlib.Path(record['args'][0]).name in ('gpg', 'gpg-agent') for record in records), 2)
                 if mode == 'signal':
                     parent.terminate()
                 parent.wait(timeout=5)

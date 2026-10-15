@@ -178,8 +178,10 @@ Defaults and prerequisites:
   saves. Both export commands always refresh it in memory from native rows,
   including after a failed initialization; they never rely on the cached policy
   to authorize plaintext output.
-* Byte budget 10 GiB, minimum free reserve 1 GiB. Polling plus per-child file-size
-  limits bound output. Reserve and budget include retained failed payloads. A
+* Byte budget 10 GiB, minimum free reserve 1 GiB. Per-child file-size limits
+  bound capture output. Capture and retrieval reserve checks use filesystem
+  free space once per second or per 64 MiB, plus completion. Full history
+  accounting runs at output boundaries. Reserve and budget include retained failed payloads. A
   filesystem's available space does not establish a hosting subscription quota.
   Size these limits against the actual quota and expected app/database size.
 * Capture timeout 300 seconds, drain 30 seconds, lock wait 15 seconds, billing

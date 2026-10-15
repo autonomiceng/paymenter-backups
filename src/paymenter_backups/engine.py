@@ -76,6 +76,53 @@ def output_limit(state, settings, output_root=None):
     return int(available)
 
 
+class DiskReserve:
+    """Cheap reserve checks; full history accounting belongs at boundaries."""
+    def __init__(self, state, settings, directory):
+        self.paths = set((state.root, pathlib.Path(directory)))
+        if settings.get('local_path'):
+            local = pathlib.Path(settings['local_path']).resolve()
+            if local.exists():
+                self.paths.add(local)
+        self.reserve = settings['minimum_free_bytes']
+        self.last_at = None
+        self.last_bytes = 0
+
+    def check(self, total, force=False):
+        now = time.monotonic()
+        if not force and self.last_at is not None and now - self.last_at < 1 and total - self.last_bytes < 64 * 1024**2:
+            return
+        for path in self.paths:
+            if shutil.disk_usage(path).free < self.reserve:
+                raise BackupError('disk-reserve-exceeded')
+        self.last_at, self.last_bytes = now, total
+
+
+def run_output_tool(state, settings, name, command, timeout, target, *, stdout=False, register=None, deadline_check=None, output_root=None):
+    """Bound one child output without scanning private history on every poll."""
+    available = output_limit(state, settings, output_root or target.parent)
+    reserve = DiskReserve(state, settings, target.parent)
+    def check(force=False):
+        if deadline_check:
+            deadline_check()
+        try:
+            total = target.stat().st_size
+        except FileNotFoundError:
+            total = 0
+        if total > available:
+            raise BackupError('child-output-limit', name, {'tool': name})
+        reserve.check(total, force=force)
+    # Resolve the remaining duration after admission accounting, never before it.
+    seconds = timeout() if callable(timeout) else timeout
+    result = run_tool(name, command, seconds, output=target if stdout else None,
+                      register=register, budget_check=check, file_limit=available)
+    check(force=True)
+    space(state, settings)
+    if deadline_check:
+        deadline_check()
+    return result
+
+
 def destination(state, envelope):
     value = envelope["settings"].get("local_path")
     path = pathlib.Path(value).absolute() if value else (state.root / "backups" if envelope["settings"].get("settings_version", 1) == 2 else state.default_destination())
@@ -306,9 +353,13 @@ def cleanup_failed_work(state):
             state.save(item)
 
 
-def capture(state, envelope, scheduled=False, request_id=None):
-    settings = envelope["settings"]
+def capture(state, envelope, scheduled=False, request_id=None, envelope_loader=None):
     with state.lock():
+        if envelope_loader is not None:
+            requested_mode = envelope['settings']['mode']
+            envelope = envelope_loader()
+            envelope['settings']['mode'] = requested_mode
+        settings = envelope["settings"]
         fresh_discovery = None
         if settings.get("settings_version", 1) == 2 and settings["mode"] == "full-quiesced":
             from .discovery import discover
@@ -394,7 +445,8 @@ def capture(state, envelope, scheduled=False, request_id=None):
                 sql = payload / "database.sql"
                 journal["database_snapshot_lower_bound"] = time.time()
                 state.save(journal)
-                run_tool("dump", command, remaining(), output=sql, register=register, budget_check=lambda: space(state, settings), file_limit=output_limit(state, settings, output))
+                run_output_tool(state, settings, "dump", command, remaining, sql,
+                                stdout=True, register=register, deadline_check=remaining if full else None, output_root=output)
                 if not sql.stat().st_size:
                     raise BackupError("dump-empty")
                 sql_hash = digest(sql, remaining)
@@ -404,7 +456,8 @@ def capture(state, envelope, scheduled=False, request_id=None):
                     tar_command = [envelope["tools"]["tar"], "--acls", "--xattrs", "--numeric-owner", "-cf", str(payload / "app.tar")]
                     tar_command += ["--exclude=./" + relative for relative in excludes]
                     tar_command += ["-C", str(state.app), "."]
-                    run_tool("tar", tar_command, remaining(), register=register, budget_check=lambda: space(state, settings), file_limit=output_limit(state, settings, output))
+                    run_output_tool(state, settings, "tar", tar_command, remaining, payload / "app.tar",
+                                    register=register, deadline_check=remaining, output_root=output)
                     try:
                         stability_hash = hash_stream(command, remaining(), register)
                     except BackupError as error:
@@ -429,8 +482,8 @@ def capture(state, envelope, scheduled=False, request_id=None):
             journal["phase"] = "compressing"
             state.save(journal)
             temporary = output / ("." + run_id + ".tar.gz.partial")
-            run_tool("tar", [envelope["tools"]["tar"], "--use-compress-program=" + shlex.quote(envelope["tools"].get("gzip", "/usr/bin/gzip")), "-cf", str(temporary), "-C", str(payload), "."],
-                settings["capture_timeout"] * 2, register=register, budget_check=lambda: space(state, settings), file_limit=output_limit(state, settings, output))
+            run_output_tool(state, settings, "tar", [envelope["tools"]["tar"], "--use-compress-program=" + shlex.quote(envelope["tools"].get("gzip", "/usr/bin/gzip")), "-cf", str(temporary), "-C", str(payload), "."],
+                settings["capture_timeout"] * 2, temporary, register=register)
             with open(temporary, "rb") as stream:
                 os.fsync(stream.fileno())
             check_archive(temporary, manifest)
