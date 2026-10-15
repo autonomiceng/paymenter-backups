@@ -625,7 +625,7 @@ class AdmissionChecks(unittest.TestCase):
         started = time.monotonic()
         with self.fixture.state.lock("tick.lock"), \
                 patch.object(cli, "bridge", side_effect=lambda *_args: copy.deepcopy(self.fixture.envelope)), \
-                patch.object(cli.subprocess, "run") as native_writer:
+                patch.object(cli, "run_native_writer") as native_writer:
             with self.assertRaisesRegex(BackupError, "busy"):
                 cli.set_config(args, self.fixture.state, {"settings": {"enabled": True, "mode": "database-online"}})
             native_writer.assert_not_called()
@@ -633,17 +633,15 @@ class AdmissionChecks(unittest.TestCase):
         self.assertLess(time.monotonic() - started, 12)
 
     def test_credentials_rechecked_against_locked_origin_before_any_save(self):
-        initial = copy.deepcopy(self.fixture.envelope)
         locked = copy.deepcopy(self.fixture.envelope)
-        initial["framework"]["app_url"] = "https://first.invalid"
         locked["framework"]["app_url"] = "https://second.invalid"
         credentials = {"origin": "https://first.invalid", "username": "fake-user", "password": "fake-password"}
         args = types.SimpleNamespace(php=self.fixture.envelope["tools"]["php"])
-        with patch.object(cli, "bridge", side_effect=[initial, locked]) as bridge, \
-                patch.object(cli.subprocess, "run") as native_writer:
+        with patch.object(cli, "bridge", return_value=locked) as bridge, \
+                patch.object(cli, "run_native_writer") as native_writer:
             with self.assertRaisesRegex(BackupError, "maintenance-probe-origin-mismatch"):
                 cli.set_config(args, self.fixture.state, {"maintenance_probe_credentials": credentials})
-            self.assertEqual(bridge.call_count, 2)
+            self.assertEqual(bridge.call_count, 1)
             native_writer.assert_not_called()
 
     def test_failed_packaging_removes_owned_temporary_payload_but_keeps_journal(self):

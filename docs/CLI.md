@@ -48,21 +48,42 @@ field/detail diagnostics to stderr and exit 1.
 | `recover --execute`, `recover --auto` | Guarded offline recovery |
 | `recover acknowledge --run ID` | Record operator resolution, preserve every app file |
 | `export ID --output /private/new-kit` | Copy verified archive and recovery instructions |
+| `encryption-key generate\|import\|acknowledge\|discard-pending\|status` | Prepare, activate or inspect the independent S3 recovery key |
+| `recovery-key export --output /private/new-key.json [--fingerprint FULL]` | Export one recovery secret and its identity to a new private file |
+| `credentials-rewrap` | Re-encrypt every saved credential namespace under the current APP_KEY |
 
 `status`, `list`, `overview --offline`, `verify`, `recover` and requests work without PHP,
 Laravel, database or provider startup. Recovery-kit export and recovery-key
 export require a cold PHP/PDO read of the current native document roots before
-validating the output location. Missing capture tools or invalid unrelated
-capture settings do not prevent that privacy check; unreadable roots refuse
-export. Configuration reads and plans use the
+validating the output location. Missing capture tools, billing settings or invalid
+unrelated capture settings do not prevent that privacy check; unreadable roots
+refuse export. Archive-key operations and APP_KEY rewrapping also work without
+billing settings, while preserving installation and credential checks.
+Configuration reads and plans use the
 cold PHP/PDO bridge. Native config writes require a bootable application.
 Native MySQL/MariaDB host/socket connections and `DB_URL` are honored. Native
 database TLS options currently refuse with `database-tls-unsupported`; matching
 dump/client TLS configuration is required before that connection mode can be
 supported. The engine never silently downgrades a configured TLS connection.
-Read-only commands never create private directories, locks or installation
-identity. Before first capture, `init`, `config set` or `run --execute` provisions
+Ordinary configuration and backup-status reads never create private directories,
+locks or installation identity. Key operations require initialized state and take
+the shared credential lock; reveal/export also write secret-free audit evidence.
+Before first capture, `init`, `config set` or `run --execute` provisions
 state explicitly. Native config saves also perform explicit initialization.
+
+`config set`, native page Save and direct Artisan saves share configuration/tick
+locks with a ten-second acquisition deadline (`busy` refuses before writes).
+Credential-bearing worker reads wait for a complete settings/keys snapshot.
+Definite failures before credential publication restore only unchanged native
+rows; concurrent editor updates survive, and rejected saves preserve schedule
+epochs and waiting requests. A partial response reports confirmed outcomes;
+`outcome_unknown:true` means a child may have committed without returning its
+receipt. The private save intent then blocks credential-bearing backup work with
+`config-save-outcome-unknown`. Check the current settings and repeat `config set`
+with the intended settings and every requested uncertain S3/site credential
+group, or explicit `{ "clear": true }` for that group. A settings-only save or
+`init` cannot resolve an uncertain credential group. Secret material remains on
+stdin and never appears in the intent or public response.
 
 Examples use a private stdin pipe; substitute real paths and use your secret
 manager rather than saving credential JSON in shell history:
@@ -111,11 +132,15 @@ setting rows or public output. Credentials are encrypted through the native
 Encrypter and bound to installation UUID, cipher and APP_KEY fingerprint. Key
 rotation honors native previous keys. An unreadable store refuses changes;
 resolve the APP_KEY or file binding before deliberately re-entering credentials.
-Configuration and credentials are two atomic writes, not a cross-resource
-transaction. A credential failure can leave a valid native settings update;
-inspect redacted config before retrying. The native edit form preserves secrets.
-S3 writes preserve the separate maintenance probe namespace and probe writes
-preserve S3. Both credential paths share an owner-private file lock.
+Configuration and credentials are coordinated across separate atomic writes.
+A definite credential refusal restores unchanged native settings and preserves
+the existing store; concurrent editor updates survive. An ambiguous commit
+keeps the durable save intent and pauses credential-bearing backup work until a
+complete Save resubmits the uncertain groups. Inspect redacted config before
+retrying. The native edit form preserves secrets.
+S3 writes preserve the separate maintenance probe and archive-key namespaces;
+probe and archive-key writes preserve S3. All credential paths share an
+owner-private file lock.
 
 For outer HTTP Basic protection, privately pipe this envelope into `config set`:
 `{"maintenance_probe_credentials":{"origin":"https://billing.example.com",
@@ -235,12 +260,13 @@ exists, or the recorded S3 copy when it does not. Old remote records without
 provider binding require an explicit verified delivery retry before destructive
 operations. Fully deleted historical records remain deleted.
 
-The legacy S3-only credential bridge reads the expanded encrypted file, but
-its credential save replaces the complete payload and erases the probe namespace.
-Before rollback, keep a private copy of the encrypted file and avoid credential
-edits with that bridge. Install a version supporting every saved namespace before
-entering probe credentials again. Without authenticated maintenance probes,
-full mode can refuse with 401.
+The legacy S3-only credential bridge reads the expanded encrypted file. Its S3
+credential save replaces the complete payload and erases the maintenance probe
+and archive-key namespaces.
+If rolling back, preserve the encrypted file privately first and avoid credential
+edits with that bridge. Restore a version supporting every saved namespace before
+editing credentials. Rollback does not provide authenticated maintenance probes
+or encrypted S3 delivery; full mode can refuse with 401.
 
 
 ## Settings v2 and independent schedules
@@ -272,8 +298,11 @@ other edits affect only their kind. Catch-up is one latest slot within eight
 days per kind, with expiry measured from queue creation. DST gaps skip and
 repeated v2 wall times run once. Both due obligations are queued with explicit
 modes; eligible full wins an initial tie, deferred work is retried fairly.
-A verified/service-recovered full snapshot at or after a waiting scheduled
-database slot durably satisfies that slot before delivery; manual tasks remain.
+A service-recovered full snapshot whose recorded database snapshot lower bound
+is at or after a waiting scheduled database slot can satisfy that slot only while
+an available generation passes current verification. Satisfaction is durable
+before delivery; an existing coverage receipt survives later retention or
+provider loss. Manual tasks remain.
 
 V2 retention uses retention_keep_full=7 / retention_keep_database=24 and
 s3_retention_policy_{full,database}=local-count, inactive counts 30/168 and
@@ -293,8 +322,48 @@ Binary paths may be blank to detect via fixed trusted directories; explicit pins
 remain authoritative. PHP follows the hosting version. Overview names the tool,
 store and job behind a refusal and returns clock-time billing-window boundaries.
 
-V2 encryption defaults on. Check encryption settings and remote formats.
-Encrypted delivery must refuse when encryption support is unavailable. Plaintext upload requires acknowledgement, including a fresh
-explicit acknowledgement when turning encryption off. Existing acknowledged v1
-S3 uploads remain plaintext until adoption. See ARCHITECTURE.md for the exact
-overview fields and encryption requirements.
+V2 encryption defaults on. New S3 delivery requires usable GnuPG and an active
+acknowledged recovery key. Missing key setup or an unusable encryption tool
+blocks delivery rather than local capture; failed uploads retain their local
+source. Encrypted delivery publishes the archive ciphertext and encrypted
+recovery document before its public descriptor. Retrieval and remote survivor
+checks decrypt and fully verify the recorded generation. Existing acknowledged
+v1 S3 uploads remain plaintext until adoption; older copies keep their recorded
+format after adoption. Encryption never falls back to plaintext. Plaintext
+upload requires acknowledgement, including a fresh explicit acknowledgement
+when turning encryption off.
+
+## Recovery-key setup and rotation
+
+After `init`, use `encryption-key generate` to create a pending random key, or
+pipe `{"passphrase":"…"}` from your secret manager into `encryption-key import`.
+Passphrases preserve exact UTF-8, require at least 20 characters, forbid control
+characters and allow at most 1024 bytes. Generated keys are 64 lowercase hex
+characters. Ordinary command output contains only the fingerprint and state.
+
+Export the pending key to a new file in an owner-private directory outside the
+application and every document root, then save it outside this server:
+
+```sh
+bin/paymenter-backups --app /srv/paymenter encryption-key generate
+bin/paymenter-backups --app /srv/paymenter recovery-key export --output /srv/private-export/recovery-key.json
+printf '%s\n' '{"fingerprint":"FULL-FINGERPRINT-FROM-GENERATE"}' |
+  bin/paymenter-backups --app /srv/paymenter encryption-key acknowledge
+bin/paymenter-backups --app /srv/paymenter destination-test
+```
+
+Acknowledgement must name the exact full pending fingerprint and activates it
+under the run lock. A pending first key cannot authorize uploads; during rotation,
+the acknowledged active key stays in use until the replacement is activated.
+Prepared deliveries keep their original fingerprint. Retired keys remain saved
+for earlier copies; keep every exported key. `--fingerprint` selects an older key
+for export. Import accepts an exported JSON record and preserves its fingerprint
+parameters. `discard-pending` removes only the unactivated replacement.
+
+Destination tests use the current remote format and, for encryption, the active
+acknowledged key in an upload/readback/decrypt/compare/cleanup round trip. Repeat
+the test after changing the destination, enabling encryption or activating a new
+key. `credentials-rewrap` preserves all keys and S3/site credentials while
+rewrapping under the current APP_KEY; do it before removing a previous APP_KEY.
+See [RECOVERY.md](RECOVERY.md) for the separately saved key and fresh-machine
+restore procedure.

@@ -20,10 +20,15 @@ can replace a lost recovery secret.
 Generate a recovery key (32 random bytes encoded as 64 lowercase hexadecimal
 characters) or import an exact passphrase of at least 20 characters and at most
 1024 UTF-8 bytes, without control characters. No trimming or normalization is
-performed. Save the recovery-key attachment outside this server before
-acknowledging its fingerprint. A pending key cannot authorize uploads. Rotation
-prepares a new pending key; acknowledgement activates it under the short run
-lock and retains the old key as retired. Keep every exported recovery key:
+performed. On the Backups page, Save creates the first pending key when encrypted
+S3 uploads are enabled. Use **Show recovery key** or **Download recovery key**,
+save it outside this server, then confirm **I saved this recovery key outside
+this server**. Acknowledgement binds the exact fingerprint shown; a changed key
+refuses confirmation. A pending first key cannot authorize uploads. Rotation
+prepares a new pending key while the acknowledged active key remains in use;
+acknowledgement activates the replacement under the short run lock and retains
+the old key as retired. Prepared deliveries keep their original key. Keep every
+exported recovery key:
 older copies, bucket versions and offline exports still need their original
 keys. APP_KEY rewrapping preserves all archive keys and other credential
 namespaces; complete it before removing a previous APP_KEY.
@@ -31,11 +36,18 @@ namespaces; complete it before removing a previous APP_KEY.
 The standalone CLI provides `encryption-key generate|import|acknowledge|
 discard-pending|status`, `recovery-key export --output /absolute/private/file`
 with optional `--fingerprint FULL-FINGERPRINT`, and `credentials-rewrap`.
+Passphrases retain their exact UTF-8 bytes, including leading and trailing
+spaces. The administrator dialog shows and copies those same bytes; preserve
+all whitespace when saving or entering a recovery secret.
 Import reads JSON stdin containing `passphrase` and optional exported
 `fingerprint` parameters; acknowledgement reads JSON stdin containing the full
 `fingerprint`. Importing an exported identity preserves its scheme, salt,
 iteration count and value. These operations require an initialized private
-root. Recovery-key export writes a new owner-private file and refuses overwrite.
+root and preserve the installation, privacy and credential-store checks without
+requiring billing settings. Recovery-key export writes a new owner-private file
+and refuses overwrite. The admin download uses a five-minute signed link, checks
+extension-edit permission and records secret-free audit evidence before release;
+the attachment uses no-store and no-referrer headers.
 Both key export and ordinary recovery-kit export check current native document
 roots through the cold PHP/PDO bridge and refuse if those boundaries cannot be
 read or validated, even when a cached private policy exists. They need no dump
@@ -140,7 +152,7 @@ terminate only the scratch home's agent if cleanup is needed:
 `gpgconf --homedir "$PWD/gpg-home" --kill gpg-agent`.
 
 Each backup tracks its local and S3 copies independently. Expiring a local copy
-does not expire its S3 copy. Use Retrieve from S3 on the page, or `retrieve ID
+does not expire its S3 copy. Use **Download from S3** on the page, or `retrieve ID
 --execute` from the CLI, to verify and restore a local copy before downloading.
 Retrieval respects disk limits and protects the resulting local copy from
 automatic retention for 24 hours. It never overwrites an existing archive or

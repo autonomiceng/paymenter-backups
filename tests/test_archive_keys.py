@@ -145,6 +145,29 @@ class ArchiveKeyTests(unittest.TestCase):
         self.assertEqual(result.stdout, b'')
         self.assertEqual(json.loads(result.stderr), {'error': code})
 
+    def test_reveal_refuses_replacement_retired_and_disappeared_selected_keys(self):
+        first = self.call('archive-key-import', {'passphrase': SECRET, 'fingerprint': PARAMETERS})
+        self.call('archive-key-discard-pending')
+        second = self.call('archive-key-generate')
+        before = (self.private / 'audit.jsonl').read_bytes()
+        self.assert_error('archive-key-reveal', {'fingerprint': first['fingerprint']}, 'archive-key-mismatch')
+        self.assertEqual((self.private / 'audit.jsonl').read_bytes(), before)
+        self.call('archive-key-acknowledge', {'fingerprint': second['fingerprint']})
+        third = self.call('archive-key-generate')
+        self.assert_error('archive-key-reveal', {'fingerprint': second['fingerprint']}, 'archive-key-mismatch')
+        self.assertEqual(self.call('archive-key-reveal', {'fingerprint': third['fingerprint']})['fingerprint'], third['fingerprint'])
+        self.call('archive-key-discard-pending')
+        self.assertEqual(self.call('archive-key-reveal', {'fingerprint': second['fingerprint']})['fingerprint'], second['fingerprint'])
+        fourth = self.call('archive-key-generate')
+        self.call('archive-key-acknowledge', {'fingerprint': fourth['fingerprint']})
+        self.assert_error('archive-key-reveal', {'fingerprint': second['fingerprint']}, 'archive-key-mismatch')
+        self.assert_error('archive-key-reveal', {}, 'archive-key-mismatch')
+
+    def test_reveal_refuses_disappearance_without_falling_back(self):
+        first = self.call('archive-key-generate')
+        self.call('archive-key-discard-pending')
+        self.assert_error('archive-key-reveal', {'fingerprint': first['fingerprint']}, 'archive-key-required')
+
     def test_php_fingerprint_matches_independent_python_canary(self):
         result = self.call('fixture-fingerprint', {'secret': SECRET, 'parameters': PARAMETERS})
         self.assertEqual(result, PARAMETERS)
@@ -196,7 +219,8 @@ class ArchiveKeyTests(unittest.TestCase):
         self.assertEqual(final['keys'][first['fingerprint']]['state'], 'retired')
         self.assertEqual(final['keys'][first['fingerprint']]['secret'], record['secret'])
         self.assertEqual(final['keys'][second['fingerprint']]['acknowledgement']['actor'], 8)
-        self.assertEqual(self.call('archive-key-reveal', {'fingerprint': first['fingerprint']})['secret'], record['secret'])
+        self.assert_error('archive-key-reveal', {'fingerprint': first['fingerprint']}, 'archive-key-mismatch')
+        self.assertEqual(self.call('archive-key-export', {'fingerprint': first['fingerprint']})['secret'], record['secret'])
 
     def test_import_export_preserves_exact_secret_and_fingerprint_identity(self):
         self.assert_error('archive-key-import', {'passphrase': SECRET, 'fingerprint': None}, 'archive-key-invalid')
@@ -256,7 +280,7 @@ class ArchiveKeyTests(unittest.TestCase):
         audit = self.private / 'audit.jsonl'
         audit.unlink()
         audit.symlink_to(self.base / 'unrelated')
-        self.assert_error('archive-key-reveal', {}, 'archive-key-audit-failed')
+        self.assert_error('archive-key-reveal', {'fingerprint': PARAMETERS['value']}, 'archive-key-audit-failed')
         self.assert_error('archive-key-export', {}, 'archive-key-audit-failed')
         self.assert_error('archive-key-acknowledge', {'fingerprint': PARAMETERS['value']}, 'archive-key-audit-failed')
         self.assertEqual((self.private / 'credentials.json').read_bytes(), before)
@@ -279,7 +303,7 @@ class ArchiveKeyTests(unittest.TestCase):
 
     def test_audit_contains_public_authorization_receipts_and_no_secrets(self):
         pending = self.call('archive-key-import', {'passphrase': SECRET, 'fingerprint': PARAMETERS, 'actor': 19})
-        self.call('archive-key-reveal', {'actor': 19})
+        self.call('archive-key-reveal', {'actor': 19, 'fingerprint': pending['fingerprint']})
         self.call('archive-key-export', {'actor': 19})
         lines = (self.private / 'audit.jsonl').read_text()
         self.assertNotIn(SECRET, lines)
@@ -514,9 +538,16 @@ namespace {
     }
     try { \Paymenter\Extensions\Others\Backups\Runtime::command(['recovery-key','export']); }
     catch (\RuntimeException $e) { $result['generic-command'] = $e->getMessage(); }
+    $result['selected'] = \Paymenter\Extensions\Others\Backups\Runtime::recoveryKeyFingerprint();
+    \Symfony\Component\Process\Process::$response = ['secret'=>'synthetic-confirmed-secret','fingerprint'=>$fp];
+    $result['revealed'] = \Paymenter\Extensions\Others\Backups\Runtime::revealRecoveryKey($fp)['fingerprint'];
+    $result['reveal-input'] = json_decode(end(\Symfony\Component\Process\Process::$calls)[1],true);
+    \Symfony\Component\Process\Process::$response = ['secret'=>'synthetic-replacement-secret','fingerprint'=>str_repeat('b',64)];
+    try { \Paymenter\Extensions\Others\Backups\Runtime::revealRecoveryKey($fp); }
+    catch (\RuntimeException $e) { $result['replacement'] = $e->getMessage(); }
     \Illuminate\Support\Facades\Auth::$allowed = false;
     $before = count(\Symfony\Component\Process\Process::$calls);
-    try { \Paymenter\Extensions\Others\Backups\Runtime::revealRecoveryKey(); }
+    try { \Paymenter\Extensions\Others\Backups\Runtime::revealRecoveryKey($fp); }
     catch (\RuntimeException $e) { $result['denied'] = $e->getMessage(); }
     $result['denied-before-child'] = count(\Symfony\Component\Process\Process::$calls) === $before;
     \Illuminate\Support\Facades\Auth::$allowed = true;
@@ -561,6 +592,10 @@ class RecoveryKeyHttpTests(unittest.TestCase):
         self.assertEqual(result['generic-reveal'], 'bridge-command-invalid')
         self.assertEqual(result['generic-export'], 'bridge-command-invalid')
         self.assertEqual(result['generic-command'], 'sensitive-command-refused')
+        self.assertEqual(result['selected'], 'a' * 64)
+        self.assertEqual(result['revealed'], 'a' * 64)
+        self.assertEqual(result['reveal-input'], {'fingerprint': 'a' * 64, 'actor': 42})
+        self.assertEqual(result['replacement'], 'archive-key-mismatch')
         self.assertEqual(result['denied'], 'denied-403')
         self.assertTrue(result['denied-before-child'])
         self.assertEqual(result['unsigned'], 'denied-403')

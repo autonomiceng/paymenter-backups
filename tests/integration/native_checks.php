@@ -14,6 +14,16 @@ if ($mode === 'upload') {
     (new Paymenter\Extensions\Others\Backups\Backups)->installed();
     $record->update(['enabled' => true]);
     echo json_encode(['uploaded' => true]) . "\n";
+} elseif ($mode === 'legacy-install') {
+    // Only the disposable legacy fixture uses this pre-initialization seed.
+    check(!App\Models\Extension::where('extension', 'Backups')->where('type', 'other')->exists(), 'legacy identity already installed');
+    check(str_starts_with($argv[3], '/') && !file_exists($argv[3]) && basename($base) === 'legacy-app', 'legacy fixture boundary invalid');
+    $record = App\Models\Extension::create(['extension' => 'Backups', 'type' => 'other', 'name' => 'Backups legacy fixture', 'enabled' => true]);
+    foreach (['settings_version' => '1', 'private_root' => $argv[3], 'python' => $argv[4], 'enabled' => '0'] as $key => $value) {
+        $record->settings()->create(['key' => $key, 'value' => $value, 'type' => 'string', 'encrypted' => false]);
+    }
+    (new Paymenter\Extensions\Others\Backups\Backups)->installed();
+    echo json_encode(['legacy_installed' => true]) . "\n";
 } elseif ($mode === 'seed') {
     foreach (['cronjob_time' => '23:59', 'timezone' => 'UTC', 'app_url' => $argv[3]] as $key => $value) {
         App\Models\Setting::whereNull('settingable_type')->updateOrCreate(['key' => $key], ['value' => $value, 'type' => 'string', 'encrypted' => false]);
@@ -201,10 +211,21 @@ if ($mode === 'upload') {
         $encryptedBackup = json_decode(file_get_contents($root . '/credentials.json'), true);
         Paymenter\Extensions\Others\Backups\PrivateStore::atomic($root . '/credentials.json', array_replace($encryptedBackup, ['payload' => 'unreadable-fixture-ciphertext']));
         $unreadable = $digest();
-        $refused = $save([...$probeSecrets, ...$secrets]);
+        $beforeRefusal = $nativeRows();
+        check(!is_file($root . '/config-save.json'), 'unreadable-store scenario started with an earlier save guard');
+        $notices();
+        // S3 replacements remain valid when the unreadable overview cannot
+        // supply the site form's HTTPS origin. Reach the real Save coordinator,
+        // rather than stopping at unrelated site-field validation.
+        $refused = $save([...$secrets, 'settings.retention_keep_full' => ((int) $beforeRefusal['retention_keep_full']) + 1]);
         check($digest() === $unreadable && $secretFields($refused) === [], 'unreadable store overwritten or input kept');
-        // Either the whole save is refused, or settings are saved and the notice says the keys weren't.
-        check(!$refused->instance()->getErrorBag()->isEmpty() || array_filter($notices(), static fn ($n) => $n['status'] === 'warning' && str_contains($n['body'], 'saved:')) !== [], 'partial credential failure not reported honestly');
+        check($refused->instance()->getErrorBag()->isEmpty(), 'unreadable-store scenario stopped at form validation');
+        $refusalNotices = $notices();
+        check(array_filter($refusalNotices, static fn ($n) => $n['status'] === 'danger' && $n['title'] === 'Settings not saved'
+            && $n['body'] === Paymenter\Extensions\Others\Backups\Messages::error('credentials-unreadable')) !== [], 'unreadable store did not report complete Save refusal');
+        check(array_filter($refusalNotices, static fn ($n) => $n['status'] === 'success') === [], 'unreadable-store refusal reported success');
+        check($nativeRows() === $beforeRefusal, 'unreadable-store refusal changed native settings');
+        check(!is_file($root . '/config-save.json'), 'definite unreadable-store refusal left its new save guard');
         Paymenter\Extensions\Others\Backups\PrivateStore::atomic($root . '/credentials.json', $encryptedBackup);
         $removal = Livewire\Livewire::test($page);
         $removal->call('mountAction', 'removeSitePassword', [], $schemaAction($removal, 'removeSitePassword'))->call('callMountedAction');
@@ -223,8 +244,14 @@ if ($mode === 'upload') {
     // Encrypted uploads: Save creates a recovery key, shows it only inside its dialog, and confirmation activates it.
     $encrypted = $save([...$s3Settings, 'settings.s3_encryption' => true, 'settings.plaintext_offsite_acknowledged' => false, ...$secrets]);
     check($encrypted->instance()->getErrorBag()->isEmpty() && $nativeRows()['s3_encryption'] === '1' && $nativeRows()['plaintext_offsite_acknowledged'] === '0', 'encrypted S3 settings not saved');
-    check(($encrypted->get('mountedActions')[0]['name'] ?? null) === 'showRecoveryKey', 'new recovery key was not offered right after saving');
-    $encrypted->call('callMountedAction');
+    // The key renders only after the confirmed Show step: a direct mount or ?action= link reveals nothing.
+    $direct = Livewire\Livewire::test($page);
+    $direct->call('mountAction', 'recoveryKey');
+    check(!preg_match('/\b[0-9a-f]{64}\b/', $partials($direct)) && ($direct->get('mountedActions') ?? []) === [], 'recovery key revealed without the Show confirmation');
+    $notices();
+    // The dialog opens from the browser after the saved page renders.
+    check(str_contains(json_encode($encrypted->effects['xjs'] ?? []), 'showRecoveryKey'), 'new recovery key was not offered right after saving');
+    $encrypted->call('mountAction', 'showRecoveryKey')->call('callMountedAction');
     $shown = $partials($encrypted);
     check((bool) preg_match('/\b[0-9a-f]{64}\b/', $shown), 'recovery key dialog did not show the key');
     preg_match('/\b[0-9a-f]{64}\b/', $shown, $match);

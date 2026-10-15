@@ -7,8 +7,8 @@ for this extension. Keep Paymenter core and native database definitions stock.
 Build on a separate development machine:
 
 ```sh
-python3 tools/build_release.py --output dist/Backups-0.3.0.zip
-(cd dist && sha256sum -c Backups-0.3.0.zip.sha256)
+python3 tools/build_release.py --output dist/Backups-0.4.0.zip
+(cd dist && sha256sum -c Backups-0.4.0.zip.sha256)
 ```
 
 The deterministic archive has one top-level `Backups/` directory, compatible
@@ -58,8 +58,11 @@ local storage on, full local count 7 and database local count 24, with a 10 GiB
 budget and 1 GiB reserve. Suggested operating cadence is database hourly/full
 weekly after readiness passes; enabling the extension alone starts neither.
 Settings-only validation/init never access the encrypted credential file. Secret
-submissions follow initialization, using one combined merge; failures after
-settings save are partial outcomes requiring secret re-entry.
+submissions follow initialization under shared configuration/tick coordination,
+using one combined merge while native settings rows are locked. Definite
+pre-credential failures restore unchanged setting rows. An uncertain commit
+pauses backup work until a complete Save resubmits the intended settings and
+uncertain credential groups; partial successes are reported explicitly.
 
 Empty v2 binary paths mean trusted detection (Python, matching hosting PHP,
 MariaDB/MySQL dump/client alternatives, GNU tar, gzip; GPG belongs to encryption
@@ -99,6 +102,12 @@ elsewhere must already exist safely. The tick uses no Laravel cache mutex and ru
 in maintenance for recovery. It is the sole detached launcher; terminal capture
 is foreground. Administrator heavy actions only write durable requests.
 
+Copy the suggested cron lines exactly: cron requires `\%` for literal `%` in
+application, PHP and lock paths even inside shell quotes. Suggestions preserve
+literal backslashes too. Discovery rejects unescaped `%` because cron splits
+the command there and sends the rest as standard input. Terminal commands and
+systemd arguments use their ordinary quoting instead of cron escapes.
+
 Credentials are write-only on the Backups page or supplied by private JSON stdin
 through CLI `config set`. They never enter native setting rows. The encrypted
 private file binds the immutable installation UUID, cipher and APP_KEY HMAC
@@ -114,17 +123,33 @@ maintenance probe credentials on the Backups page or through the private JSON
 stdin contract in [CLI.md](CLI.md). Enter the exact configured HTTPS origin.
 Saving or clearing preserves S3 credentials. Full capture continues to require
 an exact native maintenance 503 response without cookies or redirects. An
-unauthenticated401, a normal page or an origin mismatch refuses full capture.
+unauthenticated 401, a normal page or an origin mismatch refuses full capture.
 
-S3 requires TLS. V2 encryption defaults on; plaintext uploads require an
-explicit acknowledgement, freshly submitted when turning encryption off. The
-engine refuses encrypted delivery when encryption support is unavailable;
-legacy acknowledged plaintext uploads retain their format until v2 adoption. Archives
+S3 requires TLS. V2 encryption defaults on. When **Upload to S3** and **Encrypt
+backups in S3** are on with no recovery key, Save generates a pending random key
+or imports the exact passphrase entered in the form. Use **Show recovery key**
+or **Download recovery key**, save it outside this server, then confirm **I saved
+this recovery key outside this server**. The confirmation activates that exact
+fingerprint; usable GnuPG and an acknowledged active key are required for new
+encrypted delivery. Missing encryption setup blocks uploads while local capture
+remains available and failed delivery keeps its local source. A replacement key
+stays pending while uploads continue with the active key; activation retains the
+old key for older copies. Keep every exported recovery key.
+
+Encrypted S3 copies contain the archive ciphertext, encrypted recovery document
+and public descriptor. Retrieval and remote cleanup proofs decrypt and fully
+verify them. Local archives, ordinary recovery kits and admin downloads remain
+plaintext. Plaintext uploads require an explicit acknowledgement, freshly
+submitted when turning encryption off; encryption never falls back to plaintext.
+Legacy acknowledged plaintext uploads continue until v2 adoption, and old
+copies always retain their recorded format. Archives
 contain `.env`, APP_KEY, database data and Passport keys, but never S3 credentials.
 Give dedicated credentials only the bucket/prefix list, get, put, delete and
 multipart permissions needed for this installation. The installation UUID scopes
 all objects. Optional versioning/Object Lock are operator-managed; the extension
-never changes bucket policy. Run destination-test explicitly before scheduling.
+never changes bucket policy. Run destination-test explicitly before scheduling;
+encrypted tests use the active key for a full round trip. Repeat the test after
+changing the destination, enabling encryption or activating a replacement key.
 A restored/new host gets a new installation UUID. Adopt an old UUID only after
 decommissioning its old host to avoid competing retention against one prefix.
 
@@ -140,12 +165,13 @@ Configured native PDO database TLS options currently refuse with
 Unix-socket and ordinary native MySQL/MariaDB connections are supported; do not
 remove an existing database TLS requirement to bypass this refusal.
 
-The legacy S3-only credential bridge reads the expanded encrypted file, but
-its credential save replaces the complete payload and erases the probe namespace.
-Before rollback, keep a private copy of the encrypted file and avoid credential
-edits with that bridge. Install a version supporting every saved namespace before
-entering probe credentials again. Without authenticated maintenance probes,
-full mode can refuse with 401.
+The legacy S3-only credential bridge reads the expanded encrypted file. Its S3
+credential save replaces the complete payload and erases the maintenance probe
+and archive-key namespaces.
+If rolling back, preserve the encrypted file privately first and avoid credential
+edits with that bridge. Restore a version supporting every saved namespace before
+editing credentials. Rollback does not provide authenticated maintenance probes
+or encrypted S3 delivery; full mode can refuse with 401.
 
 
 Use exactly the scheduler/queue replacement lines in overview's

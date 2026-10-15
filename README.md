@@ -27,7 +27,7 @@ the native10 MiB upload limit.
 python3 -m pip install --require-hashes -r requirements-s3.lock
 PYTHONPATH=src python3 -m unittest discover -s tests -v
 python3 tools/build_release.py
-python3 tools/native_integration.py --release dist/Backups-0.3.0.zip
+python3 tools/native_integration.py --release dist/Backups-0.4.0.zip
 ```
 
 The drill uses a fresh verified stock release and its own disposable MariaDB

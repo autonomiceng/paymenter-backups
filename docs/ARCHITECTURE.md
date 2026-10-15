@@ -138,27 +138,79 @@ Settings saved on the page pass plain Laravel field rules that match the engine
 enabled weekly schedule, path lists are absolute, the S3 prefix has no empty,
 `.` or `..` parts or backslashes), then `config check`, which
 runs engine normalization, validation, schedule/billing admission and the
-backup-directory location rule without writing. Only keys that differ from the
-stored rows, read on the server at save time, are then written through native
-Eloquent, so native auditing records them. The browser cannot supply that
-baseline. The page then runs `init`; if it fails, the written rows are put
-back and the page reports the refusal, never "saved". The first save runs
-`config check` and `init` even when every default is kept, so first-time setup
-needs no edited field. `init` validates before it creates an identity.
+backup-directory location rule without writing. The page passes changes and entered credential groups to
+`Runtime::saveConfiguration`, backed by CLI `config set`. The engine acquires
+`config.lock` then `tick.lock` with one ten-second acquisition deadline, or
+refuses `busy` before publication. It rereads and validates the authoritative
+native baseline under those locks. Only changed native rows are written through
+Eloquent; the internal Artisan writer inherits the owning lock descriptors and
+restores the authenticated page actor, with console auditing explicitly enabled.
+The browser cannot supply the baseline or actor. The writer returns persisted
+row receipts and a full native snapshot. Initialization and privacy-policy
+publication remain beneath the same locks, including a first save with no edits.
+
+Before publishing entered secrets, a second native transaction locks every
+extension settings row, verifies the full snapshot, then invokes the cold
+`credentials-merge` bridge while the row locks remain held. A concurrent native
+editor therefore either precedes the snapshot comparison (`config-changed`) or
+waits until credential publication has finished. Schedule synchronization follows
+successful credential publication; rejected initialization/credential saves do
+not reset an unchanged schedule epoch or supersede its waiting requests.
+Worker, direct-command and storage reloads acquire `config.lock` around the whole
+native-settings/credential snapshot. Tick uses config-before-tick lock order.
+Standalone initialization also rereads settings and writes policy/schedule under
+these locks; direct Artisan saves use the same coordinator.
+
+A definite failure before credential commit compares and restores each unchanged
+published row under a database row lock. Concurrent updates remain, and formerly
+absent rows are deleted through audited Eloquent. Rollback failure or concurrent
+changes are explicit partial outcomes. Before publication, the coordinator
+snapshots the bytes and existence of `schedule.json`, `policy.json` and
+`configuration-advisory.json`. A definite rollback restores these exact snapshots
+and fsyncs their publication while both coordination locks remain held, including
+failures after schedule synchronization or intent removal. If concurrent native
+rows survive rollback, synchronization starts from the restored schedule snapshot
+and changes only affected epochs; privacy policy reflects the surviving rows.
+Waiting obligations from unchanged schedules retain their original epochs.
+A private, secret-free `config-save.json`
+intent exists before publication. If a child loses its receipt or times out
+across a possible commit, the engine keeps this intent and returns
+`outcome_unknown`; it never restores destination rows across an ambiguous
+credential commit. Credential-bearing loads refuse
+`config-save-outcome-unknown`, including already-locked tick reloads, and overview
+shows setup required. A subsequent complete Save must resubmit each credential
+group requested by that intent (or explicitly clear it), then removes/fsyncs the
+intent. Settings-only Save and `init` cannot clear an uncertain secret outcome.
+A rejected retry preserves the earlier intent even when the retry's own native
+rows roll back successfully. Only confirmed publication of every requested
+credential group, including explicit clearing, resolves that earlier uncertainty.
+Intent-removal fsync failure republishes the guard before reporting uncertainty;
+workers remain paused if rollback or repeated cleanup also fails.
+A successful credential commit followed by a setup/advisory failure keeps the
+coherent settings/keys and reports an explicit partial success.
+
+The short native writer/finalizer runs beneath an owned Linux supervisor group.
+The supervisor retains the inherited coordination descriptors, kills the PHP
+writer and its credential bridge descendants on timeout, and uses a
+parent-death signal to kill the whole group if the engine disappears. A retry
+cannot acquire released coordinator locks while an orphan credential child can
+still commit. Public output remains fixed codes and confirmed outcome flags.
+
 Settings-only `config check`, `init`, CLI settings updates and schedule updates
 use bridge `read-settings`, which never opens credentials.json or constructs an
-encrypter. Explicit secret submissions occur after initialization. The combined
-`credentials-merge` / `Runtime::saveCredentials` API accepts `{s3: object|null,
-site: object|null}`; null/omitted groups preserve saved values, both groups are
-validated before merging, and missing session_token clears the previous token
-when replacing S3 keys. One credential flock covers decrypt/merge/encrypt/fsynced
-publication and preserves other namespaces. Credentials never create private
-storage. Settings and secrets remain separate writes: a later credential failure
-keeps successfully saved settings and the prior credential file. The page refuses
-to change an initialized private root (the field is disabled, and the server rechecks the
-installation file), because a new root would start a new identity without the
-saved keys and history. When the engine itself cannot start, the page saves
-only the private root, document roots and program paths needed to repair it.
+encrypter. The pure `credentials-check` validates submitted groups before any
+native publication. `credentials-merge` accepts `{s3: object|null, site: object|null}`;
+null/omitted groups preserve saved values, `{clear:true}` removes only that
+namespace, and missing session_token clears the previous token when replacing
+S3 keys. One credential flock covers decrypt/merge/encrypt/fsynced publication
+and preserves archive keys and other namespaces. Recovery-key creation remains
+a separately reported operation after the coordinated configuration save.
+The page refuses to change an initialized private root, because a new root
+would start a new identity without the saved keys and history. When the engine
+cannot start, only private root, document roots and Python/PHP pins can be
+repaired, without secret publication; an initialized root still uses the bounded
+configuration/tick locks. Native editor writes are upstream-owned nonsecret
+writes; they preserve the external store and run the extension's advisory hook.
 The native extension editor applies the same rules to stored strings,
 including `boolean` for checkboxes and the S3 prefix pattern.
 
@@ -204,7 +256,7 @@ between body reads; total transfer time is unbounded so slow clients still
 finish. On refusal, idle timeout, client disconnect or early request end it
 closes the pipes, gives the engine two seconds to record the interruption,
 then sends SIGTERM and, after two more seconds, SIGKILL before reaping it.
-S3-only backups offer a queued Retrieve from S3 action. The worker verifies the
+S3-only backups offer a queued Download from S3 action. The worker verifies the
 remote archive and manifest, then publishes a local copy through a held,
 no-follow directory descriptor without overwriting existing names. Retrieval
 uses the local byte budget and disk reserve. A successful retrieval protects
@@ -260,9 +312,18 @@ are frozen before terminal default edits.
 Immediately before the SQL dump, capture persists database_snapshot_lower_bound.
 After archive verification and service recovery it persists database_coverage
 before delivery. Reconciliation marks only waiting scheduled database requests
-with an earlier/equal slot `satisfied`, naming covered_by. Failed/unrecovered or
-pre-slot full captures never cover; manual requests never cover. Coverage proof
-survives upload failure, staging removal and restart.
+with an earlier/equal slot `satisfied`, naming covered_by. Before creating a new
+satisfaction receipt, it holds the run lock through current local archive
+verification or full remote decrypt-and-verify proof and the locked request
+write. The short tick accepts only an owned local descriptor whose identity and
+manifest match its recorded verification; it never hashes an archive or contacts
+S3 for coverage. If that proof is unavailable, the database request stays
+eligible to launch. Capture and worker reconciliation can perform complete local
+or remote verification. Deleted generations and unfinished manual deletions
+cannot cover new requests. Failed/unrecovered or pre-slot full captures never
+cover. Manual requests are never absorbed. Existing satisfaction receipts survive later deletion,
+upload failure, staging removal and restart. A remote-only generation can cover
+a new request only when its surviving copy passes current verification.
 Scheduled metadata is part of the first locked request write, so cancellation
 cannot be overwritten by a later metadata update. CLI configuration writes
 hold the scheduler lock through schedule synchronization and refuse before
@@ -299,12 +360,21 @@ minutes; overview only reads it and labels data older than 15 minutes stale.
 Capture always rediscovers and validates; cached diagnostics never authorize it.
 Inventory covers the account crontab and system/user systemd timer targets and
 active/enabled standalone services, with bounded reads and plain-table fallback.
+Cron suggestions escape every `%` as `\%`. Discovery decodes that cron escape
+before shell parsing, preserves literal backslashes and refuses an unescaped
+`%` because cron would turn the remainder into stdin. Shell and systemd parsing
+remain separate from this cron preprocessing. Discovery parser version 2
+invalidates older cached interpretations and requires rediscovery.
 No scheduler, failed/incomplete discovery, unsupported/uncoordinated jobs,
 continuous workers, unsafe/missing locks and explicit-list mismatch refuse.
 Empty v2 job_lock_paths derives the verified union; nonempty lists must match.
 Locks open without creation, in stable order, and identity/remaining workers
 are rechecked after acquisition. init creates only the suggested scheduler.lock
-and queue.lock as private regular files. Backups never edits host launchers.
+and queue.lock as 0600 owner-private regular files and validates existing
+descriptors without acquiring these launcher locks. Only full-mode admission
+and capture coordination acquire launcher locks; held launchers do not block
+database-only capture, settings saves, schedule changes or initialization.
+Backups never edits host launchers.
 The parser accepts documented /dev/null redirection tails, common PHP/Artisan
 flags and hosting PHP basenames, with shell expansion/wrappers refused.
 Commands are reconstructed from recognized nonsecret tokens; ini values, raw
@@ -465,8 +535,9 @@ For each kind, independent S3 policies are
 `local-count` preserves the previous configured count. `s3_retention_keep=30`
 and `s3_retention_days=90` are inactive until their policy is selected. Age is
 measured from backup creation in UTC seconds. Cleanup runs after successful
-capture/delivery or an explicit Apply retention request; it does not configure
-bucket lifecycle rules or promise deletion at an exact expiration instant.
+capture/delivery or an explicit Delete old backups now request on the page; it
+does not configure bucket lifecycle rules or promise deletion at an exact
+expiration instant.
 
 Retention deletes only verified owned copies and protects a fully verified
 survivor independently at each location. Failed uploads preserve their local
@@ -600,8 +671,14 @@ The page consumes these static Runtime methods:
 - `encryptionKey('acknowledge', ['fingerprint' => $fingerprint]): array`
   includes activation; `encryptionKey('discard-pending'): array` discards only
   the pending key.
-- `revealRecoveryKey(): array` returns `{secret, fingerprint}` solely for a
-  confirmation-bound sensitive response; never persist it in Livewire state.
+- `recoveryKeyFingerprint(): ?string` reads the currently selected full
+  fingerprint through the credential-locked status bridge, without key material.
+- `revealRecoveryKey(string $fingerprint): array` returns `{secret, fingerprint}`
+  solely for a confirmation-bound sensitive response; never persist it in
+  Livewire state. The grant stores the full fingerprint, and the credential-locked
+  bridge refuses replacement, disappearance or changed selection before audit
+  and disclosure. Runtime and the page also require the returned identity to
+  match the grant.
 - `recoveryKeyUrl(): string` supplies a five-minute signed admin attachment
   URL. The response checks `admin.extensions.update`, records secret-free audit
   evidence before releasing material, and uses no-store/no-referrer headers.
@@ -611,7 +688,10 @@ call `RecoveryKeyController::register(Panel $panel, string $path, string $name,
 array $middleware, array $without)` from that authenticated panel route group;
 the encryption module supplies the helper and controller. The recovery-key
 attachment includes secret, full fingerprint/parameters, installation UUID and
-restore instructions. Neither normal export nor overview includes the secret.
+restore instructions. Archive-key operations validate installation identity and
+credentials independently of billing settings and capture readiness, so missing
+`cronjob_time` cannot block CLI key export or the signed attachment. Neither
+normal export nor overview includes the secret.
 
 Overview exposes this whitelist:
 `configuration.encryption = {enabled, tool: {ok, path, code}, key: {state,
