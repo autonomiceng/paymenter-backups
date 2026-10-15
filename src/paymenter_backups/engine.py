@@ -451,7 +451,7 @@ def capture(state, envelope, scheduled=False, request_id=None):
                 journal["database_coverage"] = {"verified_at": journal["verification"]["verified_at"], "snapshot_lower_bound": journal["database_snapshot_lower_bound"]}
             state.save(journal)
             from .requests import reconcile_coverage
-            reconcile_coverage(state)
+            reconcile_coverage(state, envelope, locked=True)
             shutil.rmtree(payload)
             return journal
         except BaseException as error:

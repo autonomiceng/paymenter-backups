@@ -83,6 +83,23 @@ class Backups extends Page implements HasTable
     private const KINDS = ['database-online' => 'database', 'full-quiesced' => 'full'];
     private const KIND_LABELS = ['database-online' => 'Database backups', 'full-quiesced' => 'Full backups'];
     private const ACTIVE = ['pending', 'deferred', 'launching', 'running'];
+    /** "Runs at 00:15, 06:15, …" for the hourly database schedule, evaluated in the browser. */
+    private const HOURLY_SENTENCE_JS = <<<'JS'
+        (() => {
+            const every = [1, 2, 3, 4, 6, 8, 12].includes(parseInt($get('database_every_hours'))) ? parseInt($get('database_every_hours')) : 1;
+            const minute = Math.min(59, Math.max(0, parseInt($get('database_minute')) || 0));
+            const zone = $get('schedule_timezone') ? ' ' + $get('schedule_timezone') : '';
+            const pad = (value) => String(value).padStart(2, '0');
+            if (every === 1) { return 'Runs every hour at :' + pad(minute) + zone + '.'; }
+            const slots = [];
+            for (let hour = 0; hour < 24; hour += every) { slots.push(pad(hour) + ':' + pad(minute)); }
+            return 'Runs at ' + (slots.length <= 4 ? slots.slice(0, -1).join(', ') + ' and ' + slots[slots.length - 1] : slots.slice(0, 3).join(', ') + ' and so on') + zone + '.';
+        })()
+        JS;
+    /** Codes about Paymenter's cron job itself, shown as one item. */
+    private const CRON_CODES = ['scheduler-missing', 'billing-guard-stale'];
+    /** Checks that only a running cron job refreshes. */
+    private const CRON_QUIET = ['job-discovery-unknown', 'job-discovery-stale', 'discovery-stale'];
     /** Setup items that inform but never stop Create backup. */
     private const ADVISORY = ['billing-window-protected', 'job-lock-busy', 'busy', 'storage-untested',
         // Uploads wait for these; backups on this server still run.
@@ -103,6 +120,14 @@ class Backups extends Page implements HasTable
     /** Exact key named when the acknowledgement dialog opened. */
     #[Locked]
     public ?string $acknowledgementFingerprint = null;
+    /** Server-set window in which this component may render the key it was granted, after the confirmed Show step. */
+    #[Locked]
+    public ?int $revealGrantUntil = null;
+    #[Locked]
+    public ?string $revealGrantKey = null;
+    /** Nonsecret: which typed secret groups a response cleared before they were saved. */
+    #[Locked]
+    public array $secretsCleared = [];
 
     private ?array $overviewCache = null;
     /** Setup items for the current overview, recomputed when the overview is read again. */
@@ -117,6 +142,9 @@ class Backups extends Page implements HasTable
     /** Revealed key for this request only; never a public property. */
     private ?array $revealedKey = null;
     private bool $collectingErrors = false;
+    /** Secret groups this request actually saved; the others were cleared unsaved. */
+    private array $secretsSaved = [];
+    private const REVEAL_GRANT = 'backups.recovery_key_reveal';
 
     public static function canAccess(): bool
     {
@@ -157,12 +185,36 @@ class Backups extends Page implements HasTable
     }
 
     /** Secrets never travel back to the browser, including after validation errors. */
+    /** Runs before the view renders, so the note appears in the same response that clears the fields. */
+    public function rendering(): void
+    {
+        $this->noteClearedSecrets();
+    }
+
     public function dehydrate(): void
     {
+        $this->noteClearedSecrets();
         $this->s3Keys = ['access_key' => null, 'secret_key' => null, 'session_token' => null];
         $this->siteAccess = ['username' => null, 'password' => null];
         $this->encryptionInput = ['source' => in_array($this->encryptionInput['source'] ?? null, ['generate', 'passphrase'], true) ? $this->encryptionInput['source'] : 'generate', 'passphrase' => null];
         $this->revealedKey = null;
+    }
+
+    /**
+     * Typed secrets that this response clears without saving get an inline note,
+     * so Save never silently keeps the old values the administrator meant to replace.
+     */
+    private function noteClearedSecrets(): void
+    {
+        $typed = [
+            's3' => array_filter($this->s3Keys ?? [], 'filled') !== [],
+            'site' => array_filter($this->siteAccess ?? [], 'filled') !== [],
+            'passphrase' => filled($this->encryptionInput['passphrase'] ?? null),
+        ];
+        foreach ($typed as $group => $present) {
+            if (isset($this->secretsSaved[$group])) { unset($this->secretsCleared[$group]); }
+            elseif ($present) { $this->secretsCleared[$group] = true; }
+        }
     }
 
     protected function onValidationError(ValidationException $exception): void
@@ -313,7 +365,7 @@ class Backups extends Page implements HasTable
     private function startLine(): string
     {
         if (!$this->schedulerFresh()) {
-            return $this->lastTick() ? 'Starts when Paymenter\'s cron job next runs. It last ran ' . $this->ago($this->lastTick()) . '.' : 'Starts once Paymenter\'s cron job runs. It hasn\'t run yet.';
+            return $this->lastTick() ? 'Starts when Paymenter\'s cron job runs again (last run ' . $this->ago($this->lastTick()) . ').' : 'Starts once Paymenter\'s cron job is added and runs.';
         }
         return $this->hasActiveWork() ? 'Starts after the current task finishes.' : 'Starts within a minute.';
     }
@@ -354,6 +406,7 @@ class Backups extends Page implements HasTable
             'unsupported_stores' => array_values(array_filter($this->checks()['stores'] ?? [], static fn ($store) => is_array($store) && ($store['supported'] ?? null) === false && ($store['kind'] ?? null) !== 'maintenance')),
             'env_path' => base_path('.env'),
             'last_tick' => $this->lastTick() ? $this->ago($this->lastTick()) : null,
+            'cron_fresh' => $this->schedulerFresh(),
         ];
     }
 
@@ -385,9 +438,17 @@ class Backups extends Page implements HasTable
             $groups['all'][] = $render(['code' => $configuration['error'] ?: 'config-invalid', 'field' => Messages::field((string) $configuration['error']), 'page' => true]);
         }
         $byMode = [];
+        // Nothing runs without Paymenter's cron job: its items become one item, first, and
+        // checks that only the cron job can refresh stay quiet until it runs.
+        $cronFresh = $this->schedulerFresh();
+        $cronCodes = [];
+        $engineStorageTest = false;
         foreach (array_keys(self::KINDS) as $mode) {
             foreach ($this->readiness($mode)['items'] as $item) {
                 if (($item['code'] ?? null) === 'installation-not-initialized' && !$this->initialized()) { continue; }
+                if (in_array($item['code'], self::CRON_CODES, true)) { $cronCodes[$item['code']] = true; continue; }
+                if (!$cronFresh && in_array($item['code'], self::CRON_QUIET, true)) { continue; }
+                $engineStorageTest = $engineStorageTest || $item['code'] === 'storage-untested';
                 $rendered = $render($item);
                 $byMode[$mode][$rendered['id']] = $rendered;
             }
@@ -406,10 +467,16 @@ class Backups extends Page implements HasTable
                 if ($rendered['code'] === 'archive-key-save-required') { $groups['all'][$id] = $rendered; unset($groups[$mode][$id]); }
             }
         }
-        if ($this->initialized() && ($configuration['valid'] ?? false) && $this->storageTestState() !== 'passed') {
-            $groups['all'][] = ['code' => 'storage-untested', 'id' => 'storage-untested', 'title' => 'Test your storage',
-                'text' => 'Writes, reads and deletes a small test file in ' . ($this->uploadsToS3() ? 'the S3 bucket' : 'the backup directory') . '.',
-                'fixes' => [], 'action' => ['kind' => 'test-storage', 'label' => 'Test storage', 'target' => null], 'tone' => 'info', 'page' => false, 'advisory' => true];
+        if (!$engineStorageTest && $this->initialized() && ($configuration['valid'] ?? false) && $this->storageTestState() !== 'passed') {
+            $groups['all'][] = $render(['code' => 'storage-untested', 'advisory' => true]);
+        }
+        if ($this->initialized() && $this->overviewError === null && (!$cronFresh || $cronCodes)) {
+            array_unshift($groups['all'], $render(['code' => isset($cronCodes['scheduler-missing']) || !$cronCodes ? 'scheduler-missing' : 'billing-guard-stale', 'advisory' => !isset($cronCodes['scheduler-missing'])]));
+        }
+        // Blockers first, then waiting and advisory items.
+        foreach ($groups as $group => $items) {
+            uasort($items, static fn ($a, $b) => ($a['tone'] === 'info') <=> ($b['tone'] === 'info'));
+            $groups[$group] = $items;
         }
         // A fix line (such as the cron line) is shown once per group, under its first item.
         foreach ($groups as $group => $items) {
@@ -479,6 +546,12 @@ class Backups extends Page implements HasTable
         return preg_match('~^[A-Za-z0-9_@%+=:,./-]+$~D', $word) ? $word : escapeshellarg($word);
     }
 
+    /** Cron parses percent before the shell, even inside quoted arguments. */
+    private static function cronShell(string $word): string
+    {
+        return implode('\\%', array_map([self::class, 'shell'], explode('%', $word)));
+    }
+
     private function safePrivateRoot(): ?string
     {
         try { return Runtime::privateRoot(); } catch (\Throwable $error) { return null; }
@@ -504,7 +577,7 @@ class Backups extends Page implements HasTable
         $line = $this->checks()['jobs']['suggestions']['scheduler'] ?? null;
         if (is_string($line) && $line !== '') { return $line; }
         $root = $this->safePrivateRoot() ?? '/path/to/paymenter-backups-private';
-        return '* * * * * /usr/bin/flock -n ' . self::shell($root . '/scheduler.lock') . ' ' . self::shell($this->binary('php', PHP_BINDIR . '/php')) . ' ' . self::shell(base_path('artisan')) . ' schedule:run >/dev/null 2>&1';
+        return '* * * * * /usr/bin/flock -n ' . self::cronShell($root . '/scheduler.lock') . ' ' . self::cronShell($this->binary('php', PHP_BINDIR . '/php')) . ' ' . self::cronShell(base_path('artisan')) . ' schedule:run >/dev/null 2>&1';
     }
 
     private function queueLine(): string
@@ -512,7 +585,7 @@ class Backups extends Page implements HasTable
         $line = $this->checks()['jobs']['suggestions']['queue'] ?? null;
         if (is_string($line) && $line !== '') { return $line; }
         $root = $this->safePrivateRoot() ?? '/path/to/paymenter-backups-private';
-        return '* * * * * /usr/bin/flock -n ' . self::shell($root . '/queue.lock') . ' ' . self::shell($this->binary('php', PHP_BINDIR . '/php')) . ' ' . self::shell(base_path('artisan')) . ' queue:work --stop-when-empty --max-time=50 >/dev/null 2>&1';
+        return '* * * * * /usr/bin/flock -n ' . self::cronShell($root . '/queue.lock') . ' ' . self::cronShell($this->binary('php', PHP_BINDIR . '/php')) . ' ' . self::cronShell(base_path('artisan')) . ' queue:work --stop-when-empty --max-time=50 >/dev/null 2>&1';
     }
 
     /** Paymenter's daily billing time and the window full backups keep clear, as clock times. */
@@ -541,15 +614,23 @@ class Backups extends Page implements HasTable
 
     // ---------------------------------------------------------------- Shared components
 
-    /** Exact command text, escaped by Filament, copyable over HTTPS with click, Enter or Space. */
+    /** Exact escaped text, copyable over HTTPS with click, Enter or Space. */
     private function command(string|\Closure $command): Text
     {
         $plain = static fn () => $command instanceof \Closure ? (string) $command() : $command;
-        return Text::make($plain)->fontFamily(FontFamily::Mono)
+        // Keep meaningful whitespace inside its own span: preserving whitespace
+        // on the native Text wrapper would also show the template's indentation.
+        return Text::make(static fn () => new \Illuminate\Support\HtmlString('<span style="white-space: pre-wrap">' . e($plain()) . '</span>'))->fontFamily(FontFamily::Mono)
             ->copyable(fn () => request()->isSecure())->copyableState($plain)->copyMessage('Copied')
             ->tooltip(fn () => request()->isSecure() ? 'Copy' : null)
-            // Long paths wrap inside the page, line breaks in .env lines stay; copied text is unchanged.
-            ->extraAttributes(['data-backups-command' => true, 'style' => 'overflow-wrap: anywhere; white-space: pre-wrap']);
+            // The theme's input frame makes a native code block; long paths wrap inside it, copied text is unchanged.
+            ->extraAttributes(['data-backups-command' => true, 'class' => 'fi-input-wrp w-full px-4 py-2 break-words', 'style' => 'overflow-wrap: anywhere']);
+    }
+
+    /** A bulleted list. Items are blocks so each bullet sits on the first line of a wrapped item. */
+    private function bullets(array $lines): UnorderedList
+    {
+        return UnorderedList::make(array_map(static fn ($line) => Text::make($line)->extraAttributes(['style' => 'display: block']), $lines))->columns(1);
     }
 
     private function settingsUrl(string $anchor = 'settings'): string
@@ -566,10 +647,10 @@ class Backups extends Page implements HasTable
     private function setupItem(array $item, string $prefix): Component
     {
         $tone = $item['tone'];
-        $children = [
-            Text::make($item['title'])->weight(FontWeight::SemiBold),
+        $children = [Group::make([
+            Text::make($item['title'])->weight(FontWeight::SemiBold)->color('gray'),
             Text::make($item['text']),
-        ];
+        ])->gap(false)];
         foreach ($item['fixes'] as $fix) {
             if (filled($fix['lead'] ?? null)) { $children[] = Text::make($fix['lead']); }
             $children[] = $this->command($fix['code']);
@@ -580,7 +661,7 @@ class Backups extends Page implements HasTable
             $actions = match ($action['kind']) {
                 'settings' => [$this->link($name, $action['label'], $this->settingsUrl($action['target'] ?? 'settings'))],
                 'help' => [$this->link($name, $action['label'], static::getUrl(['tab' => 'help']) . '#' . ($action['target'] ?? 'help'))],
-                'test-storage' => [$this->testStorageAction()->button()->size(Size::Small)],
+                'test-storage' => $this->schedulerFresh() ? [$this->testStorageAction()->button()->size(Size::Small)] : [],
                 'recovery-key' => $this->recoveryKeyActions(),
                 default => [],
             };
@@ -589,7 +670,7 @@ class Backups extends Page implements HasTable
         return Flex::make([
             Icon::make(match ($tone) { 'danger' => 'ri-alert-line', 'info' => 'ri-information-line', default => 'ri-error-warning-line' })
                 ->color(match ($tone) { 'danger' => 'danger', 'info' => 'info', default => 'warning' })->grow(false),
-            Group::make($children)->grow(),
+            Group::make($children)->dense()->grow(),
         ])->verticallyAlignStart();
     }
 
@@ -732,7 +813,7 @@ class Backups extends Page implements HasTable
             return ($schedule['next_at'] ?? null) ? $this->time($schedule['next_at'], true) : 'None in the next 8 days';
         };
         return Section::make('Overview')
-            ->headerActions([$this->applyRetentionAction()])
+            ->headerActions([$this->testStorageAction(), $this->applyRetentionAction()])
             ->schema([
                 Grid::make(['default' => 1, 'md' => 2])->schema([
                     TextEntry::make('overview_last_full')->label('Last full backup')
@@ -787,15 +868,14 @@ class Backups extends Page implements HasTable
                             'expired' => 'Last test expired before it ran',
                             default => 'Queued',
                         };
-                    })->color(fn () => $this->storageTestState() === 'failed' ? 'danger' : null)
-                        ->afterContent([$this->testStorageAction()->link()]),
+                    })->color(fn () => $this->storageTestState() === 'failed' ? 'danger' : null),
                 ]),
             ]);
     }
 
     private function helpSections(): array
     {
-        $bullets = static fn (array $lines) => UnorderedList::make(array_map(static fn ($line) => Text::make($line), $lines))->columns(1);
+        $bullets = fn (array $lines) => $this->bullets($lines);
         return [
             Section::make('What\'s in a backup')->id('backup-contents')->collapsible()->collapsed()->schema([
                 $bullets([
@@ -806,7 +886,7 @@ class Backups extends Page implements HasTable
             ]),
             Section::make('How backups run')->id('how-backups-run')->collapsible()->schema([
                 Text::make('Paymenter\'s cron job runs schedule:run every minute. Each minute, Backups starts what is queued: scheduled backups, Create backup, uploads, verification and deletion. If the cron job isn\'t running, nothing happens. Backups never edits your crontab or systemd units.'),
-                Text::make(fn () => 'Add this line to the crontab of ' . ($this->checks()['jobs']['crontab_user'] ?? 'the user that owns Paymenter') . ' (run crontab -e as that user). If a schedule:run line is already there, replace it:'),
+                Text::make(fn () => 'Add this line to the crontab of ' . ($this->checks()['jobs']['crontab_user'] ?? 'the user that owns Paymenter') . ' with crontab -e. If a schedule:run line is already there, replace it:'),
                 $this->command(fn () => $this->schedulerLine()),
                 Text::make('flock lets a full backup pause this job while it copies. Database backups work without it.'),
                 Text::make('Copying needs HTTPS. Over HTTP, select the text to copy it.')->visible(fn () => !request()->isSecure()),
@@ -903,19 +983,17 @@ class Backups extends Page implements HasTable
             ->required(fn (Get $get) => $get($schedule) === 'weekly')
             ->rules(['array'])->nestedRecursiveRules(['in:0,1,2,3,4,5,6'])
             ->validationMessages(['required' => 'Choose at least one day.'])
-            ->visible(fn (Get $get) => $get($schedule) === 'weekly');
-        $keep = fn (string $key) => $integer($key, 'Keep on this server', 'backups', fn (Get $get) => $get('keep_local')
-            ? 'The newest verified backup is always kept.'
-            : 'Backups aren\'t kept here. "Same number as on this server" in S3 uses this number.');
+            ->visibleJs("\$get('{$schedule}') === 'weekly'");
+        $keep = fn (string $key) => $integer($key, 'Keep on this server', 'backups', 'The newest verified backup is always kept.');
         $s3Policy = fn (string $type, string $label) => [
             Select::make('s3_retention_policy_' . $type)->label($label)->options(Settings::SELECTS['s3_retention_policy_' . $type])
-                ->required()->selectablePlaceholder(false)->live(),
+                ->required()->selectablePlaceholder(false),
             $integer('s3_retention_keep_' . $type, 'Backups to keep in S3', 'backups')
-                ->visible(fn (Get $get) => $get('s3_retention_policy_' . $type) === 'count'),
+                ->visibleJs("\$get('s3_retention_policy_{$type}') === 'count'"),
             $integer('s3_retention_days_' . $type, 'Days to keep in S3', 'days', 'The newest backup in S3 is always kept.')
-                ->visible(fn (Get $get) => $get('s3_retention_policy_' . $type) === 'age'),
+                ->visibleJs("\$get('s3_retention_policy_{$type}') === 'age'"),
         ];
-        $tool = fn (string $key, string $label) => $path($key, $label, 'Leave empty to detect.', fn () => $this->detectedTool($key));
+        $tool = fn (string $key, string $label) => $path($key, $label, null, fn () => $this->detectedTool($key));
         $zones = array_combine(\DateTimeZone::listIdentifiers(), \DateTimeZone::listIdentifiers());
 
         return $schema->components([
@@ -924,7 +1002,7 @@ class Backups extends Page implements HasTable
                     ->description('Choose where Backups keeps its private data. You can\'t change this after the first save.')
                     ->visible(fn () => !$this->initialized())
                     ->schema([
-                        $path('private_root', 'Data directory', 'Backup history, settings ID and encrypted keys. Must be outside Paymenter and any public web folder.', dirname(base_path()) . '/paymenter-backups-private')
+                        $path('private_root', 'Data directory', 'Holds backup history, the installation ID and encrypted keys. Must be outside Paymenter and any public web folder.', dirname(base_path()) . '/paymenter-backups-private')
                             ->visible(fn () => !$this->initialized()),
                         $lineList('extra_docroots', 'Other public web folders', 'Document roots of other sites on this account, one per line. Backups are never stored inside them.')
                             ->visible(fn () => !$this->initialized()),
@@ -934,9 +1012,9 @@ class Backups extends Page implements HasTable
                     Grid::make(['default' => 1, 'md' => 2])->schema([
                         Fieldset::make('Full backups')->columns(1)->schema([
                             Text::make('Database and all files. The site shows its maintenance page while the copy runs.'),
-                            Select::make('full_schedule')->label('Frequency')->options(Settings::SELECTS['full_schedule'])->required()->selectablePlaceholder(false)->live(),
+                            Select::make('full_schedule')->label('Frequency')->options(Settings::SELECTS['full_schedule'])->required()->selectablePlaceholder(false),
                             $days('full_weekdays', 'full_schedule'),
-                            $time('full_time')->helperText(fn () => $this->billingSentence())->visible(fn (Get $get) => $get('full_schedule') !== 'off'),
+                            $time('full_time')->helperText(fn () => $this->billingSentence())->visibleJs("\$get('full_schedule') !== 'off'"),
                             $keep('retention_keep_full'),
                             Flex::make([
                                 Text::make('Full backups aren\'t ready yet.')->color('warning'),
@@ -945,16 +1023,16 @@ class Backups extends Page implements HasTable
                         ]),
                         Fieldset::make('Database backups')->columns(1)->schema([
                             Text::make('Database only. The site stays online. To restore, you also need a copy of Paymenter\'s files.'),
-                            Select::make('database_schedule')->label('Frequency')->options(Settings::SELECTS['database_schedule'])->required()->selectablePlaceholder(false)->live(),
+                            Select::make('database_schedule')->label('Frequency')->options(Settings::SELECTS['database_schedule'])->required()->selectablePlaceholder(false),
                             Grid::make(2)->schema([
-                                Select::make('database_every_hours')->label('Every')->options(Settings::SELECTS['database_every_hours'])->required()->selectablePlaceholder(false)->live()
+                                Select::make('database_every_hours')->label('Interval')->options(Settings::SELECTS['database_every_hours'])->required()->selectablePlaceholder(false)
                                     ->rules(['in:' . implode(',', Settings::EVERY_HOURS)]),
-                                TextInput::make('database_minute')->label('At minute')->integer()->required()->minValue(0)->maxValue(59)->live(onBlur: true),
-                            ])->visible(fn (Get $get) => $get('database_schedule') === 'hourly'),
-                            Text::make(fn (Get $get) => $this->hourlySentence((int) $get('database_every_hours'), (int) $get('database_minute'), (string) $get('schedule_timezone')))
-                                ->visible(fn (Get $get) => $get('database_schedule') === 'hourly'),
+                                TextInput::make('database_minute')->label('At minute')->integer()->required()->minValue(0)->maxValue(59),
+                            ])->visibleJs("\$get('database_schedule') === 'hourly'"),
+                            // Computed in the browser, so changing these fields needs no round trip.
+                            Text::make(self::HOURLY_SENTENCE_JS)->js()->visibleJs("\$get('database_schedule') === 'hourly'"),
                             $days('database_weekdays', 'database_schedule'),
-                            $time('database_time')->visible(fn (Get $get) => in_array($get('database_schedule'), ['daily', 'weekly'], true)),
+                            $time('database_time')->visibleJs("['daily', 'weekly'].includes(\$get('database_schedule'))"),
                             $keep('retention_keep_database'),
                         ]),
                     ]),
@@ -970,46 +1048,54 @@ class Backups extends Page implements HasTable
                         $gib('local_byte_budget', 'Space limit for backups', 'New backups stop when backups on this server reach this size.', true),
                         $gib('minimum_free_bytes', 'Minimum free disk space', 'Backups stop if the disk would drop below this.', false),
                     ]),
-                    Checkbox::make('keep_local')->label('Keep backups on this server')->live()
-                        ->helperText(fn (Get $get) => $get('keep_local') ? null : 'Each backup is written here first and deleted here after the upload to S3 is verified.')
+                    Checkbox::make('keep_local')->label('Keep backups on this server')
+                        ->helperText('When off, each backup is written here first and deleted after its upload to S3 is verified.')
                         ->accepted(fn (Get $get) => !$get('upload_s3'))
                         ->validationMessages(['accepted' => 'Keep backups on this server, upload them to S3, or both.']),
-                    Checkbox::make('upload_s3')->label('Upload to S3')->helperText('AWS S3 or any S3-compatible storage.')->live(),
-                    Fieldset::make('S3')->id('s3')->columns(['default' => 1, 'md' => 2])->visible(fn (Get $get) => (bool) $get('upload_s3'))->schema([
-                        TextInput::make('s3_endpoint')->label('Endpoint')->placeholder('https://s3.example.com')
-                            ->helperText('Leave empty for AWS. For other providers, enter their S3 API URL, for example https://s3.example.com.')
-                            ->rules(['nullable', 'regex:/^https:\/\/[^\s\/?#@]+(?:\/[^\s?#]*)?$/D'])->validationMessages(['regex' => 'Enter the provider\'s https:// API URL, without a username or query.']),
-                        TextInput::make('s3_region')->label('Region')->placeholder('us-east-1')->helperText('For example us-east-1.'),
-                        TextInput::make('s3_bucket')->label('Bucket')->helperText('Bucket name, for example my-backups. It must already exist.')
-                            ->required(fn (Get $get) => (bool) $get('upload_s3'))->validationMessages(['required' => 'Enter the bucket name.']),
-                        TextInput::make('s3_prefix')->label('Folder in bucket')->required()
-                            ->helperText(fn () => 'Backups go to FOLDER/' . ($this->overview()['installation_uuid'] ?? 'INSTALLATION-ID') . '/. Changing it doesn\'t move existing backups.')
-                            ->rules(['string', 'regex:' . Settings::S3_PREFIX])
-                            ->validationMessages(['regex' => 'The folder can\'t contain "//", ".", ".." or "\\".']),
-                        Toggle::make('s3_path_style')->label('Path-style addressing')->helperText('Turn on for MinIO and some other S3-compatible providers.')->inline(false),
-                        EmbeddedSchema::make('s3KeysForm')->columnSpanFull(),
-                        Grid::make(1)->schema($s3Policy('full', 'Keep full backups in S3')),
-                        Grid::make(1)->schema($s3Policy('database', 'Keep database backups in S3')),
-                        Toggle::make('s3_encryption')->label('Encrypt backups in S3')->live()->columnSpanFull()
-                            ->helperText(fn () => $this->encryptionHelp()),
-                        EmbeddedSchema::make('encryptionForm')->columnSpanFull()
-                            ->visible(fn (Get $get) => (bool) $get('s3_encryption') && $this->keyState() === 'none'),
-                        Group::make([
-                            Text::make(fn () => $this->recoveryKeySentence()),
-                            Actions::make(fn () => [...$this->recoveryKeyActions(), $this->rotateRecoveryKeyAction(), $this->discardRecoveryKeyAction()]),
-                        ])->columnSpanFull()->visible(fn (Get $get) => (bool) $get('s3_encryption') && $this->keyState() !== 'none'),
-                        Checkbox::make('plaintext_offsite_acknowledged')->label('I understand backups in S3 won\'t be encrypted')->columnSpanFull()
-                            ->helperText('They contain customer data, .env and APP_KEY. Give these keys access to this bucket only, and turn on server-side encryption in the bucket if you need it.')
-                            ->accepted(fn (Get $get) => (bool) $get('upload_s3') && !$get('s3_encryption'))
-                            ->validationMessages(['accepted' => 'Confirm this, or turn encryption on.'])
-                            ->visible(fn (Get $get) => !$get('s3_encryption')),
-                    ]),
+                    Checkbox::make('upload_s3')->label('Upload to S3')->helperText('AWS S3 or any S3-compatible storage.'),
+                    Group::make([
+                        Fieldset::make('S3 bucket')->id('s3')->columns(['default' => 1, 'md' => 2])->schema([
+                            TextInput::make('s3_endpoint')->label('Endpoint')->placeholder('https://s3.example.com')
+                                ->helperText('Leave empty for AWS. For other providers, enter their S3 API URL, for example https://s3.example.com.')
+                                ->rules(['nullable', 'regex:/^https:\/\/[^\s\/?#@]+(?:\/[^\s?#]*)?$/D'])->validationMessages(['regex' => 'Enter the provider\'s https:// API URL, without a username or query.']),
+                            TextInput::make('s3_region')->label('Region')->placeholder('us-east-1'),
+                            TextInput::make('s3_bucket')->label('Bucket')->helperText('Bucket name, for example my-backups. It must already exist.')
+                                ->required(fn (Get $get) => (bool) $get('upload_s3'))->validationMessages(['required' => 'Enter the bucket name.']),
+                            TextInput::make('s3_prefix')->label('Folder in bucket')->required()
+                                ->helperText(fn () => 'Backups go to FOLDER/' . ($this->overview()['installation_uuid'] ?? 'INSTALLATION-ID') . '/. Changing it doesn\'t move existing backups.')
+                                ->rules(['string', 'regex:' . Settings::S3_PREFIX])
+                                ->validationMessages(['regex' => 'The folder can\'t contain "//", ".", ".." or "\\".']),
+                            Toggle::make('s3_path_style')->label('Path-style addressing')->helperText('Turn on for MinIO and some other S3-compatible providers.')->inline(false),
+                        ]),
+                        Fieldset::make('S3 access keys')->columns(1)->schema([
+                            EmbeddedSchema::make('s3KeysForm'),
+                        ]),
+                        Fieldset::make('Keep in S3')->columns(['default' => 1, 'md' => 2])->schema([
+                            Grid::make(1)->schema($s3Policy('full', 'Full backups')),
+                            Grid::make(1)->schema($s3Policy('database', 'Database backups')),
+                        ]),
+                        Fieldset::make('Encryption')->id('encryption')->columns(1)->schema([
+                            Toggle::make('s3_encryption')->label('Encrypt backups in S3')
+                                ->helperText(fn () => $this->encryptionHelp()),
+                            EmbeddedSchema::make('encryptionForm')
+                                ->visible(fn () => $this->keyState() === 'none')->visibleJs("\$get('s3_encryption')"),
+                            Group::make([
+                                Text::make(fn () => $this->recoveryKeySentence()),
+                                Actions::make(fn () => [...$this->recoveryKeyActions(), $this->rotateRecoveryKeyAction(), $this->discardRecoveryKeyAction()]),
+                            ])->dense()->visible(fn () => $this->keyState() !== 'none')->visibleJs("\$get('s3_encryption')"),
+                            Checkbox::make('plaintext_offsite_acknowledged')->label('I understand backups in S3 won\'t be encrypted')
+                                ->helperText('They contain customer data, .env and APP_KEY. Give these keys access to this bucket only, and turn on server-side encryption in the bucket if you need it.')
+                                ->accepted(fn (Get $get) => (bool) $get('upload_s3') && !$get('s3_encryption'))
+                                ->validationMessages(['accepted' => 'Confirm this, or turn encryption on.'])
+                                ->visibleJs("! \$get('s3_encryption')"),
+                        ]),
+                    ])->visibleJs("\$get('upload_s3')"),
                     Toggle::make('automatic_retention')->label('Delete old backups automatically')
                         ->helperText('After each backup, delete backups beyond the numbers to keep.'),
                 ]),
 
                 Section::make('Full backup requirements')->id('full-backup-requirements')
-                    ->description('During a full backup the site shows its maintenance page and Paymenter\'s cron jobs are paused, so the database and files are copied in one consistent state. Backups checks this server for the items below.')
+                    ->description('A full backup pauses Paymenter\'s cron jobs and shows the maintenance page, so the database and files are copied in one consistent state.')
                     ->collapsible()->collapsed(fn () => ($this->formValues()['full_schedule'] ?? 'off') === 'off' && $this->blockers('full-quiesced') === [])
                     ->schema(fn () => [
                         ...$this->detectedChecks(),
@@ -1026,6 +1112,7 @@ class Backups extends Page implements HasTable
                 Section::make('Advanced')->id('advanced')->description('Binary paths, time limits and folders. Most sites don\'t need to change these.')
                     ->collapsible()->collapsed()->schema([
                         Fieldset::make('Binary paths')->columns(['default' => 1, 'md' => 2])->schema([
+                            Text::make('An empty path uses the binary Backups detects.')->columnSpanFull(),
                             $tool('python', 'Python 3'), $tool('php', 'PHP'), $tool('dump', 'mysqldump or mariadb-dump'),
                             $tool('mysql', 'mysql or mariadb client'), $tool('tar', 'tar'), $tool('gzip', 'gzip'), $tool('gpg', 'GnuPG (gpg)'),
                         ]),
@@ -1042,7 +1129,7 @@ class Backups extends Page implements HasTable
                             $lineList('job_lock_paths', 'Lock files (override)', 'Leave empty to use the lock files your cron jobs use. One full path per line.'),
                         ]),
                         Fieldset::make('Folders')->columns(['default' => 1, 'md' => 2])->visible(fn () => $this->initialized())->schema([
-                            $path('private_root', 'Data directory', 'Backup history, settings ID and encrypted keys. Can\'t be changed after setup.')
+                            $path('private_root', 'Data directory', 'Holds backup history, the installation ID and encrypted keys. Can\'t be changed after setup.')
                                 ->disabled()->visible(fn () => $this->initialized()),
                             $lineList('extra_docroots', 'Other public web folders', 'Document roots of other sites on this account, one per line. Backups are never stored inside them.')
                                 ->visible(fn () => $this->initialized()),
@@ -1061,15 +1148,6 @@ class Backups extends Page implements HasTable
         return is_string($checked['resolved'] ?? null) && $checked['resolved'] !== '' ? $checked['resolved'] : 'Not found';
     }
 
-    private function hourlySentence(int $hours, int $minute, string $zone): string
-    {
-        $hours = in_array($hours, Settings::EVERY_HOURS, true) ? $hours : 1;
-        $minute = max(0, min(59, $minute));
-        $zone = $zone !== '' ? ' ' . $zone : '';
-        if ($hours === 1) { return 'Runs every hour at ' . sprintf(':%02d', $minute) . $zone . '.'; }
-        $slots = array_map(static fn ($hour) => sprintf('%02d:%02d', $hour, $minute), range(0, 23, $hours));
-        return 'Runs at ' . (count($slots) <= 4 ? implode(', ', array_slice($slots, 0, -1)) . ' and ' . end($slots) : implode(', ', array_slice($slots, 0, 3)) . ' and so on') . $zone . '.';
-    }
 
     private function legacyDirectorySentence(): ?string
     {
@@ -1340,7 +1418,10 @@ class Backups extends Page implements HasTable
     private function s3KeysRequired(): bool
     {
         if (!($this->settings['upload_s3'] ?? false)) { return false; }
-        return !$this->savedS3Keys() || filled($this->s3Keys['access_key'] ?? null) || filled($this->s3Keys['secret_key'] ?? null) || filled($this->s3Keys['session_token'] ?? null);
+        if (filled($this->s3Keys['access_key'] ?? null) || filled($this->s3Keys['secret_key'] ?? null) || filled($this->s3Keys['session_token'] ?? null)) { return true; }
+        // Turning S3 on needs keys. An S3 setup whose keys were removed still saves other
+        // changes; Setup then asks for the keys.
+        return !$this->savedS3Keys() && !($this->formValues()['upload_s3'] ?? false);
     }
 
     private function siteRequired(): bool
@@ -1391,7 +1472,9 @@ class Backups extends Page implements HasTable
         $secrets = $s3Keys !== null || $siteAccess !== null;
         // The first save creates private storage, even when every default is kept.
         if (!$changes && $initialized && !$secrets && $keySetup === null) {
-            Notification::make()->title('No changes')->info()->send();
+            $kept = array_intersect_key(['s3' => 'Saved S3 keys weren\'t changed.', 'site' => 'The saved site password wasn\'t changed.', 'passphrase' => 'No passphrase was saved.'], array_filter($this->secretsCleared));
+            foreach (array_keys($kept) as $group) { $this->secretsSaved[$group] = true; }
+            Notification::make()->title('No changes')->body($kept ? implode(' ', $kept) : null)->info()->send();
             return;
         }
         if (array_key_exists('private_root', $changes) && $initialized && $this->engineValue('private_root', $stored['private_root']) !== $changes['private_root']) {
@@ -1422,49 +1505,51 @@ class Backups extends Page implements HasTable
             $changes = $userChanges;
         }
         $record = $this->record();
-        $previous = $record->settings()->whereIn('key', array_keys($changes))->pluck('value', 'key')->all();
-        if ($changes) {
-            SettingsWriter::write($record, array_map(static fn ($value) => is_array($value) ? json_encode($value, JSON_UNESCAPED_SLASHES) : $value, $changes));
+        try {
+            if ($checked) {
+                $saved = Runtime::saveConfiguration($changes, $secrets ? ['s3' => $s3Keys, 'site' => $siteAccess] : null);
+            } else {
+                SettingsWriter::repairBinaries($record, $changes);
+                $saved = ['updated' => true];
+            }
+        } catch (\Throwable $error) {
+            $this->storedForm = null;
+            $this->overviewCache = null;
+            $code = $error instanceof \RuntimeException ? $error->getMessage() : 'config-save-outcome-unknown';
+            if ($code === 'config-save-outcome-unknown') {
+                Notification::make()->title('Save outcome unknown')->warning()
+                    ->body('Refresh and check the saved settings before trying again. Keys you entered were cleared.')->send();
+            } else { $this->refuseSettings($code); }
+            return;
+        } finally {
+            unset($s3Keys, $siteAccess);
         }
         $this->storedForm = null;
         $this->overviewCache = null;
         $this->overviewError = null;
-        if ($checked) {
-            try {
-                Runtime::command(['init'], null, 30);
-            } catch (\Throwable $error) {
-                // Nothing is reported as saved unless private storage accepted it.
-                $restore = [];
-                foreach (array_keys($changes) as $key) { $restore[$key] = $previous[$key] ?? SettingsWriter::stored($key, Settings::DEFAULTS[$key]); }
-                if (array_key_exists('settings_version', $changes) && !array_key_exists('settings_version', $previous)) { $restore['settings_version'] = '1'; }
-                if ($restore) { SettingsWriter::write($record, $restore); }
-                $this->storedForm = null;
-                $this->overviewCache = null;
-                $this->refuseSettings($error instanceof \RuntimeException ? $error->getMessage() : 'engine-unavailable');
-                return;
-            }
-        }
-        (new Extension)->updated($record);
-        $this->overviewCache = null;
-        $this->storedForm = null;
         $this->settingsForm->fill($this->formValues());
         if (!$checked) {
+            (new Extension)->updated($record);
             $this->overview();
             $body = $this->overviewError ? 'Backups still can\'t start: ' . Messages::error($this->overviewError) : 'Backups can start again. Save your other changes now.';
             if ($secrets) { $body .= ' Keys you entered weren\'t saved; enter them again.'; }
             Notification::make()->title('Binary paths saved')->warning()->body($body)->send();
             return;
         }
+        if (($saved['credentials_updated'] ?? false) === true) { $this->secretsSaved['s3'] = true; }
+        if (($saved['maintenance_probe_credentials_updated'] ?? false) === true) { $this->secretsSaved['site'] = true; }
+        if (($saved['updated'] ?? false) !== true) {
+            Notification::make()->title('Save incomplete')->warning()
+                ->body(($saved['outcome_unknown'] ?? false)
+                    ? 'The saved settings or keys could not be confirmed. Backup work is paused. Refresh, check settings and enter the replacement keys again to complete Save.'
+                    : (($saved['concurrent_settings_preserved'] ?? false)
+                        ? 'Concurrent settings changes were preserved. Keys you entered weren\'t saved. Refresh and check settings before trying again.'
+                        : 'Some settings could not be restored. Backup work is paused. Keys you entered weren\'t saved. Refresh, check settings and enter the replacement keys again to complete Save.'))->send();
+            return;
+        }
         $problems = [];
-        if ($secrets) {
-            try {
-                Runtime::saveCredentials(['s3' => $s3Keys, 'site' => $siteAccess]);
-            } catch (\Throwable $error) {
-                $what = $s3Keys !== null && $siteAccess !== null ? 'S3 keys and the site password weren\'t saved' : ($s3Keys !== null ? 'S3 keys weren\'t saved' : 'The site password wasn\'t saved');
-                $problems[] = $what . ': ' . Messages::error($error instanceof \RuntimeException ? $error->getMessage() : 'credentials-save-failed') . ' Enter them again.';
-            } finally {
-                unset($s3Keys, $siteAccess);
-            }
+        if ($saved['partial'] ?? false) {
+            $problems[] = 'Settings and entered keys were saved, but final setup did not finish: ' . Messages::error($saved['error'] ?? 'config-save-failed') . ' Refresh and check setup.';
         }
         $created = false;
         if ($keySetup !== null) {
@@ -1474,6 +1559,7 @@ class Backups extends Page implements HasTable
                     : Runtime::encryptionKey('generate');
                 $this->recoveryFingerprint = is_string($result['fingerprint'] ?? null) ? $result['fingerprint'] : null;
                 $created = true;
+                if ($keySetup['source'] === 'passphrase') { $this->secretsSaved['passphrase'] = true; }
             } catch (\Throwable $error) {
                 $problems[] = 'The recovery key wasn\'t created: ' . Messages::error($error instanceof \RuntimeException ? $error->getMessage() : 'archive-key-invalid');
             } finally {
@@ -1488,12 +1574,21 @@ class Backups extends Page implements HasTable
             $body[] = 'Some saved values were invalid and were reset: ' . implode(', ', array_map(static fn ($key) => Settings::LABELS[$key][0], $repaired)) . '. Check them.';
         }
         if ($created) { $body[] = 'Save the recovery key outside this server now. Uploads to S3 start after you confirm it.'; }
+        // Keys typed earlier were cleared before this Save; say plainly that the saved ones stay.
+        foreach (['s3' => 'Saved S3 keys weren\'t changed.', 'site' => 'The saved site password wasn\'t changed.'] as $group => $sentence) {
+            if (($this->secretsCleared[$group] ?? false) && !isset($this->secretsSaved[$group])) {
+                $body[] = $sentence;
+                $this->secretsSaved[$group] = true;
+            }
+        }
         array_push($body, ...$problems);
         Notification::make()->title($title)->body($body ? implode(' ', $body) : null)
             ->status($problems || $repaired ? 'warning' : 'success')->send();
         if ($created) {
             // The one moment the key matters most: offer it immediately, behind the same confirmation.
-            $this->mountAction('showRecoveryKey');
+            // Mounted from the browser after this response, because a mount here would render
+            // only the dialog and leave the saved form and setup stale.
+            $this->js('$wire.mountAction(\'showRecoveryKey\')');
         }
     }
 
@@ -1530,6 +1625,8 @@ class Backups extends Page implements HasTable
                     Text::make('Keys saved.')->visible($saved),
                     Actions::make([$this->removeS3KeysAction()]),
                 ]),
+                Text::make('Enter the keys again. They were cleared for security when the form updated.')->color('warning')->columnSpanFull()
+                    ->visible(fn () => $this->secretsCleared['s3'] ?? false),
             ]),
         ])->statePath('s3Keys');
     }
@@ -1547,6 +1644,8 @@ class Backups extends Page implements HasTable
                     ->placeholder(fn () => $saved() ? 'Saved. Leave empty to keep.' : null)
                     ->required(fn () => $this->siteRequired())->markAsRequired(false)
                     ->validationMessages(['required' => 'Enter the password too.']),
+                Text::make('Enter the username and password again. They were cleared for security when the form updated.')->color('warning')->columnSpanFull()
+                    ->visible(fn () => $this->secretsCleared['site'] ?? false),
             ]),
         ])->statePath('siteAccess');
     }
@@ -1554,10 +1653,11 @@ class Backups extends Page implements HasTable
     public function encryptionForm(Schema $schema): Schema
     {
         return $schema->components([
-            Radio::make('source')->label('Recovery key')->required()->live()
+            // Shown and hidden in the browser: a server round trip would clear a typed passphrase.
+            Radio::make('source')->label('Recovery key')->required()
                 ->options(['generate' => 'Generate a recovery key (recommended)', 'passphrase' => 'Use my own passphrase'])
                 ->descriptions([
-                    'generate' => 'A random 64-character key. You save it once, after you save settings.',
+                    'generate' => 'A random 64-character key, created when you save.',
                     'passphrase' => 'At least 20 characters. A few random words are easy to keep and hard to guess.',
                 ]),
             TextInput::make('passphrase')->label('Passphrase')->password()->revealable(false)->autocomplete('new-password')
@@ -1565,7 +1665,11 @@ class Backups extends Page implements HasTable
                 ->required(fn (Get $get) => $get('source') === 'passphrase' && $this->keySetupApplies())
                 ->rules(['nullable', 'string', 'min:20', 'max:1024', 'not_regex:/[\x00-\x1f\x7f]/'])
                 ->validationMessages(['min' => 'Use at least 20 characters.', 'not_regex' => 'Don\'t use line breaks or control characters.', 'required' => 'Enter a passphrase, or generate a key instead.'])
-                ->visible(fn (Get $get) => $get('source') === 'passphrase'),
+                ->visibleJs(<<<'JS'
+                    $get('source') === 'passphrase'
+                    JS),
+            Text::make('Enter the passphrase again. It was cleared for security when the form updated.')->color('warning')
+                ->visible(fn () => $this->secretsCleared['passphrase'] ?? false),
         ])->statePath('encryptionInput');
     }
 
@@ -1631,14 +1735,59 @@ class Backups extends Page implements HasTable
             ->modalSubmitActionLabel('Show key')
             ->action(function () {
                 $this->authorizeAction();
+                $this->grantReveal();
                 $this->replaceMountedAction('recoveryKey');
             });
+    }
+
+    /** The key a reveal would show: the one awaiting confirmation, else the active key. */
+    private function revealIdentity(): ?string
+    {
+        try { return Runtime::recoveryKeyFingerprint(); }
+        catch (\Throwable) { return null; }
+    }
+
+    /** One-time, short-lived permission set only by a confirmed Show (or a confirmed rotation). */
+    private function grantReveal(): void
+    {
+        $identity = $this->revealIdentity();
+        if ($identity === null) { throw new \RuntimeException('archive-key-unavailable'); }
+        session()->put(self::REVEAL_GRANT, ['user' => Auth::id(), 'key' => $identity, 'until' => time() + 30]);
+    }
+
+    /**
+     * Whether this component may render the key now. A grant is consumed once and
+     * opens a two-minute window for this component and this key only; a direct
+     * mount or ?action= link has no grant and shows nothing.
+     */
+    private function revealAllowed(): bool
+    {
+        $identity = $this->revealIdentity();
+        if ($identity === null) { return false; }
+        if ($this->revealGrantUntil !== null && $this->revealGrantUntil >= time() && is_string($this->revealGrantKey) && hash_equals($this->revealGrantKey, $identity)) {
+            return true;
+        }
+        $grant = session()->pull(self::REVEAL_GRANT);
+        if (!is_array($grant) || ($grant['user'] ?? null) !== Auth::id() || (int) ($grant['until'] ?? 0) < time()
+            || !is_string($grant['key'] ?? null) || !hash_equals($grant['key'], $identity)) {
+            return false;
+        }
+        $this->revealGrantUntil = time() + 120;
+        $this->revealGrantKey = $identity;
+        return true;
     }
 
     /** Opened only from Show recovery key. The key lives in this modal's rendered content, never in Livewire state. */
     public function recoveryKeyAction(): Action
     {
         return Action::make('recoveryKey')->modalHeading('Recovery key')->modalWidth('2xl')
+            ->mountUsing(function (Action $action) {
+                $this->authorizeAction();
+                if (!$this->revealAllowed()) {
+                    Notification::make()->title('Recovery key not shown')->warning()->body('Confirm Show recovery key first.')->send();
+                    $action->halt();
+                }
+            })
             ->schema(fn () => $this->recoveryKeySchema())
             ->modalSubmitAction(false)->modalCancelActionLabel('Close')
             ->extraModalFooterActions(fn () => array_filter([
@@ -1653,7 +1802,11 @@ class Backups extends Page implements HasTable
         if ($this->revealedKey !== null) { return $this->revealedKey; }
         $this->authorizeAction();
         try {
-            $key = Runtime::revealRecoveryKey();
+            if (!$this->revealAllowed() || $this->revealGrantKey === null) { throw new \RuntimeException('archive-key-mismatch'); }
+            $key = Runtime::revealRecoveryKey($this->revealGrantKey);
+            if (!is_string($key['fingerprint'] ?? null) || !hash_equals($this->revealGrantKey, $key['fingerprint'])) {
+                throw new \RuntimeException('archive-key-mismatch');
+            }
         } catch (\Throwable $error) {
             return $this->revealedKey = ['error' => $error instanceof \RuntimeException ? $error->getMessage() : 'archive-key-unavailable'];
         }
@@ -1663,6 +1816,9 @@ class Backups extends Page implements HasTable
 
     private function recoveryKeySchema(): array
     {
+        if (!$this->revealAllowed()) {
+            return [Text::make('Confirm Show recovery key first.')];
+        }
         $key = $this->revealKey();
         if (isset($key['error'])) {
             return [Callout::make('The recovery key can\'t be shown')->danger()->description(Messages::error($key['error']))];
@@ -1769,6 +1925,7 @@ class Backups extends Page implements HasTable
                     $result = Runtime::encryptionKey('generate');
                     $this->recoveryFingerprint = is_string($result['fingerprint'] ?? null) ? $result['fingerprint'] : null;
                     $this->overviewCache = null;
+                    $this->grantReveal();
                     $this->replaceMountedAction('recoveryKey');
                 } catch (\Throwable $error) {
                     Notification::make()->title('Recovery key not created')->danger()->body(Messages::error($error instanceof \RuntimeException ? $error->getMessage() : 'archive-key-invalid'))->send();
@@ -1893,7 +2050,9 @@ class Backups extends Page implements HasTable
     {
         $mode = in_array($mode, array_keys(self::KINDS), true) ? $mode : 'database-online';
         if ($request = $this->activeRequest('run')) { return 'A ' . strtolower(Messages::mode($request['mode'] ?: $mode)) . ' is already queued.'; }
-        if (!$this->schedulerFresh()) { return 'Paymenter\'s cron job isn\'t running. ' . $this->startLine(); }
+        if (!$this->schedulerFresh()) {
+            return $this->lastTick() ? 'It waits for Paymenter\'s cron job, which last ran ' . $this->ago($this->lastTick()) . '.' : 'It waits for Paymenter\'s cron job, which hasn\'t run yet.';
+        }
         $transient = array_filter($this->readiness($mode)['items'], static fn ($item) => in_array($item['code'], self::TRANSIENT, true));
         return $transient ? 'May start late: it waits for Paymenter\'s daily billing run or a running cron job to finish.' : null;
     }
@@ -2092,19 +2251,21 @@ class Backups extends Page implements HasTable
                         ->modalDescription('This can\'t be undone.')
                         ->fillForm(fn (array $record) => ['location' => $this->defaultDeletionLocation($record)])
                         ->schema(fn (array $record) => [
+                            // A choice appears only when the backup is in more than one place.
                             Radio::make('location')->label('Delete from')->required()->live()
-                                ->options(fn () => array_filter([
+                                ->options($places = array_filter([
                                     'all' => $record['run']['local'] && $inS3($record) ? 'This server and S3' : null,
                                     'local' => $record['run']['local'] ? 'This server' : null,
                                     's3' => !$record['run']['local'] || $inS3($record) ? 'S3' : null,
                                 ]))
+                                ->visible(count($places) > 1)
                                 ->rule('in:all,local,s3'),
                             Callout::make(fn () => $this->deletePreview($record['run_id'], $this->currentDeletionLocation($record))['refusal'] ? 'Can\'t delete' : 'What will be deleted')->warning()
-                                ->footer(fn () => [UnorderedList::make(array_map(static fn ($line) => Text::make($line), $this->deleteLines($record['run_id'], $this->currentDeletionLocation($record))))->columns(1)]),
+                                ->footer(fn () => [$this->bullets($this->deleteLines($record['run_id'], $this->currentDeletionLocation($record)))]),
                         ])
                         ->modalSubmitAction(fn (Action $action, array $record) => $this->deletePreview($record['run_id'], $this->currentDeletionLocation($record))['refusal'] ? false : $action)
                         ->modalSubmitActionLabel('Delete')
-                        ->action(fn (array $record, array $data) => $this->queue('delete', ['run_id' => $record['run_id'], 'location' => $data['location'], 'execute' => true], 'Deletion queued')),
+                        ->action(fn (array $record, array $data) => $this->queue('delete', ['run_id' => $record['run_id'], 'location' => $data['location'] ?? $this->defaultDeletionLocation($record), 'execute' => true], 'Deletion queued')),
                 ])->label('More actions')->icon('ri-more-2-fill')->color('gray')->tooltip('More actions'),
             ])
             ->emptyStateIcon('ri-save-line')

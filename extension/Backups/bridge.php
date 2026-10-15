@@ -67,9 +67,15 @@ try {
         ], JSON_THROW_ON_ERROR | JSON_UNESCAPED_SLASHES) . "\n";
         exit;
     }
-    $billingRows = $pdo->query("SELECT `key`,value FROM {$prefix}settings WHERE settingable_type IS NULL AND `key` IN ('cronjob_time','timezone','app_url')")->fetchAll(PDO::FETCH_KEY_PAIR);
-    if (!isset($billingRows['cronjob_time'])) { throw new RuntimeException('billing-settings-unreadable'); }
-    $billing = ['daily_time' => $billingRows['cronjob_time'], 'timezone' => $billingRows['timezone'] ?? $config->get('app.timezone', 'UTC')];
+    $billingRows = [];
+    $billing = [];
+    // Independent recovery keys and APP_KEY rewrapping need identity/privacy,
+    // never billing admission or unrelated global settings.
+    if (!str_starts_with($verb, 'archive-key-') && $verb !== 'credentials-rewrap') {
+        $billingRows = $pdo->query("SELECT `key`,value FROM {$prefix}settings WHERE settingable_type IS NULL AND `key` IN ('cronjob_time','timezone','app_url')")->fetchAll(PDO::FETCH_KEY_PAIR);
+        if (!isset($billingRows['cronjob_time'])) { throw new RuntimeException('billing-settings-unreadable'); }
+        $billing = ['daily_time' => $billingRows['cronjob_time'], 'timezone' => $billingRows['timezone'] ?? $config->get('app.timezone', 'UTC')];
+    }
     // Settings reads share the envelope but never open or decrypt the credential store.
     $readEnvelope = static function (array $credentials = []) use ($base, $root, $identity, $db, $settings, $extension, $config, $billingRows, $billing): array {
         return [
@@ -83,6 +89,14 @@ try {
     if ($verb === 'read-settings') {
         echo json_encode($readEnvelope(), JSON_THROW_ON_ERROR | JSON_UNESCAPED_SLASHES) . "\n";
         exit;
+    }
+    if ($verb === 'credentials-check') {
+        $bytes = stream_get_contents(STDIN, 65537);
+        if (strlen($bytes) > 65536) { throw new RuntimeException('credentials-invalid'); }
+        $input = json_decode($bytes, true, 16, JSON_THROW_ON_ERROR);
+        if (!is_array($input)) { throw new RuntimeException('credentials-invalid'); }
+        \Paymenter\Extensions\Others\Backups\CredentialInput::merge([], $input, $billingRows['app_url'] ?? $config->get('app.url', ''));
+        echo json_encode(['valid' => true]) . "\n"; exit;
     }
     $decodeKey = static fn ($key) => str_starts_with($key, 'base64:') ? base64_decode(substr($key, 7), true) : $key;
     $key = $decodeKey($config->get('app.key', ''));
@@ -133,6 +147,15 @@ try {
             $result = ['ok' => true];
             \Paymenter\Extensions\Others\Backups\ArchiveEncryption::audit($root, 'rewrap', null, $new['actor'] ?? null);
         } else {
+            if ($archiveAction === 'reveal') {
+                // Match the confirmed identity under credentials.lock, before audit/disclosure.
+                $namespace = \Paymenter\Extensions\Others\Backups\ArchiveEncryption::namespace($credentials['archive_encryption'] ?? null);
+                $selected = $namespace['pending_fingerprint'] ?? $namespace['active_fingerprint'];
+                if ($selected === null) { throw new RuntimeException('archive-key-required'); }
+                if (!is_string($new['fingerprint'] ?? null) || !hash_equals($selected, $new['fingerprint'])) {
+                    throw new RuntimeException('archive-key-mismatch');
+                }
+            }
             [$namespace, $result] = \Paymenter\Extensions\Others\Backups\ArchiveEncryption::change($credentials['archive_encryption'] ?? null, $archiveAction, $new);
             if ($archiveAction !== 'status') {
                 \Paymenter\Extensions\Others\Backups\ArchiveEncryption::audit($root, $archiveAction, $result['fingerprint'] ?? null, $new['actor'] ?? null);

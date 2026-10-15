@@ -5,16 +5,17 @@ import pathlib
 import subprocess
 import sys
 import time
+import uuid
 
 from . import __version__
 from .artifacts import journal as artifact_journal, stream
-from .common import BackupError, State, atomic_json
+from .common import BackupError, State, atomic_json, read_json, private_file
 from .config import DEFAULTS, bridge, load, load_policy, normalize, redact, validate
 from .engine import capture, export, plan, verify
 from .maintenance import recover, schedule_admission
 from .presentation import overview
 from .requests import cancel, create, list_requests, tick, worker
-from .process import safe_environment
+from .native_writer import run as run_native_writer
 from .storage import clean_environment, delete_plan, delete_run, deliver, destination_test, retention, retrieve, retrieve_plan
 
 
@@ -96,67 +97,226 @@ def parser():
     return result
 
 
+def native_settings(args, state, values, descriptors, actor=None, restore=False, finalize=False):
+    """Audited native rows; inherited flocks prove the coordinator owns publication."""
+    command = [args.php, str(state.app / "artisan"), "backups:config-set", "--defer-init",
+               "--config-lock-fd=" + str(descriptors[0]), "--tick-lock-fd=" + str(descriptors[1]),
+               "--coordination-root=" + str(state.root)]
+    if restore:
+        command.append("--restore")
+    if finalize:
+        command.append("--finalize")
+    if actor is not None:
+        command.append("--actor=" + str(actor))
+    try:
+        result = run_native_writer(command, json.dumps(values).encode(), descriptors)
+        if result.returncode:
+            try:
+                refusal = json.loads(result.stderr)
+                code = refusal.get("error") if isinstance(refusal, dict) else None
+            except (ValueError, UnicodeDecodeError):
+                code = None
+            safe_refusals = {"config-changed", "credentials-unreadable", "credentials-invalid", "maintenance-probe-credentials-invalid",
+                "maintenance-probe-origin-mismatch", "maintenance-probe-origin-invalid", "installation-missing", "installation-mismatch",
+                "private-file-invalid", "private-root-invalid", "billing-settings-unreadable", "extension-uninstalled"}
+            if finalize and code in safe_refusals:
+                raise BackupError(code)
+            raise BackupError("config-write-failed" if code == "config-coordination-required" else "config-write-outcome-unknown")
+        output = json.loads(result.stdout)
+        if not isinstance(output, dict) or output.get("ok") is not True:
+            raise ValueError()
+        return output
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        raise BackupError("config-write-outcome-unknown") from None
+
+
+def finish_config_save(state):
+    path = state.root / "config-save.json"
+    intent = configuration_file_snapshot(path)
+    path.unlink(missing_ok=True)
+    try:
+        descriptor = os.open(state.root, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+    except OSError:
+        if intent is not None:
+            restore_configuration_file(path, intent)
+        raise
+
+
+def configuration_file_snapshot(path):
+    if path.exists() or path.is_symlink():
+        private_file(path)
+        return path.read_bytes()
+    return None
+
+
+def restore_configuration_file(path, snapshot):
+    """Restore exact private bytes/existence, with durable publication under locks."""
+    if snapshot is None:
+        path.unlink(missing_ok=True)
+    else:
+        temporary = path.parent / ("." + path.name + "." + uuid.uuid4().hex)
+        descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        try:
+            with os.fdopen(descriptor, "wb") as stream:
+                stream.write(snapshot)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, path)
+        finally:
+            temporary.unlink(missing_ok=True)
+    descriptor = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
 def set_config(args, state, changes):
     credentials = changes.pop("credentials", None)
     probe_credentials = changes.pop("maintenance_probe_credentials", None)
+    actor = changes.pop("_actor", None)
+    if actor is not None and (type(actor) is not int or actor <= 0):
+        raise BackupError("config-invalid")
     if "settings" in changes and set(changes) != {"settings"}:
         raise BackupError("config-invalid")
     settings = changes.pop("settings", changes)
     if not isinstance(settings, dict):
         raise BackupError("config-invalid")
-    permitted = set(DEFAULTS) | {"private_root", "python", "php", "dump", "mysql", "tar", "gzip"}
+    permitted = set(DEFAULTS) | {"private_root"}
     if set(settings) - permitted:
         raise BackupError("config-invalid")
-    envelope = bridge(args, "read-settings")
-    require_fresh_plaintext_ack(envelope.get("settings", {}), settings)
-    envelope["settings"] = {**DEFAULTS, **envelope.get("settings", {}), **settings}
-    normalize(envelope["settings"])
-    override_tools(envelope, settings, getattr(args, "php", envelope.get("tools", {}).get("php", "/usr/bin/php")))
-    validate(envelope)
-    if probe_credentials is not None and probe_credentials != {"clear": True}:
-        from .maintenance import probe_authorization
-        probe_authorization(probe_credentials, envelope["framework"].get("app_url", ""))
-    state.apply_policy(envelope["settings"])
-    schedule_admission(state, envelope)
-    with state.lock("config.lock"), state.lock("tick.lock", timeout=10):
-        # Re-read after acquiring the scheduler lock. A previously read envelope
-        # must never reset a schedule epoch saved by another administrator.
-        envelope = bridge(args, "read-settings")
-        require_fresh_plaintext_ack(envelope.get("settings", {}), settings)
-        envelope["settings"] = {**DEFAULTS, **envelope.get("settings", {}), **settings}
+    # One deadline for both coordination locks. Neither native rows nor secrets
+    # are read for publication before the authoritative locked baseline.
+    deadline = time.monotonic() + 10
+    with state.lock("config.lock", timeout=10) as config_fd, state.lock("tick.lock", timeout=max(0, deadline - time.monotonic())) as tick_fd:
+        descriptors = (config_fd, tick_fd)
+        original = bridge(args, "read-settings")
+        if "private_root" in settings and pathlib.Path(settings["private_root"] or state.app.parent / "paymenter-backups-private").resolve() != state.root:
+            raise BackupError("private-root-move-refused")
+        envelope = {**original, "settings": {**DEFAULTS, **original.get("settings", {}), **settings}}
+        require_fresh_plaintext_ack(original.get("settings", {}), settings)
         normalize(envelope["settings"])
         override_tools(envelope, settings, getattr(args, "php", envelope.get("tools", {}).get("php", "/usr/bin/php")))
         validate(envelope)
         state.apply_policy(envelope["settings"])
+        if envelope["settings"]["local_path"]:
+            local = pathlib.Path(envelope["settings"]["local_path"]).resolve()
+            if local == state.app or state.app in local.parents:
+                raise BackupError("destination-unsafe")
+            state.guard_location(local, "destination-inside-docroot")
         schedule_admission(state, envelope)
-        if probe_credentials is not None and probe_credentials != {"clear": True}:
-            probe_authorization(probe_credentials, envelope["framework"].get("app_url", ""))
-        if settings:
-            from .requests import freeze_legacy_requests
-            original = bridge(args, "read-settings").get("settings", {})
-            freeze_legacy_requests(state, original.get("mode", "full-quiesced"))
+        secrets = credentials is not None or probe_credentials is not None
+        merge = {"s3": credentials, "site": probe_credentials}
+        if secrets:
+            if probe_credentials is not None and probe_credentials != {"clear": True}:
+                from .maintenance import probe_authorization
+                probe_authorization(probe_credentials, envelope["framework"].get("app_url", ""))
+            bridge(args, "credentials-check", merge)
+        pending_path = state.root / "config-save.json"
+        previous_intent = configuration_file_snapshot(pending_path)
+        if previous_intent is not None:
+            pending = read_json(pending_path)
+            if pending.get("s3_requested") and credentials is None or pending.get("site_requested") and probe_credentials is None:
+                raise BackupError("config-save-outcome-unknown")
+        derived_before = {state.root / name: configuration_file_snapshot(state.root / name)
+                          for name in ("schedule.json", "policy.json", "configuration-advisory.json")}
+        atomic_json(pending_path, {"schema_version": 1, "s3_requested": credentials is not None,
+                                  "site_requested": probe_credentials is not None})
+        current_intent = pending_path.read_bytes()
+        receipt = {}
+        committed_credentials = False
+        credentials_attempted = False
+        from .requests import _sync_schedule
+        try:
+            if settings:
+                from .requests import freeze_legacy_requests
+                freeze_legacy_requests(state, original.get("settings", {}).get("mode", "full-quiesced"))
             values = {key: json.dumps(value) if isinstance(value, list) else value for key, value in settings.items()}
-            try:
-                result = subprocess.run([args.php, str(state.app / "artisan"), "backups:config-set", "--defer-init"],
-                    input=json.dumps(values).encode(), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                    close_fds=True, timeout=30, env=safe_environment())
-                if result.returncode:
-                    raise BackupError("config-write-failed")
-            except (OSError, subprocess.TimeoutExpired):
-                raise BackupError("config-write-failed") from None
-        if credentials is not None and credentials != {"clear": True} and probe_credentials != {"clear": True}:
-            bridge(args, "credentials-merge", {"s3": credentials, "site": probe_credentials})
-        else:
-            if credentials is not None:
-                bridge(args, "credentials-write", credentials)
-            if probe_credentials is not None:
-                bridge(args, "maintenance-probe-credentials-write", probe_credentials)
-        persisted = load(args, credential_free=True)
-        state.apply_policy(persisted["settings"], write=True)
-        if settings:
-            from .requests import _sync_schedule
+            native = native_settings(args, state, values, descriptors, actor)
+            receipt, snapshot = native.get("receipt"), native.get("snapshot")
+            if not isinstance(receipt, dict) or not isinstance(snapshot, dict):
+                raise BackupError("config-write-outcome-unknown")
+            # Initialization/validation uses no credential read and holds the same
+            # coordination locks, so publication cannot expose an intermediate pair.
+            persisted = load(args, credential_free=True, coordinated=False)
+            if persisted["settings"] != envelope["settings"]:
+                raise BackupError("config-changed")
+            State(state.app, state.root, initialize=True, extra_docroots=persisted["settings"]["extra_docroots"])
+            state.apply_policy(persisted["settings"], write=True)
+            if secrets:
+                credentials_attempted = True
+                native_settings(args, state, {"snapshot": snapshot, "credentials": merge}, descriptors, actor, finalize=True)
+                committed_credentials = True
             _sync_schedule(state, persisted["settings"], time.time())
-    return {"updated": True, "credentials_updated": credentials is not None, "maintenance_probe_credentials_updated": probe_credentials is not None}
+            atomic_json(state.root / "configuration-advisory.json", {"schema_version": 1, "checked_at": time.time(), "valid": True})
+            finish_config_save(state)
+        except (BackupError, OSError) as error:
+            failure = error if isinstance(error, BackupError) else BackupError("config-save-failed")
+            definite_credential_refusals = {"config-changed", "credentials-unreadable", "credentials-invalid", "maintenance-probe-credentials-invalid",
+                "maintenance-probe-origin-mismatch", "maintenance-probe-origin-invalid", "installation-missing", "installation-mismatch",
+                "private-file-invalid", "private-root-invalid", "billing-settings-unreadable", "extension-uninstalled"}
+            if failure.code == "config-write-outcome-unknown" or credentials_attempted and not committed_credentials and failure.code not in definite_credential_refusals:
+                # A child may have committed before timing out or losing stdout.
+                # Keep the guard durable: workers refuse either possibly mixed
+                # pair until a later complete Save supplies the uncertain groups.
+                return {"updated": False, "credentials_updated": False, "maintenance_probe_credentials_updated": False,
+                        "partial": True, "error": "config-save-outcome-unknown", "settings_restored": False, "outcome_unknown": True}
+            if committed_credentials:
+                # Credentials are durably committed. Restoring destination rows
+                # would publish an old destination/new-key pair instead.
+                try:
+                    finish_config_save(state)
+                except OSError:
+                    return {"updated": True, "credentials_updated": credentials is not None,
+                            "maintenance_probe_credentials_updated": probe_credentials is not None,
+                            "partial": True, "error": "config-save-outcome-unknown", "outcome_unknown": True}
+                return {"updated": True, "credentials_updated": credentials is not None,
+                        "maintenance_probe_credentials_updated": probe_credentials is not None,
+                        "partial": True, "error": failure.code, "settings_restored": False}
+            try:
+                # Cleanup may unlink the intent before directory fsync fails.
+                # Reestablish it before rollback, which can itself fail.
+                if not pending_path.exists():
+                    restore_configuration_file(pending_path, previous_intent or current_intent)
+                skipped = native_settings(args, state, receipt, descriptors, actor, restore=True).get("skipped", []) if receipt else []
+                restored = load(args, credential_free=True, coordinated=False)
+                baseline = {**DEFAULTS, **original.get("settings", {})}
+                try:
+                    normalize(baseline)
+                except BackupError:
+                    baseline = None
+                concurrent_changes = restored["settings"] != baseline
+                for path, snapshot in derived_before.items():
+                    restore_configuration_file(path, snapshot)
+                state.apply_policy(restored["settings"], write=concurrent_changes)
+                if concurrent_changes:
+                    _sync_schedule(state, restored["settings"], time.time())
+                if previous_intent is not None:
+                    # A definite refusal in this attempt cannot establish what
+                    # an earlier writer committed. Only confirmed replacement
+                    # of every uncertain namespace resolves the earlier guard.
+                    restore_configuration_file(pending_path, previous_intent)
+                else:
+                    finish_config_save(state)
+            except (BackupError, OSError):
+                try:
+                    if not pending_path.exists():
+                        restore_configuration_file(pending_path, previous_intent or current_intent)
+                except OSError:
+                    return {"updated": False, "credentials_updated": False, "maintenance_probe_credentials_updated": False,
+                            "partial": True, "error": "config-save-outcome-unknown", "settings_restored": False, "outcome_unknown": True}
+                return {"updated": False, "credentials_updated": False, "maintenance_probe_credentials_updated": False,
+                        "partial": True, "error": failure.code, "settings_restored": False}
+            if skipped:
+                return {"updated": False, "credentials_updated": False, "maintenance_probe_credentials_updated": False,
+                        "partial": True, "error": failure.code, "settings_restored": False, "concurrent_settings_preserved": True}
+            raise failure
+    return {"updated": True, "credentials_updated": credentials is not None,
+            "maintenance_probe_credentials_updated": probe_credentials is not None}
 
 
 def dispatch(args):
@@ -169,7 +329,12 @@ def dispatch(args):
     preliminary = bridge(args, "read-settings") if initialize else None
     if preliminary:
         preliminary["settings"] = {**DEFAULTS, **preliminary.get("settings", {})}
-        normalize(preliminary["settings"])
+        # config set may repair malformed native scalars/optional lists. Its
+        # locked authoritative baseline is normalized only after applying the
+        # submitted repairs. The cold bridge still validates document roots
+        # before State can use those privacy boundaries.
+        if not (command == "config" and args.verb == "set"):
+            normalize(preliminary["settings"])
     if command == "init":
         # Refuse invalid settings before any identity is created.
         validate(preliminary)
@@ -179,15 +344,22 @@ def dispatch(args):
     if command in KEY_COMMANDS:
         return key_dispatch(args, state, bridge, stdin_json)
     if command == "init":
-        state.apply_policy(preliminary["settings"], write=True)
-        from .requests import sync_schedule
-        sync_schedule(state, preliminary["settings"], settings_loader=lambda: load(args, credential_free=True)["settings"])
+        deadline = time.monotonic() + 10
+        with state.lock("config.lock", timeout=10), state.lock("tick.lock", timeout=max(0, deadline - time.monotonic())):
+            if (state.root / "config-save.json").exists():
+                raise BackupError("config-save-outcome-unknown")
+            current = load(args, credential_free=True, coordinated=False)
+            state.apply_policy(current["settings"], write=True)
+            from .requests import _sync_schedule
+            _sync_schedule(state, current["settings"], time.time())
         return {"initialized": True, "installation_uuid": state.uuid}
     if command == "overview":
         envelope, error = None, None
         if not args.offline:
             try:
-                envelope = bridge(args)
+                with state.lock("config.lock", timeout=10, create=state.initialized):
+                    envelope = bridge(args)
+                    pending_save = (state.root / "config-save.json").exists()
                 envelope["settings"] = {**DEFAULTS, **envelope.get("settings", {})}
                 normalize(envelope["settings"])
             except BackupError as failure:
@@ -199,6 +371,9 @@ def dispatch(args):
                 except BackupError as failure:
                     error = failure.code
                     envelope["validation_error"] = {"field": failure.field, "detail": failure.detail}
+                if pending_save:
+                    error = "config-save-outcome-unknown"
+                    envelope["validation_error"] = {"field": None, "detail": {}}
         return overview(state, envelope, error)
     if command == "artifact-stream":
         return stream_artifact(state, args)
@@ -331,7 +506,7 @@ def dispatch(args):
         # sys.argv[0] is a release wrapper, preserving its isolated runtime paths.
         prefix = [envelope["tools"].get("python", sys.executable), "-I", str(pathlib.Path(sys.argv[0]).resolve()),
                   "--app", args.app, "--private-root", args.private_root, "--bridge", args.bridge, "--php", args.php]
-        return tick(state, envelope, prefix, envelope_loader=lambda: load(args))
+        return tick(state, envelope, prefix, envelope_loader=lambda: load(args, coordinated=False))
     raise BackupError("command-invalid")
 
 

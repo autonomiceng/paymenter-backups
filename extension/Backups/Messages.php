@@ -7,6 +7,12 @@ final class Messages
     private const ERRORS = [
         // Scheduling and admission
         'busy' => 'Another backup task was running. This one will try again next minute.',
+        'config-changed' => 'Settings changed while Save was in progress. Refresh and enter your changes again.',
+        'config-save-outcome-unknown' => 'A previous Save could not be confirmed. Check settings and enter replacement keys again to complete Save before backup work resumes.',
+        'config-save-failed' => 'Setup could not finish. Refresh and check the saved settings.',
+        'config-coordination-required' => 'The configuration writer could not prove that Save owns its locks. Run the ordinary Save command again.',
+        'config-save-incomplete' => 'The configuration save did not finish. Refresh and check the saved settings and keys.',
+        'config-write-outcome-unknown' => 'The setting write could not be confirmed. Check settings and complete Save before backup work resumes.',
         'billing-guard-stale' => 'Full backups need Paymenter\'s cron job to have run in the last few minutes, so they can avoid the daily billing run. Check the cron job on the Backups tab.',
         'billing-window-protected' => 'Waiting until Paymenter\'s daily billing run is over.',
         'schedule-overlaps-billing' => 'This time is too close to Paymenter\'s daily billing run. Pick a time outside the window shown under the time.',
@@ -463,7 +469,7 @@ final class Messages
     {
         $suggest = $context['suggestions'] ?? [];
         $user = $context['crontab_user'] ?? null;
-        $cronLead = 'Add this line to the crontab of ' . ($user ?: 'the site user') . ' (run crontab -e as that user). If a schedule:run line is already there, replace it.';
+        $cronLead = 'Add this line to the crontab of ' . ($user ?: 'the site user') . ' with crontab -e. If a schedule:run line is already there, replace it.';
         $scheduler = filled($suggest['scheduler'] ?? null) ? [['lead' => $cronLead, 'code' => $suggest['scheduler']]] : [];
         $settings = static fn (string $label, string $target) => ['kind' => 'settings', 'label' => $label, 'target' => $target];
         $item = static fn (string $title, string $text, array $fixes = [], ?array $action = null, string $tone = 'warning') => compact('title', 'text', 'fixes', 'action', 'tone');
@@ -482,10 +488,18 @@ final class Messages
             case 'installation-missing':
                 return $item('Save your settings', 'This creates the private data directory for backup history and saved keys.', [], $settings('Go to Settings', 'settings'), 'info');
             case 'scheduler-missing':
-                return $item('Add Paymenter\'s cron job', 'Backups run from Paymenter\'s scheduler, once a minute. No cron job runs it yet.', $scheduler);
             case 'billing-guard-stale':
                 $last = $context['last_tick'] ?? null;
-                return $item('Paymenter\'s cron job isn\'t running', ($last ? 'It last ran ' . $last . '.' : 'It hasn\'t run yet.') . ' It should run every minute.', $scheduler);
+                if ($context['cron_fresh'] ?? false) {
+                    return $item('Find Paymenter\'s cron job', 'Paymenter\'s scheduler runs, but not from a cron job Backups can read for ' . ($user ?: 'the site user') . '. Full backups need to pause it with a lock file.', $scheduler);
+                }
+                return $last
+                    ? $item('Paymenter\'s cron job isn\'t running', 'It last ran ' . $last . '. Backups, uploads and checks wait until it runs again, once a minute.', $scheduler)
+                    : $item('Add Paymenter\'s cron job', 'Backups, uploads and checks run from it, once a minute. It hasn\'t run yet.', $scheduler);
+            case 'storage-untested':
+                return $item('Test your storage', ($context['cron_fresh'] ?? false)
+                    ? 'Writes, reads and deletes a small test file where backups are stored.'
+                    : 'Writes, reads and deletes a small test file where backups are stored. It runs once Paymenter\'s cron job runs.', [], ['kind' => 'test-storage', 'label' => 'Test storage', 'target' => null], 'info');
             case 'job-uncoordinated':
                 $isQueue = ($job['kind'] ?? null) === 'queue-worker';
                 $fix = $isQueue ? $queueFix : $scheduler;
@@ -527,7 +541,7 @@ final class Messages
                 foreach ($stores as $store) {
                     if (is_string($store['env'] ?? null) && is_string($store['suggest'] ?? null)) { $lines[] = $store['env'] . '=' . $store['suggest']; }
                 }
-                $fixes = $lines ? [['lead' => 'Change these in ' . ($context['env_path'] ?? '.env') . ', then run php artisan config:cache if you cache config. Users are logged out once.', 'code' => implode("\n", $lines)]] : [];
+                $fixes = array_map(static fn ($line, $index) => ['lead' => $index === 0 ? 'Change these in ' . ($context['env_path'] ?? '.env') . ', then run php artisan config:cache if you cache config. Users are logged out once.' : null, 'code' => $line], $lines, array_keys($lines));
                 return $item('Paymenter stores data in ' . $named, 'Full backups can\'t copy data held outside Paymenter\'s database and files.', $fixes);
             case 'maintenance-driver-unsupported':
                 return $item('Use file-based maintenance mode', 'Full backups show Paymenter\'s maintenance page and need it stored as a file.', [['lead' => 'Set this in ' . ($context['env_path'] ?? '.env') . ':', 'code' => 'APP_MAINTENANCE_DRIVER=file']]);

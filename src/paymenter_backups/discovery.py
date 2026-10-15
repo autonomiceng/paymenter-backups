@@ -20,19 +20,46 @@ from .process import run, probe
 PHP_NAME = re.compile(r'(?:php(?:[0-9]+(?:\.[0-9]+)?)?|php-cli|ea-php[0-9]+|lsphp[0-9]+)')
 UNIT_NAME = re.compile(r'(?:[A-Za-z0-9_]|\\x[0-9A-Fa-f]{2})(?:[A-Za-z0-9_.@:-]|\\x[0-9A-Fa-f]{2}){0,199}\.service')
 KINDS = {'schedule:run': 'scheduler', 'queue:work': 'queue-worker', 'queue:listen': 'queue-worker', 'horizon': 'queue-worker', 'schedule:work': 'scheduler'}
+PARSER_VERSION = 2
+
+
+def cron_quote(value):
+    # Keep each percent outside the shell-quoted fragments. A backslash at the
+    # end of a fragment then cannot consume the cron escape for the percent.
+    return r'\%'.join(shlex.quote(part) for part in value.split('%'))
+
+
+def cron_command(line):
+    """Apply cron's pre-shell escaping; stdin-delimited commands refuse."""
+    result = []
+    index = 0
+    while index < len(line):
+        character = line[index]
+        if character == '%':
+            raise ValueError('cron stdin is unsupported')
+        if character == '\\' and index + 1 < len(line):
+            index += 1
+            character = line[index]
+            if character != '%':
+                result.append('\\')
+        result.append(character)
+        index += 1
+    return ''.join(result)
 
 
 def suggestions(state, envelope):
     php = envelope.get('tools', {}).get('php') or '/usr/bin/php'
     prefix = '* * * * * /usr/bin/flock -n '
-    suffix = ' ' + shlex.quote(php) + ' ' + shlex.quote(str(state.app / 'artisan'))
-    return {'scheduler': prefix + shlex.quote(str(state.root / 'scheduler.lock')) + suffix + ' schedule:run >/dev/null 2>&1',
-            'queue': prefix + shlex.quote(str(state.root / 'queue.lock')) + suffix + ' queue:work --stop-when-empty --max-time=50 >/dev/null 2>&1'}
+    suffix = ' ' + cron_quote(php) + ' ' + cron_quote(str(state.app / 'artisan'))
+    return {'scheduler': prefix + cron_quote(str(state.root / 'scheduler.lock')) + suffix + ' schedule:run >/dev/null 2>&1',
+            'queue': prefix + cron_quote(str(state.root / 'queue.lock')) + suffix + ' queue:work --stop-when-empty --max-time=50 >/dev/null 2>&1'}
 
 
 def parse(line, app, cron=True, working=None):
     """Return validated tokens only. Shell interpretation/wrappers fail closed."""
     try:
+        if cron:
+            line = cron_command(line)
         # Only the documented /dev/null tail is removed, never arbitrary redirects.
         line = re.sub(r'\s*(?:>>|>)\s*/dev/null(?:\s+2>&1)?\s*$', '', line)
         tokens = shlex.split(line, comments=True)
@@ -110,13 +137,17 @@ def parse(line, app, cron=True, working=None):
         raise BackupError('job-command-unsupported') from None
 
 
-def relevant(line, app, working=None):
+def relevant(line, app, working=None, cron=True):
     if not any(word in line for word in KINDS):
         return False
-    if working == str(app) or re.search(re.escape(str(app)) + r'(?:/|[\s;\'\"]|$)', line):
+    try:
+        shell = cron_command(line) if cron else line
+    except ValueError:
+        return 'artisan' in line
+    if working == str(app) or re.search(re.escape(str(app)) + r'(?:/|[\s;\'\"]|$)', shell):
         return True
     try:
-        tokens = shlex.split(line)
+        tokens = shlex.split(shell)
     except ValueError:
         return 'artisan' in line
     # A directly identified different application's absolute artisan is outside
@@ -130,7 +161,7 @@ def relevant(line, app, working=None):
             if len(matches) == 1:
                 invocation = matches[0]
         try:
-            parse(invocation, other_app, cron=working is None, working=working)
+            parse(invocation, other_app, cron=cron, working=working)
         except BackupError:
             pass
         else:
@@ -223,7 +254,7 @@ def systemd(app, tools):
                     raise ValueError()
                 seen.add(unit)
                 execution, working = props.get('ExecStart', ''), props.get('WorkingDirectory')
-                if props.get('LoadState') != 'loaded' or not relevant(execution, app, working):
+                if props.get('LoadState') != 'loaded' or not relevant(execution, app, working, cron=False):
                     continue
                 owner = props.get('User', '')
                 uid = os.getuid() if '--user' in manager and not owner else int(owner) if owner.isdecimal() else pwd.getpwnam(owner or 'root').pw_uid
@@ -256,7 +287,7 @@ def discover(state, envelope, now=None):
             raise BackupError('job-discovery-incomplete')
     except (OSError, UnicodeError, BackupError) as failure:
         error = failure.code if isinstance(failure, BackupError) and failure.code in ('job-discovery-failed', 'job-discovery-incomplete') else 'job-discovery-incomplete' if isinstance(failure, BackupError) and failure.code == 'child-output-limit' else 'job-discovery-failed'
-    return {'schema_version': 1, 'parser_version': 1, 'app': str(state.app),
+    return {'schema_version': 1, 'parser_version': PARSER_VERSION, 'app': str(state.app),
             'checked_at': time.time() if now is None else now, 'state': 'failed' if error else 'ok',
             'error': error, 'items': items[:256]}
 
@@ -267,7 +298,7 @@ def cached(state, now=None):
         target = state.root / 'discovery.json'
         private_file(target)
         value = read_json(target)
-        if value.get('app') != str(state.app) or value.get('parser_version') != 1 or type(value.get('checked_at')) not in (int, float) or not isinstance(value.get('items'), list) or len(value['items']) > 256:
+        if value.get('app') != str(state.app) or value.get('parser_version') != PARSER_VERSION or type(value.get('checked_at')) not in (int, float) or not isinstance(value.get('items'), list) or len(value['items']) > 256:
             raise ValueError()
         # Reconstruct rather than exposing cached command material wholesale.
         for item in value['items']:

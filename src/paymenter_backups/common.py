@@ -147,10 +147,16 @@ class State:
             for name in ("scheduler.lock", "queue.lock"):
                 # Only our suggested launcher locks are created; discovered locks
                 # elsewhere remain the launcher's responsibility.
-                with self.lock(name) as descriptor:
+                descriptor = os.open(self.root / name, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
+                try:
                     info = os.fstat(descriptor)
-                    if stat.S_IMODE(info.st_mode) != 0o600 or info.st_nlink != 1:
+                    named = (self.root / name).lstat()
+                    if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
+                            or stat.S_IMODE(info.st_mode) != 0o600 or info.st_nlink != 1
+                            or (info.st_dev, info.st_ino) != (named.st_dev, named.st_ino)):
                         raise BackupError("private-state-permissions")
+                finally:
+                    os.close(descriptor)
 
     def guard_location(self, path, code="destination-inside-docroot"):
         canonical = pathlib.Path(path).resolve()
