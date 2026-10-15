@@ -4,15 +4,18 @@ import os
 import pathlib
 import subprocess
 import sys
+import time
 
 from . import __version__
-from .common import BackupError, State
+from .artifacts import stream
+from .common import BackupError, State, atomic_json
 from .config import DEFAULTS, bridge, load, normalize, redact, validate
 from .engine import capture, export, plan, verify
 from .maintenance import recover, schedule_admission
+from .presentation import overview
 from .requests import cancel, create, list_requests, tick, worker
 from .process import safe_environment
-from .storage import clean_environment, deliver, destination_test, retention
+from .storage import clean_environment, delete_plan, delete_run, deliver, destination_test, retention
 
 
 def stdin_json():
@@ -38,7 +41,7 @@ def parser():
     result.add_argument("--bridge")
     result.add_argument("--php", default="/usr/bin/php")
     commands = result.add_subparsers(dest="command", required=True)
-    for name, verbs in (("config", ("show", "set", "validate")), ("schedule", ("show", "set", "enable", "disable"))):
+    for name, verbs in (("config", ("show", "set", "validate", "check")), ("schedule", ("show", "set", "enable", "disable"))):
         sub = commands.add_parser(name)
         sub.add_argument("verb", choices=verbs)
     commands.add_parser("plan")
@@ -47,10 +50,16 @@ def parser():
     sub.add_argument("--mode", choices=("full-quiesced", "database-online"))
     commands.add_parser("list")
     commands.add_parser("status")
+    sub = commands.add_parser("overview", help="Whitelisted backup, task and readiness summary without paths or manifests")
+    sub.add_argument("--offline", action="store_true", help="Skip configuration and readiness checks")
     commands.add_parser("init", help="Explicitly initialize owner-private installation state")
     sub = commands.add_parser("verify")
     sub.add_argument("run_id")
     sub.add_argument("--show", action="store_true")
+    sub.add_argument("--record", action="store_true", help="Record the verified archive identity, enabling admin download")
+    sub = commands.add_parser("delete", help="Preview, or with --execute delete, one backup's owned copies")
+    sub.add_argument("run_id")
+    sub.add_argument("--execute", action="store_true")
     sub = commands.add_parser("deliver")
     sub.add_argument("run_id")
     sub = commands.add_parser("retention")
@@ -59,7 +68,7 @@ def parser():
     sub = commands.add_parser("requests")
     sub.add_argument("verb", choices=("list", "cancel", "create"))
     sub.add_argument("request_id", nargs="?")
-    sub.add_argument("--action", choices=("run", "verify", "deliver", "retention", "destination-test"), default="run")
+    sub.add_argument("--action", choices=("run", "verify", "deliver", "retention", "destination-test", "delete"), default="run")
     sub = commands.add_parser("recover")
     sub.add_argument("verb", nargs="?", choices=("acknowledge",))
     sub.add_argument("--auto", action="store_true")
@@ -70,6 +79,9 @@ def parser():
     sub.add_argument("--output", required=True)
     sub = commands.add_parser("tick", help=argparse.SUPPRESS)
     sub.add_argument("--execute", action="store_true")
+    sub = commands.add_parser("artifact-stream", help=argparse.SUPPRESS)
+    sub.add_argument("run_id")
+    sub.add_argument("--actor", type=int)
     sub = commands.add_parser("request-worker", help=argparse.SUPPRESS)
     sub.add_argument("request_id")
     sub.add_argument("--execute", action="store_true")
@@ -126,12 +138,32 @@ def dispatch(args):
     if preliminary:
         preliminary["settings"] = {**DEFAULTS, **preliminary.get("settings", {})}
         normalize(preliminary["settings"])
+    if command == "init":
+        # Refuse invalid settings before any identity is created.
+        validate(preliminary)
     state = State(args.app, args.private_root, initialize=initialize,
                   extra_docroots=preliminary["settings"]["extra_docroots"] if preliminary else None)
     if command == "init":
-        validate(preliminary)
         state.apply_policy(preliminary["settings"], write=True)
         return {"initialized": True, "installation_uuid": state.uuid}
+    if command == "overview":
+        envelope, error = None, None
+        if not args.offline:
+            try:
+                envelope = bridge(args)
+                envelope["settings"] = {**DEFAULTS, **envelope.get("settings", {})}
+                normalize(envelope["settings"])
+            except BackupError as failure:
+                envelope, error = None, failure.code
+            if envelope is not None:
+                try:
+                    validate(envelope)
+                    state.apply_policy(envelope["settings"])
+                except BackupError as failure:
+                    error = failure.code
+        return overview(state, envelope, error)
+    if command == "artifact-stream":
+        return stream_artifact(state, args)
     if command in ("status", "list"):
         journals = state.journals()
         if command == "list":
@@ -140,6 +172,11 @@ def dispatch(args):
                 "unresolved": [item["run_id"] for item in journals if not item.get("service_recovered") and not item.get("recovery_acknowledged")],
                 "maintenance": (state.app / "storage/framework/down").exists(), "requests": list_requests(state)}
     if command == "verify":
+        if args.record:
+            if not state.initialized:
+                raise BackupError("installation-not-initialized")
+            with state.lock():
+                return verify(state, args.run_id, args.show, record=True)
         return verify(state, args.run_id, args.show)
     if command == "export":
         return export(state, args.run_id, args.output)
@@ -162,6 +199,8 @@ def dispatch(args):
             return redact(bridge(args))
         if args.verb == "set":
             return set_config(args, state, stdin_json())
+        if args.verb == "check":
+            return check_config(args, state, stdin_json())
         envelope = load(args)
         state.apply_policy(envelope["settings"])
         schedule_admission(state, envelope)
@@ -179,6 +218,7 @@ def dispatch(args):
             return {"execute_required": True}
         if not state.initialized:
             return {"initialized": False, "recovery": []}
+        atomic_json(state.root / "scheduler.json", {"schema_version": 1, "last_tick_at": time.time()})
         recovery = recover(state, auto=True)
         if (state.app / "storage/framework/down").exists():
             return {"maintenance": True, "recovery": recovery}
@@ -203,6 +243,10 @@ def dispatch(args):
         return result
     if command == "retention":
         return retention(state, envelope, args.verb == "apply")
+    if command == "delete":
+        if not args.execute:
+            return delete_plan(state, envelope, args.run_id)
+        return delete_run(state, envelope, args.run_id)
     if command == "destination-test":
         with state.lock():
             return destination_test(state, envelope)
@@ -218,6 +262,59 @@ def dispatch(args):
     raise BackupError("command-invalid")
 
 
+def check_config(args, state, changes):
+    """Authoritative validation of proposed nonsecret settings; writes nothing."""
+    settings = changes.get("settings") if set(changes) == {"settings"} else None
+    if not isinstance(settings, dict):
+        raise BackupError("config-invalid")
+    permitted = set(DEFAULTS) | {"private_root", "python", "php", "dump", "mysql", "tar", "gzip"}
+    if set(settings) - permitted:
+        raise BackupError("config-invalid")
+    envelope = bridge(args)
+    envelope["settings"] = {**DEFAULTS, **envelope.get("settings", {}), **settings}
+    normalize(envelope["settings"])
+    for name in ("python", "php", "dump", "mysql", "tar", "gzip"):
+        if name in settings:
+            envelope.setdefault("tools", {})[name] = settings[name]
+    validate(envelope)
+    state.apply_policy(envelope["settings"])
+    if envelope["settings"]["local_path"]:
+        # The same location rule capture applies, checked before anything is saved.
+        local = pathlib.Path(envelope["settings"]["local_path"]).resolve()
+        if local == state.app or state.app in local.parents:
+            raise BackupError("destination-unsafe")
+        state.guard_location(local, "destination-inside-docroot")
+    schedule_admission(state, envelope)
+    return {"valid": True}
+
+
+def stream_artifact(state, args):
+    if os.isatty(1):
+        raise BackupError("artifact-stream-pipe-required")
+    if not state.initialized:
+        raise BackupError("installation-not-initialized")
+    outcome, size = "failed", 0
+    try:
+        result = stream(state, args.run_id, 1)
+        outcome, size = "complete", result["size"]
+        return None
+    except BrokenPipeError:
+        outcome = "interrupted"
+        return None
+    except BackupError as error:
+        outcome = error.code
+        raise
+    finally:
+        audit = {"at": time.time(), "event": "download", "run_id": args.run_id if isinstance(args.run_id, str) and len(args.run_id) <= 100 else None,
+                 "actor": args.actor, "outcome": outcome, "bytes": size}
+        descriptor = os.open(state.root / "audit.jsonl", os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+        try:
+            os.write(descriptor, (json.dumps(audit, sort_keys=True) + "\n").encode())
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+
+
 def apply_automatic_retention(state, envelope, result):
     if envelope["settings"]["automatic_retention"]:
         try:
@@ -230,6 +327,8 @@ def main(argv=None):
     args = parser().parse_args(argv)
     try:
         result = dispatch(args)
+        if args.command == "artifact-stream":
+            return 0
         print(json.dumps(redact(result), sort_keys=True, indent=2))
         return 0
     except BackupError as error:
