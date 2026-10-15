@@ -51,4 +51,4 @@ jobs:
             php -l "$source"
           done < <(find extension tests/integration -name '*.php' -print0)
       - run: python tools/build_release.py
-      - run: python tools/native_integration.py --release dist/Backups-0.2.0.zip --composer "$(command -v composer)"
+      - run: python tools/native_integration.py --release dist/Backups-0.3.0.zip --composer "$(command -v composer)"

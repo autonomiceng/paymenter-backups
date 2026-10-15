@@ -6,6 +6,33 @@ files live outside the app and are excluded from every archive and recovery kit.
 APP_KEY encryption protects a separately leaked credential file; a compromised
 application UID can read APP_KEY and has access to the credentials.
 
+Each backup tracks its local and S3 copies independently. Expiring a local copy
+does not expire its S3 copy. Use Retrieve from S3 on the page, or `retrieve ID
+--execute` from the CLI, to verify and restore a local copy before downloading.
+Retrieval respects disk limits and protects the resulting local copy from
+automatic retention for 24 hours. It never overwrites an existing archive or
+manifest. Verification and retrieval require the recorded S3 destination and
+working keys. A changed endpoint, region, bucket, prefix or addressing style
+preserves the old copy and refuses operations in the new location.
+
+Local-only deletion can leave S3 intact. S3-only deletion can leave the local
+Download intact, including after an interruption. Whole-run deletion is recorded
+only after all known copies are removed. Each affected location must retain
+another fully verified backup. Cleanup reports damaged, missing and out-of-scope
+copies rather than treating them as deleted or blocking unrelated retention.
+
+For legacy unbound remote records, an explicit delivery retry with a surviving
+verified local archive can establish the current destination. A missing local
+manifest can be reconstructed from a recorded legacy deletion intent only after
+full archive verification. If neither a safe local source nor a known provider
+location survives, preserve the journal and resolve the remote location with
+the operator. The extension cannot infer it safely. Fully deleted historical
+records remain unchanged and do not cause provider calls.
+Legacy unfinished multipart uploads without a provider binding also remain
+untouched. Resolve those uploads through their original provider or an
+AbortIncompleteMultipartUpload rule. The extension cannot safely abort them
+by assuming the current endpoint owns them.
+
 The engine records capture, service recovery, local completion and remote
 delivery independently. A delivery error does not imply the site is down.
 Use the independent CLI first:

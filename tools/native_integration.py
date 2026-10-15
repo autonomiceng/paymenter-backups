@@ -164,14 +164,14 @@ def admin_history(args, app, checker, cli, private, run, native_url, work):
     refused = json.loads(execute(ui + ['download', run['run_id'], work / 'refused-download.bin']))
     if refused['download'] != 'refused' or (work / 'refused-download.bin').exists():
         raise RuntimeError('stale verification served bytes')
-    execute(ui + ['render', 'Check needed'])
+    execute(ui + ['render', 'Not verified'])
     execute(ui + ['verifyFirst', run['run_id']])
     promote_and_run(cli, private, 'verify')
     again = work / 'admin-download-again.bin'
     json.loads(execute(ui + ['download', run['run_id'], again]))
     if hashlib.sha256(again.read_bytes()).hexdigest() != expected:
         raise RuntimeError('reverified download differs')
-    execute(ui + ['delete-refused', run['run_id'], 'only usable backup'])
+    execute(ui + ['delete-refused', run['run_id'], 'No other usable backup'])
     # A second, database-only backup can be deleted; the full backup survives.
     online = json.loads(execute(cli + ['run', '--execute', '--mode', 'database-online'], timeout=300))
     # Two verified backups and a limit of one: retention is offered, queued, then cancelled.
@@ -397,6 +397,25 @@ def main():
             execute(cli + ['config', 'show'])
             execute(cli + ['schedule', 'show'])
             execute(cli + ['config', 'set'], input=json.dumps({'settings': {'retention_keep': 5}}).encode())
+            # This is the installed CLI's real config.lock/tick.lock path. The
+            # audited Artisan write must not recursively run init under tick.lock.
+            persisted_config = json.loads(execute(cli + ['config', 'show']))['settings']
+            if persisted_config['retention_keep'] != 5:
+                raise RuntimeError('installed CLI config-set under tick.lock did not persist')
+            if not (private / 'schedule.json').is_file() or not (private / 'policy.json').is_file():
+                raise RuntimeError('installed CLI config-set did not publish policy and schedule state')
+            results['installed_cli_config_set_under_tick_lock'] = True
+            # Direct Artisan use keeps its normal init/update behavior.
+            advisory_path = private / 'configuration-advisory.json'
+            advisory_before = advisory_path.stat()
+            execute([args.php, 'artisan', 'backups:config-set'], cwd=app, input=json.dumps({'retention_keep': '5'}).encode())
+            advisory_after = advisory_path.stat()
+            if (advisory_before.st_ino, advisory_before.st_mtime_ns) == (advisory_after.st_ino, advisory_after.st_mtime_ns):
+                raise RuntimeError('direct Artisan config-set skipped normal update behavior')
+            advisory = json.loads((private / 'configuration-advisory.json').read_text())
+            if not advisory.get('valid'):
+                raise RuntimeError('direct Artisan config-set no longer initializes and validates')
+            results['direct_artisan_config_set_initializes'] = True
             execute(cli + ['schedule', 'set'], input=json.dumps({'schedule_frequency': 'weekly', 'schedule_time': '02:30', 'schedule_weekdays': [0, 2], 'schedule_timezone': 'UTC'}).encode())
             execute(cli + ['schedule', 'enable'])
             execute(cli + ['schedule', 'disable'])
