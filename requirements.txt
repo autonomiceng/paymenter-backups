@@ -1,0 +1,2 @@
+# Development SDK only. Production uses the release's isolated S3 bundle.
+-r requirements-s3.lock

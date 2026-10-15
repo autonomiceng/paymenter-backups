@@ -1,4 +1,5 @@
 .venv/
+.build-venv/
 __pycache__/
 *.py[cod]
 .pytest_cache/
@@ -9,5 +10,8 @@ dist/
 *.egg-info/
 .scratch/
 .cache/
+.native-work/
+.ruff_cache/
+.mypy_cache/
 .env
 private/

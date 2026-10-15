@@ -45,6 +45,12 @@ every action.
 The admin page writes durable requests and never launches capture children from
 PHP-FPM. Recovery remains CLI plus the automatic tick.
 
+PHP `open_basedir` may exclude system executables while permitting process
+launch. The runtime validates configured Python/PHP paths in a short isolated
+Python child, requiring absolute regular executable paths and canonical CLI
+PHP identity. This executable-only probe does not change PHP's private-root,
+document-root or credential-file guards and does not relax hosting policy.
+
 ## Configuration bridge contract
 
 Versioned JSON envelope: `schema_version=1`, `app`, `owner_uid`, `private_root`,
@@ -63,7 +69,7 @@ explicit plaintext-offsite acknowledgement. Provide documented safe defaults
 and fail clearly when a consistency prerequisite is unconfigured.
 
 Native setting rows contain nonsecrets only. Store access key, secret and session
-token in a private file encrypted with the native Illuminate Encrypter/APP_KEY.
+token and optional maintenance probe Basic credentials in a private file encrypted with the native Illuminate Encrypter/APP_KEY.
 The default native extension edit loads all setting values into browser state,
 including undeclared rows, so secrets must never be stored there. Custom secret
 fields are blank/write-only and reset after save. Native settings edits preserve
@@ -90,7 +96,7 @@ Tick performs only guarded auto-recovery while maintenance is active.
 The tick has no cache mutex (`withoutOverlapping`/`onOneServer`); private flock
 is authoritative. It invokes the short launcher with Python `-I`. Each tick
 observes the actual native CronJob event's expression/effective timezone and
-next 48 hours of UTC instants into an atomic private billing guard, fingerprinted
+next eight days of UTC instants into an atomic private billing guard, fingerprinted
 against cold-read native billing settings. Full admission requires a fresh
 matching guard; stale/unknown billing state refuses full mode. Provide a booted
 CLI guard-refresh command for terminal use before a scheduler tick is available.
@@ -126,7 +132,23 @@ After native down, require file driver, empty exceptions, no secret/redirect,
 nonempty rendered template and status503; verify an actual early-bootstrap HTTP
 503. Plain down allows settings/extension bootstrap before middleware rejects.
 Probe a nonce path without redirects and require body equality with the exact
-native template, not status alone. Open configured job locks without creation,
+native template, not status alone. Optional HTTP Basic credentials live in an independent encrypted
+namespace, bound to the explicit configured HTTPS origin (scheme/host/effective
+port). Changes to app origin refuse credential use until credentials are rebound.
+Anonymous HTTP remains supported. The nonce GET sends no cookies and follows no
+redirect; credentials never bypass native maintenance. Transport uses explicit
+system CA trust, verified hostname/TLS, no proxy and no TLS key logging, independent
+of inherited environment overrides. Python independently validates stored and
+current origins immediately before transport and is authoritative for credential
+use; PHP uses the same strict grammar for early save feedback. Parser differences
+therefore refuse at use rather than authorizing a different target. Tests cover
+canonical/parity cases; IPv4-mapped IPv6 and non-ASCII hostnames refuse. A10-second
+wall-clock deadline covers response headers and exact bounded body proof, including
+slow-drip peers. Native templates above 64 KiB refuse before any request. An existing
+caller SIGALRM timer is preserved and causes proof refusal. Only exact 503/template bytes prove success;
+401, ordinary pages and redirects refuse. Credential writes serialize the entire
+read/merge/encrypt/atomic-write under one owner-private flock, preserving S3 and
+probe namespaces independently; explicit probe clear preserves S3. Open configured job locks without creation,
 verify owner/type and actual account crontab use, then verify app scheduler/worker
 processes are drained after acquisition. Full mode refuses unverified job locks
 or forced/uncoordinated workers; document prerequisite setup for other hosts.

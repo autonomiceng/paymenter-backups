@@ -1,0 +1,13 @@
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+  - package-ecosystem: pip
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      s3-sdk:
+        patterns: ['boto3', 'botocore', 's3transfer', 'jmespath', 'urllib3', 'python-dateutil', 'six']

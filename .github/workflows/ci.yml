@@ -1,0 +1,54 @@
+name: test-and-build
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  core:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ['3.10', '3.11', '3.12', '3.13', '3.14']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - run: python -m pip install --require-hashes -r requirements-s3.lock
+      - run: PYTHONPATH=src python -m unittest discover -s tests -v
+      - run: python -m compileall -q src tools
+      - run: python tools/build_release.py --output dist/first.zip
+      - run: python tools/build_release.py --output dist/second.zip
+      - run: cmp dist/first.zip dist/second.zip
+      - uses: actions/upload-artifact@v4
+        if: matrix.python == '3.10'
+        with:
+          name: native-extension
+          path: dist/first.zip
+  native:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        php: ['8.3', '8.4']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ matrix.php }}
+          extensions: intl, pdo_mysql, mbstring, zip, dom
+          tools: composer:v2
+          coverage: none
+      - run: sudo apt-get update && sudo apt-get install -y mariadb-server mariadb-client acl
+      - run: |
+          set -euo pipefail
+          while IFS= read -r -d '' source; do
+            php -l "$source"
+          done < <(find extension tests/integration -name '*.php' -print0)
+      - run: python tools/build_release.py
+      - run: python tools/native_integration.py --release dist/Backups-0.1.2.zip --composer "$(command -v composer)"
