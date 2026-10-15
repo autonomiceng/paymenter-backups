@@ -76,7 +76,7 @@ final class Settings
         's3_retention_policy' => self::S3_POLICIES,
     ];
 
-    /** [label, help] for the native extension editor, a fallback for the Backups page. Help stays short. */
+    /** Internal setting metadata for native audited CLI writes. */
     public const LABELS = [
         'settings_version' => ['Settings version', 'Set by the Backups page. 1 keeps 0.3 behaviour until settings are saved there once.'],
         'full_schedule' => ['Full backups', 'off, daily or weekly.'],

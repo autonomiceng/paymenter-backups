@@ -1,6 +1,7 @@
 # Third-party notices
 
-Paymenter Backups is authored by Autonomic Engineering. Its source is MIT licensed. Paymenter itself is a separate MIT
+Paymenter Backups is copyright (c) 2026 Autonomic Engineering and is released
+under the MIT license. Paymenter itself is a separate MIT
 project and is never bundled or modified by this extension. The native adapter
 uses Paymenter's installed Laravel and Filament APIs without changing its
 Composer dependencies.
@@ -15,6 +16,6 @@ urllib3 uses MIT. Consult the shipped original notices for attribution and terms
 
 Only the S3 botocore service model directory and shared endpoint/partition data
 are retained; other AWS service model directories are deterministically removed
-to fit the native10 MiB uploader limit. This SDK bundle supports S3 only. Wheel
+to fit the native 10 MiB uploader limit. This SDK bundle supports S3 only. Wheel
 RECORD metadata describes the original wheel, and SDK-MANIFEST documents pruning.
 No application dependency is installed during production extension deployment.

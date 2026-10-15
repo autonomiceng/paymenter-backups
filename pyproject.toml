@@ -4,11 +4,11 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "paymenter-backups"
-authors = [{name = "Autonomic Engineering"}]
-version = "0.4.0"
+version = "0.4.1"
 description = "Independent, recoverable backups for upstream Paymenter"
 requires-python = ">=3.10"
 license = {text = "MIT"}
+authors = [{name = "Autonomic Engineering"}]
 dependencies = []
 
 [project.scripts]

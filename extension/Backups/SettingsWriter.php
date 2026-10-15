@@ -25,13 +25,37 @@ final class SettingsWriter
         });
     }
 
-    /** Repair executable pins even when the engine cannot start; never accepts secrets. */
-    public static function repairBinaries(\App\Models\Extension $record, array $values): void
+    /** Explicit bootstrap repair when the engine cannot start; never accepts secrets. */
+    public static function repairBinaries(\App\Models\Extension $record, array $values, ?array $expected = null): void
     {
         if (array_diff(array_keys($values), ['private_root', 'extra_docroots', 'python', 'php'])) { throw new \RuntimeException('config-invalid'); }
-        $root = Runtime::privateRoot();
+        $write = static function () use ($record, $values, $expected): void {
+            DB::transaction(function () use ($record, $values, $expected): void {
+                if ($expected !== null && self::snapshot($record) !== $expected) { throw new \RuntimeException('config-changed'); }
+                self::write($record, array_map(static fn ($value) => is_array($value) ? json_encode($value, JSON_THROW_ON_ERROR) : $value, $values));
+            });
+        };
+        // Compare before selecting the coordinator directory, then again beneath
+        // both coordinator and native row locks before any publication.
+        if ($expected !== null && self::snapshot($record) !== $expected) { throw new \RuntimeException('config-changed'); }
+        if (array_key_exists('extra_docroots', $values)) {
+            $normalized = Settings::normalize(['extra_docroots' => $values['extra_docroots']]);
+            $configured = $record->settings()->where('key', 'private_root')->value('value');
+            // Presence only: malformed stored roots cannot authorize any work,
+            // but an existing identity must still prevent data-directory moves.
+            $original = PrivateStore::root(realpath(base_path()), $configured ?: null);
+            $existing = is_file($original . '/installation.json');
+            $selected = $existing ? $configured : ($values['private_root'] ?? $configured);
+            $root = PrivateStore::root(realpath(base_path()), $selected ?: null, false, $normalized['extra_docroots']);
+            if ($existing && array_key_exists('private_root', $values)
+                && PrivateStore::root(realpath(base_path()), $values['private_root'] ?: null, false,
+                    $normalized['extra_docroots']) !== $root) { throw new \RuntimeException('private-root-move-refused'); }
+        } else { $root = Runtime::privateRoot(); }
+        if (is_file($root . '/installation.json') && array_key_exists('private_root', $values)
+            && PrivateStore::root(realpath(base_path()), $values['private_root'] ?: null, false,
+                $normalized['extra_docroots'] ?? []) !== $root) { throw new \RuntimeException('private-root-move-refused'); }
         if (!is_file($root . '/installation.json')) {
-            self::write($record, array_map(static fn ($value) => is_array($value) ? json_encode($value, JSON_THROW_ON_ERROR) : $value, $values));
+            $write();
             return;
         }
         $handles = [];
@@ -57,7 +81,7 @@ final class SettingsWriter
                     usleep(20000);
                 }
             }
-            self::write($record, array_map(static fn ($value) => is_array($value) ? json_encode($value, JSON_THROW_ON_ERROR) : $value, $values));
+            $write();
         } finally {
             foreach (array_reverse($handles) as $handle) { fclose($handle); }
         }

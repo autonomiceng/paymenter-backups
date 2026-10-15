@@ -273,39 +273,95 @@ if ($mode === 'upload') {
     $credentialDigest = $digest();
     $notices();
 
-    // Malformed location-guard JSON refuses page repair and points to the native editor.
+    // Ordinary Save must not turn a malformed privacy guard into an empty list.
     $oldDocroots = $record->settings()->where('key', 'extra_docroots')->value('value');
     $record->settings()->where('key', 'extra_docroots')->update(['value' => 'invalid-json']);
     $guardRows = $nativeRows();
     $guardPage = $save([]);
-    check($nativeRows() === $guardRows && $guardPage->instance()->getErrorBag()->has('settings.extra_docroots'), 'Page silently defaulted malformed document-root guard');
-    check(str_contains($text($guardPage), 'Extensions') && str_contains($text($guardPage), 'edit Backups'), 'Malformed guard repair did not name native editor');
+    check($nativeRows() === $guardRows && ($guardPage->instance()->getErrorBag()->has('settings.confirm_public_directories')
+        || $guardPage->instance()->getErrorBag()->has('settings.extra_docroots')), 'Page silently defaulted malformed document-root guard');
+    check(str_contains($text($guardPage), 'Public web folders need correction'), 'Malformed guard repair not offered in Backups settings');
     $process->run();
     check($process->getExitCode() !== 0 && str_contains($process->getErrorOutput(), 'document-roots-invalid'), 'Malformed document-root guard did not return its safe code');
-    $guardEditor = Livewire\Livewire::test(App\Admin\Resources\ExtensionResource\Pages\EditExtension::class, ['record' => $record->getRouteKey()]);
-    $guardEditor->update(calls: [['method' => 'save', 'params' => []]], updates: ['data.settings.extra_docroots' => $oldDocroots]);
-    check($guardEditor->instance()->getErrorBag()->isEmpty() && $record->settings()->where('key', 'extra_docroots')->value('value') === $oldDocroots, 'Native editor could not repair malformed document-root guard');
-    check($digest() === $credentialDigest, 'Native location-guard repair changed credentials');
+    $invalidRepair = $save(['settings.extra_docroots' => 'relative', 'settings.confirm_public_directories' => true]);
+    check(!$invalidRepair->instance()->getErrorBag()->isEmpty() && $nativeRows() === $guardRows && $digest() === $credentialDigest, 'Invalid privacy repair changed state');
+    $guardEditor = $save(['settings.extra_docroots' => implode("\n", json_decode($oldDocroots, true)), 'settings.confirm_public_directories' => true]);
+    check($guardEditor->instance()->getErrorBag()->isEmpty() && $record->settings()->where('key', 'extra_docroots')->value('value') === $oldDocroots, 'Explicit confirmed privacy repair failed');
+    check($digest() === $credentialDigest, 'Privacy repair changed credentials');
 
-    // Native EditExtension fill/save keeps external secrets and contains no canary.
+    // The real upstream lifecycle page cannot edit configuration, even with forged state.
     $native = Livewire\Livewire::test(App\Admin\Resources\ExtensionResource\Pages\EditExtension::class, ['record' => $record->getRouteKey()]);
     check(!str_contains($native->html(), 'CREDENTIAL-CANARY'), 'native editor secret leak');
-    check(str_contains($native->html(), 'Full backup days') && str_contains($native->html(), 'Legacy: automatic backups'), 'native fallback labels missing');
+    check(!str_contains($native->html(), 'Full backup days') && !str_contains($native->html(), 'Legacy: automatic backups'), 'native duplicate settings returned');
+    check((new Paymenter\Extensions\Others\Backups\Backups)->getConfig() === [], 'Native settings schema is not empty');
+    $lifecycleRows = Paymenter\Extensions\Others\Backups\SettingsWriter::snapshot($record);
+    $privateHashes = static function () use ($root): array {
+        $hashes = [];
+        foreach (new RecursiveIteratorIterator(new RecursiveDirectoryIterator($root, FilesystemIterator::SKIP_DOTS)) as $file) {
+            if ($file->isFile()) { $hashes[$file->getPathname()] = hash_file('sha256', $file->getPathname()); }
+        }
+        ksort($hashes); return $hashes;
+    };
+    $lifecyclePrivate = $privateHashes();
     $native->call('save');
     check($native->instance()->getErrorBag()->isEmpty(), 'native edit save has errors: ' . json_encode($native->instance()->getErrorBag()->toArray()));
     check($digest() === $credentialDigest, 'native editor changed credentials');
-    foreach (['data.settings.retention_keep_full' => '0', 'data.settings.full_weekdays' => '[7]', 'data.settings.database_every_hours' => '5', 'data.settings.extra_docroots' => '["relative"]'] as $field => $value) {
+    foreach (['data.settings.settings_version' => '1', 'data.settings.retention_keep_full' => '0', 'data.settings.full_weekdays' => '[7]', 'data.settings.database_every_hours' => '5', 'data.settings.extra_docroots' => '["relative"]', 'data.settings.private_root' => $base . '/public', 'data.settings.s3_secret_key' => 'FORGED-SECRET'] as $field => $value) {
         $invalid = Livewire\Livewire::test(App\Admin\Resources\ExtensionResource\Pages\EditExtension::class, ['record' => $record->getRouteKey()]);
         $invalid->update(calls: [['method' => 'save', 'params' => []]], updates: [$field => $value]);
-        check(!$invalid->instance()->getErrorBag()->isEmpty(), 'native fallback accepted engine-invalid value: ' . $field);
+        check(Paymenter\Extensions\Others\Backups\SettingsWriter::snapshot($record) === $lifecycleRows
+            && $privateHashes() === $lifecyclePrivate && $digest() === $credentialDigest, 'Native lifecycle Save mutated settings/private state: ' . $field);
+    }
+    foreach ([false, true] as $enabled) {
+        Livewire\Livewire::test(App\Admin\Resources\ExtensionResource\Pages\EditExtension::class, ['record' => $record->getRouteKey()])
+            ->set('data.enabled', $enabled)->call('save');
+        check((bool) $record->fresh()->enabled === $enabled && Paymenter\Extensions\Others\Backups\SettingsWriter::snapshot($record) === $lifecycleRows
+            && $privateHashes() === $lifecyclePrivate, 'Native lifecycle toggle changed configuration/private state');
     }
     $additionalDocroot = dirname($base) . '/additional-site-public';
     if (!is_dir($additionalDocroot)) { mkdir($additionalDocroot, 0700); }
-    $native->update(calls: [['method' => 'save', 'params' => []]], updates: ['data.settings.extra_docroots' => json_encode([$additionalDocroot])]);
-    check($native->instance()->getErrorBag()->isEmpty(), 'native docroot edit invalid');
+    $native = $save(['settings.extra_docroots' => $additionalDocroot]);
+    check($native->instance()->getErrorBag()->isEmpty(), 'Backups docroot edit invalid');
     $policy = json_decode(file_get_contents($root . '/policy.json'), true);
-    check(in_array(realpath($additionalDocroot), $policy['extra_docroots'], true), 'native GUI docroot did not refresh offline policy');
+    check(in_array(realpath($additionalDocroot), $policy['extra_docroots'], true), 'Backups GUI docroot did not refresh offline policy');
     check($digest() === $credentialDigest, 'docroot edit changed credentials');
+
+    // Standalone CLI can correct an unusable stored pin while explicitly bound
+    // to the existing canonical private directory. It cannot select a new one.
+    $canonicalIdentity = file_get_contents($root . '/installation.json');
+    $rootAlias = $root . '-alias';
+    check(!file_exists($rootAlias) && !is_link($rootAlias) && symlink($root, $rootAlias), 'Private-root alias fixture not isolated');
+    $cliCommand = [
+        $record->settings()->where('key', 'python')->value('value') ?: '/usr/bin/python3', '-I',
+        $base . '/extensions/Others/Backups/runtime/cli.py', '--app', $base, '--private-root', $root,
+        '--php', PHP_BINARY];
+    $cli = new Symfony\Component\Process\Process([...$cliCommand, 'config', 'set'], $base);
+    $cli->setTimeout(40);
+    try {
+        foreach ([$rootAlias, dirname($root) . '/../' . basename(dirname($root)) . '/' . basename($root), '../' . basename(dirname($root)) . '/' . basename($root)] as $invalidRoot) {
+            $record->settings()->where('key', 'private_root')->update(['value' => $invalidRoot]);
+            try {
+                Paymenter\Extensions\Others\Backups\Runtime::privateRoot();
+                throw new LogicException('Unusable stored private root became a web authority');
+            } catch (RuntimeException $error) { check($error->getMessage() === 'private-root-invalid', 'Unusable root failure was not explicit'); }
+            $identified = new Symfony\Component\Process\Process([...$cliCommand, 'status'], $base);
+            $identified->setTimeout(10); $identified->run();
+            check($identified->isSuccessful() && ($status = json_decode($identified->getOutput(), true))['initialized'] === true
+                && $status['installation_uuid'] === json_decode($canonicalIdentity, true)['installation_uuid'],
+                'Standalone status did not identify the known existing UUID before correction');
+            $beforeRepair = Paymenter\Extensions\Others\Backups\SettingsWriter::snapshot($record);
+            $cli->setInput(json_encode(['settings' => ['private_root' => $root . '-different']], JSON_THROW_ON_ERROR)); $cli->run();
+            check(!$cli->isSuccessful() && str_contains($cli->getErrorOutput(), 'private-root-move-refused')
+                && Paymenter\Extensions\Others\Backups\SettingsWriter::snapshot($record) === $beforeRepair,
+                'Explicit CLI root repair allowed a move or changed native rows on refusal');
+            $cli->setInput(json_encode(['settings' => ['private_root' => $root]], JSON_THROW_ON_ERROR)); $cli->run();
+            check($cli->isSuccessful() && ($result = json_decode($cli->getOutput(), true))['updated'] === true
+                && $record->settings()->where('key', 'private_root')->value('value') === $root,
+                'Explicit canonical CLI could not repair unusable saved root: ' . $cli->getErrorOutput());
+            check(file_get_contents($root . '/installation.json') === $canonicalIdentity && $digest() === $credentialDigest
+                && !file_exists($root . '-different'), 'Canonical CLI repair changed identity/credentials or created a new root');
+        }
+    } finally { unlink($rootAlias); }
 
     $configuredPython = $record->settings()->where('key', 'python')->value('value');
     try {
@@ -410,7 +466,8 @@ if ($mode === 'upload') {
     $admin->role_id = App\Models\Role::where('name', 'integration-admin')->value('id'); $admin->save();
     echo json_encode(['native_settings' => true, 'cold_matches' => true, 'page_settings_validated_before_persist' => true, 'engine_refusal_mapped' => true,
         'livewire_secrets_clear' => true, 'one_save_with_secrets' => true, 'recovery_key_flow' => true, 'permission_denied' => true, 'fpm_actions_spooled' => true, 'gui_docroot_policy' => true,
-        'relative_python_refused' => true, 'probe_credentials_bound' => true, 'create_dialog_guided' => true, 'probe_namespace_preserved' => true, 'native_fallback_validated' => true,
+        'relative_python_refused' => true, 'probe_credentials_bound' => true, 'create_dialog_guided' => true, 'probe_namespace_preserved' => true, 'native_lifecycle_preserved' => true,
+        'canonical_cli_repairs_unusable_saved_private_root' => true,
         'download_route_authenticated' => true]) . "\n";
 } elseif ($mode === 'ui-history') {
     $admin = App\Models\User::where('email', 'fixture@example.invalid')->firstOrFail();

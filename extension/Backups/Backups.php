@@ -5,10 +5,11 @@ use App\Attributes\ExtensionMeta;
 use App\Classes\Extension\Extension;
 use Illuminate\Console\Scheduling\Schedule;
 
-#[ExtensionMeta(name: 'Backups', description: 'Scheduled database and full backups for Paymenter, on this server and in encrypted S3 storage, with verified downloads and recovery.', version: '0.4.0', author: 'Autonomic Engineering')]
+#[ExtensionMeta(name: 'Backups', description: 'Scheduled database and full backups for Paymenter, on this server and in encrypted S3 storage, with verified downloads and recovery.', version: '0.4.1', author: 'Autonomic Engineering')]
 class Backups extends Extension
 {
-    public function getConfig($values = []) { return Settings::fields(); }
+    // Settings are edited on the Backups page; this native page owns lifecycle only.
+    public function getConfig($values = []) { return []; }
 
     public function installed()
     {
@@ -29,7 +30,10 @@ class Backups extends Extension
         (new NativeProvider(app()))->boot();
     }
 
-    public function updated($record)
+    public function updated($record) {}
+
+    /** Advisory after an explicit Backups settings repair, never a lifecycle Save. */
+    public function configurationUpdated($record)
     {
         try {
             Runtime::command(['init']);

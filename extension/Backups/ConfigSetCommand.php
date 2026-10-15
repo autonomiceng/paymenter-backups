@@ -17,7 +17,7 @@ final class ConfigSetCommand extends Command
             $input = json_decode($bytes, true, 16, JSON_THROW_ON_ERROR);
             if (!is_array($input)) { throw new \RuntimeException('config-invalid'); }
             if (!$this->option('restore') && !$this->option('finalize')) {
-                $fields = array_column((new Backups)->getConfig(), null, 'name');
+                $fields = array_column(Settings::fields(), null, 'name');
                 if (array_diff(array_keys($input), array_keys($fields))) { throw new \RuntimeException('config-invalid'); }
                 foreach ($input as $key => $value) {
                     if (is_array($value) || is_object($value) || is_null($value)) { throw new \RuntimeException('config-invalid'); }

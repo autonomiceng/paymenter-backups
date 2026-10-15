@@ -137,6 +137,9 @@ class Backups extends Page implements HasTable
     private ?array $storedForm = null;
     private int $storedVersion = 2;
     private array $malformedKeys = [];
+    private ?array $storedRows = null;
+    #[Locked]
+    public ?string $publicDirectoriesRepairPin = null;
     private ?string $overviewError = null;
     private array $deletePreviews = [];
     /** Revealed key for this request only; never a public property. */
@@ -179,6 +182,8 @@ class Backups extends Page implements HasTable
     {
         $this->authorizeAction();
         $this->settingsForm->fill($this->formValues());
+        $this->publicDirectoriesRepairPin = in_array('extra_docroots', $this->malformedKeys, true)
+            ? hash('sha256', serialize($this->storedRows)) : null;
         $this->s3KeysForm->fill();
         $this->siteAccessForm->fill();
         $this->encryptionForm->fill(['source' => 'generate']);
@@ -249,7 +254,15 @@ class Backups extends Page implements HasTable
     private function initialized(): bool
     {
         if ($this->overview()['initialized'] ?? false) { return true; }
-        try { return @is_file(Runtime::privateRoot() . '/installation.json'); } catch (\Throwable $error) { return false; }
+        try { return @is_file(Runtime::privateRoot() . '/installation.json'); }
+        catch (\Throwable $error) {
+            // Read only presence, to keep an existing data directory immutable
+            // while its public-directory guard is awaiting explicit repair.
+            try {
+                $configured = $this->record()->settings()->where('key', 'private_root')->value('value');
+                return @is_file(PrivateStore::root(realpath(base_path()), $configured ?: null) . '/installation.json');
+            } catch (\Throwable $ignored) { return false; }
+        }
     }
 
     private function record(): \App\Models\Extension
@@ -963,6 +976,9 @@ class Backups extends Page implements HasTable
 
     public function settingsForm(Schema $schema): Schema
     {
+        // Private properties are rebuilt on each Livewire request. Read the
+        // current native rows before deciding which repair fields validate.
+        $this->formValues();
         $positive = static fn (string $key) => in_array($key, Settings::POSITIVE, true) ? 1 : 0;
         $integer = fn (string $key, string $label, ?string $suffix = null, string|\Closure|null $help = null) => TextInput::make($key)->label($label)
             ->integer()->required()->minValue($positive($key))->suffix($suffix)->helperText($help);
@@ -998,6 +1014,13 @@ class Backups extends Page implements HasTable
 
         return $schema->components([
             Form::make([
+                Section::make('Public web folders need correction')->visible(fn () => in_array('extra_docroots', $this->malformedKeys, true))
+                    ->description('The saved list of public web folders is invalid. Enter the complete list and confirm it before saving. Save the folder list by itself first.')
+                    ->schema([
+                        $lineList('extra_docroots', 'Other public web folders', 'One full path per line. Leave empty only if this account has no other public web folders.'),
+                        Checkbox::make('confirm_public_directories')->label('I have listed all public web folders for this account.')
+                            ->accepted()->validationMessages(['accepted' => 'Confirm the complete list before saving.']),
+                    ]),
                 Section::make('First-time setup')->id('first-time-setup')
                     ->description('Choose where Backups keeps its private data. You can\'t change this after the first save.')
                     ->visible(fn () => !$this->initialized())
@@ -1005,7 +1028,7 @@ class Backups extends Page implements HasTable
                         $path('private_root', 'Data directory', 'Holds backup history, the installation ID and encrypted keys. Must be outside Paymenter and any public web folder.', dirname(base_path()) . '/paymenter-backups-private')
                             ->visible(fn () => !$this->initialized()),
                         $lineList('extra_docroots', 'Other public web folders', 'Document roots of other sites on this account, one per line. Backups are never stored inside them.')
-                            ->visible(fn () => !$this->initialized()),
+                            ->visible(fn () => !$this->initialized() && !in_array('extra_docroots', $this->malformedKeys, true)),
                     ]),
 
                 Section::make('Schedule')->id('schedule')->description('Backups run from Paymenter\'s cron job at these times.')->schema([
@@ -1132,7 +1155,7 @@ class Backups extends Page implements HasTable
                             $path('private_root', 'Data directory', 'Holds backup history, the installation ID and encrypted keys. Can\'t be changed after setup.')
                                 ->disabled()->visible(fn () => $this->initialized()),
                             $lineList('extra_docroots', 'Other public web folders', 'Document roots of other sites on this account, one per line. Backups are never stored inside them.')
-                                ->visible(fn () => $this->initialized()),
+                                ->visible(fn () => $this->initialized() && !in_array('extra_docroots', $this->malformedKeys, true)),
                         ]),
                     ]),
             ])->livewireSubmitHandler('saveSettings')->footer([
@@ -1267,7 +1290,12 @@ class Backups extends Page implements HasTable
     private function formValues(): array
     {
         if ($this->storedForm !== null) { return $this->storedForm; }
-        $rows = $this->record()->settings()->pluck('value', 'key')->all();
+        $rows = []; $this->storedRows = [];
+        foreach ($this->record()->settings()->get() as $row) {
+            $rows[$row->key] = $row->value;
+            $this->storedRows[$row->key] = $row->getAttributes();
+        }
+        ksort($this->storedRows);
         $this->malformedKeys = [];
         $this->storedVersion = Settings::parse('settings_version', $rows['settings_version'] ?? null) ?? 1;
         $invalid = function (string $key) use ($rows): bool {
@@ -1435,19 +1463,34 @@ class Backups extends Page implements HasTable
         [$state, $s3Keys, $siteAccess, $keySetup] = $this->validatedInput();
         $this->storedForm = null;
         $stored = $this->formValues();
-        if (in_array('extra_docroots', $this->malformedKeys, true)) {
+        $repairBaseline = $this->storedRows;
+        if (($this->publicDirectoriesRepairPin !== null
+                && !hash_equals($this->publicDirectoriesRepairPin, hash('sha256', serialize($repairBaseline))))
+            || (($state['confirm_public_directories'] ?? false) === true && $this->publicDirectoriesRepairPin === null)) {
+            $this->refuseSettings('config-changed');
+            return;
+        }
+        if (in_array('extra_docroots', $this->malformedKeys, true)
+            && (!array_key_exists('extra_docroots', $state) || ($state['confirm_public_directories'] ?? false) !== true)) {
             // Never substitute an empty default for a malformed public-directory guard.
             $this->refuseSettings('document-roots-invalid');
             return;
         }
         $v2 = Settings::v2Keys();
+        $privacyRepair = in_array('extra_docroots', $this->malformedKeys, true);
         // What the administrator changed, against native rows read now.
         $userChanges = [];
         foreach ($state as $key => $value) {
-            if (in_array($key, $v2, true) && $this->changed($key, $value)) { $userChanges[$key] = $this->engineValue($key, $value); }
+            if (!in_array($key, $v2, true) || !$this->changed($key, $value)) { continue; }
+            $engineValue = $this->engineValue($key, $value);
+            // Repair the privacy guard first. Other damaged rows' visible
+            // defaults are implicit repairs, not a second user edit; defer them.
+            if ($privacyRepair && !in_array($key, self::BOOTSTRAP, true) && in_array($key, $this->malformedKeys, true)
+                && json_encode($engineValue) === json_encode($this->engineValue($key, $stored[$key]))) { continue; }
+            $userChanges[$key] = $engineValue;
         }
         $encrypted = (bool) ($userChanges['s3_encryption'] ?? $this->engineValue('s3_encryption', $stored['s3_encryption']));
-        if ($encrypted && $this->engineValue('plaintext_offsite_acknowledged', $stored['plaintext_offsite_acknowledged'])) {
+        if (!$privacyRepair && $encrypted && $this->engineValue('plaintext_offsite_acknowledged', $stored['plaintext_offsite_acknowledged'])) {
             // Turning encryption off later needs a fresh confirmation.
             $userChanges['plaintext_offsite_acknowledged'] = false;
         }
@@ -1498,6 +1541,10 @@ class Backups extends Page implements HasTable
             $code = $error->getMessage();
             // A broken engine path can only be repaired by saving the paths themselves.
             if (!$userChanges || !in_array($code, self::ENVIRONMENT_ERRORS, true) || array_diff(array_keys($userChanges), self::BOOTSTRAP)) {
+                if (in_array('extra_docroots', $this->malformedKeys, true)) {
+                    Notification::make()->title('Settings not saved')->danger()->body('Save the folder list by itself first. Then save your other changes.')->send();
+                    return;
+                }
                 $this->refuseSettings($code, in_array($code, self::ENVIRONMENT_ERRORS, true));
                 return;
             }
@@ -1509,7 +1556,7 @@ class Backups extends Page implements HasTable
             if ($checked) {
                 $saved = Runtime::saveConfiguration($changes, $secrets ? ['s3' => $s3Keys, 'site' => $siteAccess] : null);
             } else {
-                SettingsWriter::repairBinaries($record, $changes);
+                SettingsWriter::repairBinaries($record, $changes, $repairBaseline);
                 $saved = ['updated' => true];
             }
         } catch (\Throwable $error) {
@@ -1528,12 +1575,14 @@ class Backups extends Page implements HasTable
         $this->overviewCache = null;
         $this->overviewError = null;
         $this->settingsForm->fill($this->formValues());
+        $this->publicDirectoriesRepairPin = in_array('extra_docroots', $this->malformedKeys, true)
+            ? hash('sha256', serialize($this->storedRows)) : null;
         if (!$checked) {
-            (new Extension)->updated($record);
+            (new Extension)->configurationUpdated($record);
             $this->overview();
             $body = $this->overviewError ? 'Backups still can\'t start: ' . Messages::error($this->overviewError) : 'Backups can start again. Save your other changes now.';
             if ($secrets) { $body .= ' Keys you entered weren\'t saved; enter them again.'; }
-            Notification::make()->title('Binary paths saved')->warning()->body($body)->send();
+            Notification::make()->title('Setup settings saved')->warning()->body($body)->send();
             return;
         }
         if (($saved['credentials_updated'] ?? false) === true) { $this->secretsSaved['s3'] = true; }

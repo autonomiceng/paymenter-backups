@@ -148,7 +148,7 @@ namespace App\Models {
     }
 }
 namespace Paymenter\Extensions\Others\Backups {
-    class Backups { public function getConfig() { return Settings::fields(); } }
+    class Backups { public function getConfig() { return []; } }
     class Runtime {
         public static function publishCredentialsWhileLocked($input, $root) {
             $saved = json_decode(file_get_contents($root . '/native-credentials.json'), true);

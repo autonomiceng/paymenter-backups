@@ -120,8 +120,9 @@ returns `credentials-unreadable` and never silently overwrites the file. The
 installation UUID lives outside native rows and survives extension uninstall.
 An independent restored/new host gets a new UUID; adoption requires the old
 installation to be decommissioned. APP_KEY encryption protects a separately
-leaked file, not compromise of the app UID. Native form edits nonsecrets; custom
-page handles credentials/requests/status and clears secret input on failure.
+leaked file, not compromise of the app UID. The Backups page edits nonsecret
+settings and handles credentials, requests and status; it clears secret input
+on failure. The native extension form retains lifecycle controls only.
 
 ## Administrator page contracts
 
@@ -209,10 +210,29 @@ The page refuses to change an initialized private root, because a new root
 would start a new identity without the saved keys and history. When the engine
 cannot start, only private root, document roots and Python/PHP pins can be
 repaired, without secret publication; an initialized root still uses the bounded
-configuration/tick locks. Native editor writes are upstream-owned nonsecret
-writes; they preserve the external store and run the extension's advisory hook.
-The native extension editor applies the same rules to stored strings,
-including `boolean` for checkboxes and the S3 prefix pattern.
+configuration/tick locks. The Backups page is the sole web settings editor;
+the native Extensions page retains enable/disable and uninstall, exposes no
+Backups setting fields, and its Save hook performs no configuration or private
+state work. CLI native writes validate against the internal `Settings::fields`
+schema independently of `getConfig()`.
+Malformed public-folder lists remain refusing until an administrator explicitly
+enters and confirms the complete list on Backups settings, including an
+intentional empty list. Bootstrap repair validates those folders before writing,
+compares the exact native row snapshot again under native row locks and, for an
+initialized root, configuration/tick locks. Fresh repair uses a native snapshot
+transaction before initialization. It preserves an initialized directory and identity, and publishes no
+secrets or settings-version adoption. Ordinary Save never repairs this guard
+from defaults. Until repair succeeds, exports still refuse unknown boundaries.
+Implicit default repairs for unrelated damaged settings are deferred until the
+next ordinary Save, so they cannot block a folder-list-only bootstrap repair.
+A saved private-root pin that is unusable because it is relative, contains
+dot segments or names a symlink is corrected through the standalone CLI,
+explicitly bound to the existing canonical private directory. State validates
+its application/owner/identity; the operator first verifies the known UUID with
+offline status. Config-set refuses a proposed root different from that bound
+directory. With that same canonical directory, correction preserves UUID and
+credentials and moves no private state. A guessed directory is not an identity
+proof; config-set can initialize fresh state when explicitly selected.
 
 S3 keys and the site password are write-only Livewire state that `dehydrate()`
 resets on every response, including validation failures. The site password's
