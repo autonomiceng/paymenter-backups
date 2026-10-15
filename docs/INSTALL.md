@@ -68,8 +68,8 @@ directory and known installation UUID. The web page never guesses a replacement
 installation. Fresh records write settings_version=2;
 records with existing rows receive marker 1 and retain 0.3 behavior until the
 Backups page explicitly saves every v2 field. Both new schedules default off,
-local storage on, full local count 7 and database local count 24, with a 10 GiB
-budget and 1 GiB reserve. Suggested operating cadence is database hourly/full
+local storage on, full local count 7 and database local count 24, with a 10-GiB
+budget and 1-GiB reserve. Suggested operating cadence is database hourly/full
 weekly after readiness passes; enabling the extension alone starts neither.
 Settings-only validation/init never access the encrypted credential file. Secret
 submissions follow initialization under shared configuration/tick coordination,

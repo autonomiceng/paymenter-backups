@@ -391,9 +391,7 @@ def deliver(state, envelope, item, manifest):
                  and not other.get('retained_deleted') and other['created_at'] > item['created_at']
                  and storage.scope_matches(state, envelope, other)]
         if not newer:
-            pointer = encode({'installation_uuid': state.uuid, 'run_id': item['run_id'],
-                              'manifest_key': remote['manifest_key'], 'descriptor_sha256': expected['sha256'], 'format': FORMAT})
-            s3.put_object(Bucket=remote['bucket'], Key=remote['scope']['prefix'] + 'lastmanifest.json', Body=pointer, ContentLength=len(pointer))
+            storage.publish_pointer(state, s3, item)
         return {'run_id': item['run_id'], 'remote_delivered': True, 'already_delivered': not changed}
     except Exception as error:
         item['delivery_error'] = error.code if isinstance(error, BackupError) else 's3-delivery-failed'
