@@ -1,10 +1,143 @@
 # Recovery and restore
 
 These archives contain private customer data, `.env` with DB credentials and
-APP_KEY, and Passport signing keys. Keep artifacts owner-private. S3 credential
+APP_KEY, and Passport signing keys. Keep artifacts owner-private. Local archives,
+admin downloads and ordinary recovery exports remain plaintext. New encrypted S3
+copies protect both the archive and the full recovery manifest; their public
+descriptor exposes transport metadata only. S3 credential
 files live outside the app and are excluded from every archive and recovery kit.
 APP_KEY encryption protects a separately leaked credential file; a compromised
 application UID can read APP_KEY and has access to the credentials.
+
+## Recovery keys and encrypted S3 copies
+
+Encryption uses the fixed `openpgp-symmetric-aes256-seipd-v1` format: binary
+GnuPG AES256, salted iterated SHA256 S2K (mode 3, count 65011712), no additional
+compression, and SEIPD v1/MDC. APP_KEY wraps the local credential file; it is
+independent of the archive recovery secret. Neither APP_KEY nor S3 credentials
+can replace a lost recovery secret.
+
+Generate a recovery key (32 random bytes encoded as 64 lowercase hexadecimal
+characters) or import an exact passphrase of at least 20 characters and at most
+1024 UTF-8 bytes, without control characters. No trimming or normalization is
+performed. Save the recovery-key attachment outside this server before
+acknowledging its fingerprint. A pending key cannot authorize uploads. Rotation
+prepares a new pending key; acknowledgement activates it under the short run
+lock and retains the old key as retired. Keep every exported recovery key:
+older copies, bucket versions and offline exports still need their original
+keys. APP_KEY rewrapping preserves all archive keys and other credential
+namespaces; complete it before removing a previous APP_KEY.
+
+The standalone CLI provides `encryption-key generate|import|acknowledge|
+discard-pending|status`, `recovery-key export --output /absolute/private/file`
+with optional `--fingerprint FULL-FINGERPRINT`, and `credentials-rewrap`.
+Import reads JSON stdin containing `passphrase` and optional exported
+`fingerprint` parameters; acknowledgement reads JSON stdin containing the full
+`fingerprint`. Importing an exported identity preserves its scheme, salt,
+iteration count and value. These operations require an initialized private
+root. Recovery-key export writes a new owner-private file and refuses overwrite.
+Both key export and ordinary recovery-kit export check current native document
+roots through the cold PHP/PDO bridge and refuse if those boundaries cannot be
+read or validated, even when a cached private policy exists. They need no dump
+program, billing admission or other capture readiness; the privacy read does
+not open credentials. Ordinary CLI JSON returns only public metadata. Do not feed secret-bearing JSON
+through shell command arguments or save it in command history.
+
+Each encrypted copy consists of exactly three objects in its recorded provider
+scope:
+
+```text
+PREFIX/INSTALLATION/RUN.tar.gz.gpg
+PREFIX/INSTALLATION/RUN.recovery.json.gpg
+PREFIX/INSTALLATION/RUN.manifest.json
+```
+
+The final object is a small public commit descriptor, published last and removed
+first. The decrypted recovery document binds the full original manifest to the
+archive ciphertext name, size, SHA256, installation, run, key fingerprint and
+provider scope. The public descriptor and latest pointer alone prove neither
+authenticity nor freshness. Recognized old copies remain `plaintext-v1`; their
+format does not change when current settings change. Unknown formats refuse.
+Missing retired keys preserve the affected copy and never imply that S3 objects
+are missing. Encryption failures never fall back to plaintext uploads.
+
+## Encrypted recovery on a fresh machine
+
+This procedure needs only the three downloaded objects, the separately saved
+recovery-key attachment, GnuPG, Python 3.10+ and the standalone
+`Backups/runtime/verify_recovery.py` from the extension ZIP. It needs no running
+Paymenter, original private root, APP_KEY, installation adoption or S3 SDK.
+Use your provider's ordinary download tools to obtain all three objects.
+
+Create scratch storage outside every served directory and keep the recovery
+secret in your password manager, separate from the downloaded ciphertext:
+
+```sh
+umask 077
+mkdir restore-private
+cd restore-private
+mkdir gpg-home
+```
+
+Copy the three objects and verifier here. First check bounded descriptor schema,
+exact object names and ciphertext sizes/hashes. This transport check treats the
+descriptor as untrusted:
+
+```sh
+python3 -I verify_recovery.py \
+  --descriptor RUN.manifest.json \
+  --archive-ciphertext RUN.tar.gz.gpg \
+  --recovery-ciphertext RUN.recovery.json.gpg
+```
+
+Enter the separately saved secret at GnuPG's prompt. Never put it in a command
+argument or environment variable. Decrypt to partial files, checking each
+command's successful exit before renaming:
+
+```sh
+gpg --no-options --homedir "$PWD/gpg-home" --rfc4880 \
+  --no-symkey-cache --pinentry-mode loopback --status-fd 3 \
+  --output recovery.json.partial --decrypt RUN.recovery.json.gpg \
+  3>recovery.status && mv -n recovery.json.partial recovery.json
+
+gpg --no-options --homedir "$PWD/gpg-home" --rfc4880 \
+  --no-symkey-cache --pinentry-mode loopback --status-fd 3 \
+  --output backup.tar.gz.partial --decrypt RUN.tar.gz.gpg \
+  3>archive.status && mv -n backup.tar.gz.partial backup.tar.gz
+```
+
+Require `DECRYPTION_INFO 2 9 0` (or the GnuPG version's equivalent omission of
+the zero AEAD field), `DECRYPTION_OKAY` and completed decryption in both status
+files, with no integrity/decryption failure. Reject AEAD, missing MDC or other
+algorithms. Never use `--ignore-mdc-error`. GnuPG can emit most plaintext before
+detecting a damaged final MDC: do not extract partial output or pipe decryption
+directly into tar. Delete failed partial outputs before retrying.
+
+After the recovery-document command succeeds, you can check its bindings before
+decrypting the larger archive by adding `--recovery recovery.json` to the
+transport-check command. This checks the recorded installation, run, key and
+provider scope against the descriptor and archive ciphertext.
+
+Then cross-check the decrypted recovery bindings and fully verify the plaintext
+archive SHA256/size, gzip trailer, tar layout, embedded manifest and every
+payload hash:
+
+```sh
+python3 -I verify_recovery.py \
+  --descriptor RUN.manifest.json \
+  --archive-ciphertext RUN.tar.gz.gpg \
+  --recovery-ciphertext RUN.recovery.json.gpg \
+  --recovery recovery.json --archive backup.tar.gz
+```
+
+The verifier checks content; successful GnuPG completion and the pinned-profile
+status checks establish the preceding decryption proof. Proceed with the
+isolated restore steps below only after both succeed. Preserve the original
+APP_KEY and Passport keys within a full archive, disable copied schedules, and
+assign the restored installation a new UUID. A database-only artifact supplies
+SQL, not application files. Remove private scratch plaintext when finished;
+terminate only the scratch home's agent if cleanup is needed:
+`gpgconf --homedir "$PWD/gpg-home" --kill gpg-agent`.
 
 Each backup tracks its local and S3 copies independently. Expiring a local copy
 does not expire its S3 copy. Use Retrieve from S3 on the page, or `retrieve ID
@@ -88,7 +221,9 @@ Full restore into an isolated new host/path:
    and must not be used. Check its size and SHA-256 against the backup's
    manifest before restoring.
    Verification reads all gzip bytes including CRC/trailer and every payload
-   hash. Fetch remote manifest and full archive; do not use ETag as SHA256.
+   hash. For a recognized plaintext remote copy fetch its full manifest and
+   archive; for an encrypted copy complete the fresh-machine decryption and
+   verifier procedure above first. Do not use ETag as SHA256.
 3. Extract outer tar.gz into a private scratch directory. It contains
    `database.sql`, `app.tar` for full mode, and embedded `manifest.json`. Extract
    app.tar into a new application path with GNU tar ACL/xattr/numeric-owner

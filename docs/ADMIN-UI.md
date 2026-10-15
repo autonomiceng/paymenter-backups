@@ -10,10 +10,11 @@ JavaScript frameworks or Tailwind utilities beyond what the theme ships.
 
 | Person | First question | Page answer |
 | --- | --- | --- |
-| First-time administrator | What do I need to do before backups work? | A setup checklist of at most a few lines (save settings, scheduler, host checks), and the settings form. |
-| Returning administrator | Are my backups fine, and when is the next one? | Last good backup, next scheduled backup, storage, scheduler check-in, then history. |
-| Administrator under pressure | Can I get a copy now? | A row-level Download button on every verified backup. |
-| Administrator cleaning up | Can I remove this one safely? | A Delete preview that names every copy it removes and refuses when it would remove the last verified backup. |
+| First-time administrator | What do I need to change on this server? | Setup, per backup type: each blocker named with its exact fix (cron line, `.env` keys, service to stop) and one action. Never a count. |
+| Returning administrator | Are my backups fine, and when is the next one? | Last full and last database backup, next of each, last upload to S3, cron job check-in, then history. |
+| Administrator under pressure | Can I get a copy now? | A row-level Download button on every verified backup; Download from S3 for copies only in S3. |
+| Administrator cleaning up | Can I remove this one safely? | A Delete preview that names what it removes and refuses when it would remove the last verified backup. |
+| Administrator losing the server | Can I still restore from S3? | A recovery key flow that shows, downloads and confirms the key before encrypted uploads start. |
 
 ## Layout
 
@@ -23,77 +24,123 @@ One page, three tabs. "Create backup" is the only header action.
 Backups                                                     [Create backup]
 [ Backups ]  [ Settings ]  [ Help ]
 
-  Callout (only while something is open)
-  Finish setup
-   • Paymenter's scheduler has not run yet. Check the existing Paymenter server scheduler.
-   • Full backups need 3 items under Settings, Host checks.
-                                         [Open settings] [Paymenter scheduler setup]
+  Section: Setup (only while something is open)
+   All backups
+    ⚠ Save your recovery key          [Show recovery key] [Download] [I saved it]
+    ⓘ Test your storage                                         [Test storage]
+   Database backups
+    ✓ Ready. Next: 14 Oct 2026, 06:00 UTC.
+   Full backups
+    ⚠ Not ready. Scheduled backups can't run yet.
+    ⚠ Add a lock file to this cron job
+      Now: * * * * * php /var/www/paymenter/artisan schedule:run >> /dev/null 2>&1
+      Replace it with: * * * * * /usr/bin/flock -n …/scheduler.lock … (copyable)
+    ⚠ Paymenter stores data in Redis
+      CACHE_STORE=file SESSION_DRIVER=file (copyable)
+    ⚠ Confirm nothing else writes to Paymenter               [Confirm in Settings]
 
-  Section: Overview (description list, not stat cards)   [Test storage] [Apply retention]
-   Last verified backup 13 Oct 2026, 02:00 UTC, 4 hours ago
-   Next automatic backup Off. Turn on automatic backups in Settings.
-   Stored on            This server (or: This server and S3 bucket NAME)
-   Space used           1.2 GiB of 10 GiB, 3 backups
-   Scheduler            Last ran 1 minute ago
+  Callouts, one per condition: not uploaded to S3, space full, maintenance
+  mode, cleanup skipped, legacy unencrypted uploads
 
-  Section: Tasks (only while tasks are queued, running or recently failed)
-   | Task                  | Requested     | Status                  |        |
-   | Create full backup    | 2 minutes ago | Waiting for scheduler   | Cancel |
+  Section: Overview (description list)               [Delete old backups now]
+   Last full backup       13 Oct 2026, 02:00 UTC (4 hours ago)
+   Last database backup   14 Oct 2026, 06:00 UTC (12 minutes ago)
+   Next full backup       18 Oct 2026, 03:00 UTC
+   Next database backup   14 Oct 2026, 07:00 UTC
+   Last upload to S3      13 Oct 2026, 02:00 UTC, checked 2 hours ago
+   Stored on              This server, S3 (my-bucket)
+   S3 encryption          On, recovery key 3f9a…
+   Space used             1.2 GiB of 10 GiB, 3 backups
+   Cron job               Ran 1 minute ago
+   Storage test           Passed 2 hours ago                    [Test storage]
 
-  Table: Backup history                                            [Refresh]
-   | Created ▼        | Type          | Size    | Status   | Stored on      |            |
-   | 13 Oct, 02:00    | Full          | 412 MiB | Verified | This server    | Download ⋯ |
-   | 12 Oct, 02:00    | Database only | 38 MiB  | Failed   | Not stored     |          ⋯ |
+  Table: Backup history                                         [Show deleted]
+   | Created (UTC)  | Type             | Size    | Status   | Stored on        |
+   | 13 Oct, 02:00  | Full / Scheduled | 412 MiB | Verified | This server, S3  | Download ⋯
 ```
 
-Settings tab, in reading order: What to back up, Schedule, Storage, Host
-checks, Retention and space, Advanced (collapsed: time limits, directories and
-programs), then the "Save settings" button. Host checks shows only what the
-chosen backup type needs: the schema-change confirmation for both types, plus
-job lock files and two more confirmations for full backups. The Backup directory
-default appears as selectable code below a blank input; the Overview only says "This
-server". Below the form, S3 access keys appear when S3 is chosen and HTTP Basic
-authentication appears as a collapsed advanced section for full backups. Saved credentials keep their section available even after the mode or destination changes. Each credential section saves separately
-from settings. HTTP Basic authentication always explains the browser password
-prompt and its maintenance check purpose, including before setup, after saving,
-and when HTTPS is unavailable. It distinguishes these credentials from the
-Paymenter account login. The saved state names the replacement action and says
-that the saved values are hidden. The server supplies the maintenance check base from App URL in Paymenter settings. Remove stays available when saved credentials no longer match that address, including after a change to HTTP.
-Removal deletes the extension's saved credentials without changing server or
-account passwords. Before setup, the page asks the administrator to save settings.
+Settings tab, one form, one "Save settings" button at the bottom (mod+s):
 
-Below 640 px the history table uses Filament's stacked-on-mobile layout: each
-row lists Created and Status with its full detail, then Download and More
-actions together on a separate line. Type, Size and Stored on stay in Details below
-768 px (Stored on below 1024 px). Long commands on the Help tab wrap inside
-the page.
+```
+  First-time setup (only before the first save)
+   Data directory [/srv/paymenter-backups-private]   Other public web folders
+  Schedule
+   ┌ Full backups ──────────────┐ ┌ Database backups ─────────────┐
+   │ Frequency  Off/Daily/Weekly│ │ Frequency Off/Hourly/Daily/W. │
+   │ On these days, At (billing │ │ Every N hours, At minute      │
+   │ window as clock times)     │ │ (or At, On these days)        │
+   │ Keep on this server  [7]   │ │ Keep on this server  [24]     │
+   └────────────────────────────┘ └───────────────────────────────┘
+   Time zone
+  Storage
+   Backup directory (placeholder = default)   legacy-folder hint
+   Space limit for backups (GiB)   Minimum free disk space (GiB)
+   [x] Keep backups on this server
+   [ ] Upload to S3
+       Endpoint, Region, Bucket, Folder in bucket, Path-style addressing
+       Access key ID, Secret access key, Session token ("Saved. Leave empty to keep.")
+       Keep full / database backups in S3: same number / last N / N days / all
+       [x] Encrypt backups in S3
+           Recovery key: (•) Generate a recovery key  ( ) Use my own passphrase
+           or, once a key exists: status line, Show / Download / I saved it,
+           Create a new recovery key, Discard this key
+       [ ] I understand backups in S3 won't be encrypted (only with encryption off)
+   Delete old backups automatically
+  Full backup requirements
+   Detected cron jobs and queue workers, each with status and fix line
+   Detected cache, session, queue, file storage and maintenance drivers
+   [ ] No other program writes to Paymenter's database or files.
+   Site password (HTTP Basic), collapsed unless saved or needed
+  Before backups run
+   [ ] I won't update Paymenter, install extensions or run migrations while a backup runs.
+  Advanced (collapsed)
+   Binary paths (placeholder = detected), Time limits, Lock files (override), Folders
+                                                             [Save settings]
+```
 
-Help explains what a backup contains and why the existing Paymenter server
-launcher must invoke its scheduler. It links the official installation guide.
-A collapsed job coordination section shows a `flock` wrapper for the existing
-scheduler command. Paymenter server setup owns systemd timers and cron jobs. Backups does not
-install or change them; it registers tasks with Paymenter and reports check-ins.
-Help states that enabling or changing a schedule starts at its next future time.
-After an outage, missed times in the last eight days produce one fresh backup,
-possibly outside the planned time. Full backups show the maintenance page. A
-newer scheduled time replaces a waiting catch-up; maintenance and admission
-checks still apply, with no backlog. Terminal help defines one shell function, then gives short commands for offline
-status, recovery, explicit recovery acknowledgement and export. Detailed host
-setup belongs to Paymenter's installation and the server operator.
+Help is a set of collapsible sections with ids for deep links:
+`backup-contents`, `how-backups-run`, `full-backups`, `encryption`,
+`schedules`, `cleanup`, `restoring`, `command-line`. Settings sections use
+`first-time-setup`, `schedule`, `storage`, `s3`, `full-backup-requirements`,
+`site-password`, `before-backups-run` and `advanced`. Setup items link to
+`?tab=settings#SECTION` or `?tab=help#SECTION`.
 
-Apply retention uses the engine's local and S3 candidate counts. Local retention
-keeps at least one verified local backup. S3 retention selects a local-count,
-independent count, age or keep-all policy and always keeps its newest S3
-copy. Older backups can therefore exist only in S3. Their contextual action is
-Retrieve from S3, which queues retrieval and verification; Download appears when
-the local archive is ready. Details show a retrieved copy's retention protection.
-Delete uses one dialog with a storage-location choice and a live read-only
-preview. The deleted filter appears only when a deleted backup exists.
+Below 640 px the history table uses Filament's stacked-on-mobile layout. Type,
+Size and Stored on move to Details below 768 px (Stored on below 1024 px). The
+two schedule fieldsets stack below 768 px. Commands wrap inside the page.
 
-Create backup disables a backup type that cannot start and shows why, with
-Open settings; when neither type can start the dialog only offers Close. The
-empty history offers Create backup once setup is complete, and otherwise says
-to finish setup first.
+### Readiness
+
+Setup renders `configuration.readiness[mode].items` from the engine. The page
+never reconstructs policy: an item's code and safe detail become a title, one
+line of explanation, exact fixes and at most one action through
+`Messages::readinessItem()`. Items present for both modes appear once under
+"All backups". Items only blocking full backups appear under "Full backups", so
+the administrator always sees that database backups work. Repeated fix lines
+show once per group. The page adds only its own preconditions: "Save your
+settings" before the first save, an invalid configuration, the recovery key
+confirmation, and an advisory "Test your storage".
+
+Create backup uses the engine's per-mode `configuration.admission` to
+distinguish capture blockers from delivery setup. Per-mode readiness remains
+the source of named setup items; its state can need setup for uploads while
+local capture is admissible. Older envelopes without admission fall back to
+readiness and the documented delivery advisories. Waiting codes (billing window,
+a busy cron job lock, another task) and S3 key and encryption setup never block
+creating a backup on this server; uploads wait for them instead. Billing
+`checks.billing.window_before` and `window_after` are the authoritative HH:MM
+clock times displayed by the page, including windows crossing midnight.
+
+### Recovery key
+
+When "Encrypt backups in S3" is on and no key exists, Save creates one: a
+generated key by default, or the administrator's passphrase (at least 20
+characters, at most 1024 UTF-8 bytes, with no Unicode control characters). Save
+then opens "Show the recovery key?". Confirming renders the key once in its dialog with Download recovery key and I saved it. The block
+stays in Setup and in Storage until the key is confirmed with the checkbox "I
+saved this recovery key outside this server". Uploads start only after that.
+Create a new recovery key rotates: new uploads switch after the new key is
+confirmed; earlier copies keep needing their own keys.
 
 ## Visual decisions
 
@@ -103,121 +150,126 @@ shown inline. Use Filament semantic status colors:
 
 | Meaning | Filament color | Used for |
 | --- | --- | --- |
-| Verified, done | success | Verified backups, completed tasks |
-| Waiting, in progress | info | Queued and running tasks, backups being created |
-| Needs a person | warning | Setup items, retries, verification needed |
-| Broken | danger | Failed backups and tasks, damaged archives |
-| Historical | gray | Deleted backups, cancelled tasks |
+| Verified, done, ready | success | Verified backups, completed tasks, ready types, detected items that pass |
+| Waiting, in progress, advisory | info | Queued and running tasks, waiting types, advisory setup items |
+| Needs a person | warning | Setup blockers, retries, verification needed |
+| Broken | danger | Failed backups and tasks, damaged archives, interrupted full backups |
+| Historical, off, unknown | gray | Deleted backups, cancelled tasks, types without a schedule |
 
 * Show overview facts in one description list.
-* Use status icons for independent setup conditions.
-* Lead backup history with dates and keep run IDs in Details.
-* Use sentence case, native components, and semantic status colors.
+* Use status icons for independent setup conditions. Name each blocker and its
+  fix without a blocker count.
+* Render lists with `UnorderedList` and commands with `Text` in the theme's
+  monospace font. Commands are copyable over HTTPS and wrap at 375 px using
+  `overflow-wrap: anywhere; white-space: pre-wrap`.
+* Put field help in the field's helper text.
+* Use sentence case and plain labels without decorative headings or metadata.
 
 ## Language rules
 
-Write for a hosting administrator who knows backups but not this engine.
-Never promise a start time or a pause length the host has not shown: queued
-work starts when Paymenter's scheduler next runs, and a full backup's
-maintenance page lasts until the copy finishes, which depends on the data and
-the time limits under Advanced.
-Name what the person sees ("site shows a maintenance page"), not internals
-("native prerendered maintenance"). One action keeps one name: the button
-"Create backup" produces the notice "Backup queued". Errors say what happened
-and what to do next. They never apologise. Known errors use plain explanations. Details may show a
-safe support error code; private paths, stderr and JSON never appear. Engine codes, statuses and task names come from
-`extension/Backups/Messages.php`. Forms and actions use the same terms.
+Write for a hosting administrator who knows backups but not this engine. Use
+the industry words: cron job, binary, data directory, retention, maintenance
+mode, access key ID, secret access key, endpoint, path-style addressing, folder
+in bucket, recovery key, site password (HTTP Basic). Fixed action names: Upload
+to S3, Download from S3, Delete old backups now, Verify, Create backup.
+
+Each sentence does one job. Never repeat an explanation in a description,
+helper and status line. Don't describe the interface ("click X to Y"). Errors
+say what happened and what to do; they never apologise. Name what the person
+sees ("the site shows its maintenance page"), not internals.
+
+Start times: "Starts within a minute" appears only while the cron job checked
+in within five minutes and no other task is active. Otherwise the page says
+when the cron job last ran and that work starts when it next runs. A full
+backup's maintenance page lasts until the copy finishes, up to the backup time
+limit.
+
+Details may show a safe error code labelled "Error code"; private paths,
+stderr and JSON never appear. Engine codes, statuses, setup items and task names
+come from `extension/Backups/Messages.php`.
 
 ## Safety seam
 
 These rules bind the page to the engine. The engine stays authoritative.
 
 1. **No heavy work in PHP-FPM.** The page writes durable requests. The
-   scheduler tick launches capture, verification, copy to S3, retention and
-   deletion. Page loads read a whitelisted `overview` from the engine.
-2. **Whitelisted presentation.** `overview` returns dates, mode, size, status
-   codes, copy locations and safe error codes. It never returns archive or
-   manifest paths, manifests, database grants, process identities, request
-   results or stderr. The table data is recomputed per request and never
-   stored in a public Livewire property.
-3. **Settings validation before persistence.** The form mirrors the engine's
-   field rules with plain Laravel rules (no closures, which Filament would
-   evaluate as its own utilities). On save the page compares the submitted
+   scheduler tick launches capture, verification, upload, download from S3,
+   cleanup and deletion. Page loads read a whitelisted `overview`.
+2. **Whitelisted presentation.** `overview` returns dates, modes, sizes, status
+   codes, copy locations, safe error codes, readiness items with safe scalar
+   detail, detected jobs as reconstructed display commands, store drivers and
+   key fingerprints. It never returns archive or manifest paths, raw crontab
+   lines, process identities, request results, stderr or secrets. Table data is
+   recomputed per request and never stored in a public Livewire property.
+3. **One Save, validated before persistence.** Save validates the settings form
+   and every secret group in one pass (plain Laravel rules, no closures in
+   `rules()`), so one response shows every problem. Pure shared credential
+   and archive-secret validation also runs before writes, enforcing the
+   bridge's UTF-8 byte limits and control-character rules without changing
+   secret bytes. Secret groups are validated
+   only when entered; S3 keys must be a complete pair, and are required only
+   when uploads are on and no keys are saved. The page then compares submitted
    values with native rows read on the server, sends the changes to
-   `config check`, which runs the engine's normalization, validation and
-   schedule/billing admission without writing, then writes changed native rows
-   through Eloquent, which keeps native auditing, and runs `init`. If `init`
-   fails, the rows are put back and the page says the settings were not saved.
-   The first save initializes private storage even with no field changed. Malformed
-   non-location rows show trusted defaults and are corrected by the next save.
-   Invalid schedule and job-lock JSON remains raw on the cold read until the
-   configuration check merges that validated repair. Ordinary engine reads
-   refuse it. A successful repair names the corrected fields in a warning. Malformed public-directory guard JSON is never defaulted: the page
-   refuses and directs the administrator to the native Extensions editor. A
-   change to an initialized extension data directory is refused. Field errors open a
-   collapsed section and scroll to the field, and a notification says to check
-   the highlighted fields. Saving settings never opens or rewrites the
-   encrypted credential file.
-4. **Secrets are write-only.** S3 keys and the HTTP Basic credentials live in public
-   Livewire arrays that `dehydrate()` resets on every response, including
-   validation failures and unrelated actions. The page shows only "Saved" or
-   "Not saved". The HTTP Basic authentication address is Paymenter's own https origin,
-   taken on the server. Saving either secret needs initialized private
-   storage; it never creates it.
-5. **Safe artifact resolution.** `artifacts.py` is the one place that turns a
-   run ID into files. It requires the strict run ID grammar, an owner-private
-   journal for this installation, recorded names exactly `RUN.tar.gz` and
-   `RUN.manifest.json` in one canonical, owner-only directory outside the app
-   and every declared document root, and opens each file with `O_NOFOLLOW`
-   relative to that directory. Files must be regular, owned by the app user,
-   mode 0600 and have one link. Verify, download, retention and per-backup
-   delete use it.
-6. **Download needs a recorded verification.** Capture and queued
-   verification record the archive identity (device, inode, size, mtime and
-   ctime in nanoseconds) and SHA-256 after a full check. The download route
-   accepts only a run ID, checks native auth and `admin.extensions.update`,
-   and starts the engine's `artifact-stream`. The engine opens the archive
-   once, compares the open descriptor to the recorded identity and the manifest
-   digest, and streams from that descriptor. It hashes while streaming and
-   withholds the final chunk until the hash matches, so a changed file never
-   arrives complete. A missing or stale record requires verification. Remote-only archives use a
-   queued retrieval before Download. The recorded download readiness enables
-   Download independently of an interrupted deletion at the other location.
-7. **Per-copy delete is a request.** The preview uses the selected local, S3 or
-   all-copy location. The engine requires a verified survivor at each selected
-   location and refuses the newest S3 copy, conflicting tasks and out-of-scope
-   remote copies. Execution records per-location intent before removal and
-   resumes that same location on retry. Local unlinks use the verified directory
-   descriptor and the complete file identity. A failed S3 deletion leaves a
-   verified local download available. Deleting a copy never changes retention.
+   `config check`, writes changed native rows through Eloquent (audited) and
+   runs `init`. If `init` fails, the rows are put back and the page says the
+   settings were not saved. Only then does it call `Runtime::saveCredentials()`
+   for entered secrets and `Runtime::encryptionKey()` for a requested key. A
+   failure there is reported honestly: "Settings saved" with a warning naming
+   what was not saved, and the secrets must be entered again.
+4. **Settings versions.** Rows with `settings_version` absent or 1 keep their
+   0.3 meaning. The page shows them through `Settings::fromLegacy()`, the PHP
+   half of the shared v1-to-v2 adapter, and proposes encryption on. The first
+   Save writes `settings_version=2` and every version 2 key explicitly, and
+   clears the old plaintext acknowledgement. Legacy uploads stay plaintext until
+   that save.
+5. **Guards that never default.** Malformed non-guard rows show trusted defaults,
+   are rewritten by the next save and are named in a warning. Malformed
+   public-directory guard JSON is refused with a pointer to the native
+   Extensions editor. A change to an initialized data directory is refused.
+   When the engine itself cannot start, Save writes only changed binary paths,
+   the data directory and public web folders ("Binary paths saved").
+6. **Secrets are write-only.** `$s3Keys`, `$siteAccess` and the passphrase in
+   `$encryptionInput` are reset by `dehydrate()` on every response, including
+   validation failures and unrelated actions. They render inside the one form
+   through embedded schemas, without nested `<form>` elements. The site
+   password's address is Paymenter's own https origin, taken on the server; an
+   http address offers no site password field. Saving secrets never creates
+   private storage.
+7. **The recovery key never enters Livewire state.** `Runtime::revealRecoveryKey()`
+   is called only while rendering the confirmed "Recovery key" dialog and is
+   cached for that request only. The key is in that dialog's HTML and nowhere
+   else: not in public properties, action data, notifications or the overview.
+   Table polling pauses while any dialog is open. Only the nonsecret
+   fingerprint is kept (locked) to bind the confirmation to the key that was
+   shown. Opening the acknowledgement dialog freezes that exact fingerprint;
+   replacement of the pending key requires a new confirmation and never
+   redirects an existing confirmation to the replacement key. Download uses `Runtime::recoveryKeyUrl()`, a fresh five-minute signed
+   link opened by a server action, outside SPA navigation.
+8. **Safe artifact resolution, verified downloads, per-copy delete.** Unchanged
+   from 0.3: see [ARCHITECTURE.md](ARCHITECTURE.md). Download needs a recorded
+   verification; S3-only copies use Download from S3 first; Delete previews the
+   selected location and requires a verified survivor in each place.
 
 ## Accessibility and states
 
-Native Filament controls provide labels, focus rings, keyboard tab order and
-dark mode. The page adds:
+Native Filament controls provide labels, focus rings, keyboard order and dark
+mode. The page adds:
 
-* Essential field help stays visible and concise. Selected unfamiliar settings
-  also have a named native help button. It opens a short dialog by click, tap or
-  keyboard, with Close and no submit action. Tooltips supplement those buttons.
-* Filesystem labels use Directory. The S3 Object prefix explains that its value
-  and this installation's ID precede object names.
-* Help commands are escaped native Filament Text components. They wrap without
-  changing copied text. HTTPS supports click, Enter and Space. HTTP offers
-  selectable text and explains that automatic copying needs HTTPS. A single instruction
-  explains copying; the visible command text is its accessible name, with a supplemental tooltip.
-* Every destructive action uses a Filament confirmation modal with a danger
-  button that repeats the action name.
-* Loading: Filament button spinners on every action. The table polls every
-  5 seconds only while a task is queued or running.
-* Download: PHP waits at most 30 seconds for the engine to start the stream and
-  60 seconds between chunks, then stops the engine and ends the transfer short.
-* Download is an ordinary link that the browser saves in the same tab. Each
-  download address is a Filament SPA exception, so Livewire navigation does
-  not intercept the attachment. Other admin links keep SPA navigation.
+* Commands are escaped Filament `Text`. Over HTTPS they copy their exact text
+  by click, Enter or Space. Over HTTP Help says that copying needs HTTPS and the
+  text stays selectable.
+* Every destructive action uses a Filament confirmation with a danger button
+  that repeats the action name.
+* Loading: Filament button spinners. The table polls every 5 seconds only while
+  a task is queued or running, and never while a dialog is open.
+* Download links and the recovery key download are Filament SPA exceptions, so
+  the browser saves the attachment instead of navigating to it.
 * Action confirmations render once, before the tabs, from the extension's
-  `backups::page` view. Filament renders the action modal container only once
-  per page. Without this view the history table renders it inside the Backups
-  tab, and a confirmation opened from Settings stays hidden.
-* Empty history: "No backups yet" with the Create backup action.
-* Engine unavailable: a danger callout that explains the web process cannot
-  reach private storage and gives the terminal command to diagnose it.
+  `backups::page` view. Filament 5 returns only the `action-modals` partial when
+  an action mounts; without this view a confirmation opened from Settings would
+  stay hidden inside the Backups tab.
+* "Delete old backups now" stays in the Overview header, disabled with the
+  tooltip "Nothing to delete", so the header does not jump.
+* Empty history: "No backups yet" with Create backup once a type is ready.
+* Engine unavailable: a danger callout "Backups can't start" with the reason and
+  the offline overview command.

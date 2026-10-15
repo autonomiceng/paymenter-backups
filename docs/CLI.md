@@ -15,7 +15,8 @@ Development uses `bin/paymenter-backups` with the same arguments. Global flags
 precede the workflow. Defaults: app is the working directory, private root is
 `../paymenter-backups-private`, bridge is `extensions/Others/Backups/bridge.php`,
 PHP is `/usr/bin/php`. Select the actual hosting PHP binary explicitly. Every
-command emits JSON; failures emit only a safe error code to stderr and exit 1.
+command emits JSON; failures emit a safe error code and optional nonsecret
+field/detail diagnostics to stderr and exit 1.
 `--version` and `--help` need no application.
 
 | Workflow | Behavior |
@@ -25,15 +26,15 @@ command emits JSON; failures emit only a safe error code to stderr and exit 1.
 | `config check` | JSON stdin `{"settings":{…}}`; validates proposed settings, writes nothing |
 | `config set` | JSON stdin; native nonsecret writes through audited Eloquent |
 | `init` | Explicitly provision private installation identity and policy |
-| `schedule show` | Current daily/weekly schedule |
-| `schedule set` | JSON stdin of schedule fields |
-| `schedule enable`, `schedule disable` | Explicit native schedule changes |
+| `schedule show [--kind full\|database]` | Versioned schedule configuration and next slots |
+| `schedule set --kind full\|database` | JSON stdin; frequency/time/weekdays/timezone, database every_hours/minute |
+| `schedule enable`, `schedule disable` | Optional --kind; v2 unqualified disable disables both; ambiguous set/enable refuse |
 | `plan` | Admission assessment and consistency scope |
 | `run` | Plan only |
 | `run --execute` | Foreground capture using configured mode, then delivery |
 | `run --execute --mode database-online` | Transactional SQL snapshot only |
 | `list`, `status` | Offline durable runs, recovery state and requests |
-| `overview [--offline]` | Whitelisted backups, tasks and readiness; no paths, manifests or results |
+| `overview [--offline]` | Whitelisted backups, tasks and readiness; no archive paths, manifests or results |
 | `verify ID [--show]` | Offline whole archive, gzip trailer and payload verification |
 | `verify ID --record` | Same check under the run lock; records the identity that enables admin download |
 | `deliver ID` | Idempotent S3 delivery; repairs missing/corrupt remote markers |
@@ -48,8 +49,12 @@ command emits JSON; failures emit only a safe error code to stderr and exit 1.
 | `recover acknowledge --run ID` | Record operator resolution, preserve every app file |
 | `export ID --output /private/new-kit` | Copy verified archive and recovery instructions |
 
-`status`, `list`, `overview --offline`, `verify`, `recover`, requests and export work without PHP,
-Laravel, database or provider startup. Configuration reads and plans use the
+`status`, `list`, `overview --offline`, `verify`, `recover` and requests work without PHP,
+Laravel, database or provider startup. Recovery-kit export and recovery-key
+export require a cold PHP/PDO read of the current native document roots before
+validating the output location. Missing capture tools or invalid unrelated
+capture settings do not prevent that privacy check; unreadable roots refuse
+export. Configuration reads and plans use the
 cold PHP/PDO bridge. Native config writes require a bootable application.
 Native MySQL/MariaDB host/socket connections and `DB_URL` are honored. Native
 database TLS options currently refuse with `database-tls-unsupported`; matching
@@ -128,7 +133,7 @@ still requires exact native 503/template bytes; 401/200/404/redirect refuse.
 
 Defaults and prerequisites:
 
-* Schedule disabled; daily at 02:00 UTC when enabled. Weekly weekdays use Monday
+* Legacy (settings_version absent/1): schedule disabled; daily at 02:00 UTC when enabled. Weekly weekdays use Monday
   0 to Sunday 6. Enabling or editing starts at the next future slot. After an
   outage, one fresh backup is queued instead of a backlog. Unstarted tasks
   expire `request_max_age` after creation, default 24 hours.
@@ -144,7 +149,10 @@ Defaults and prerequisites:
   owner-private location outside the app and every hosting document root.
   Declare every additional hosting document root with `extra_docroots` (JSON
   absolute path list). Canonical app/public is always excluded. This policy is
-  stored privately for offline exports and refreshed by native config saves.
+  stored privately for offline artifact checks and refreshed by native config
+  saves. Both export commands always refresh it in memory from native rows,
+  including after a failed initialization; they never rely on the cached policy
+  to authorize plaintext output.
 * Byte budget 10 GiB, minimum free reserve 1 GiB. Polling plus per-child file-size
   limits bound output. Reserve and budget include retained failed payloads. A
   filesystem's available space does not establish a hosting subscription quota.
@@ -185,7 +193,7 @@ requests; PHP-FPM never performs capture or delivery. Tick recovery runs while
 maintenance is active and before cold configuration reads. Foreground capture
 preserves strict pre-existing maintenance; scheduled captures skip it.
 
-For S3 set destination, HTTPS endpoint (or AWS default), region, bucket, prefix,
+For legacy S3 set destination, HTTPS endpoint (or AWS default), region, bucket, prefix,
 path-style selection and `plaintext_offsite_acknowledged=true`. The UUID is
 always appended to the prefix. Request/response checksum policy is
 `when_required`; complete streamed GET SHA256 validates archive and manifest.
@@ -233,3 +241,60 @@ Before rollback, keep a private copy of the encrypted file and avoid credential
 edits with that bridge. Install a version supporting every saved namespace before
 entering probe credentials again. Without authenticated maintenance probes,
 full mode can refuse with 401.
+
+
+## Settings v2 and independent schedules
+
+The native marker settings_version=2 adopts independent schedules and retention. Missing/1 retains
+legacy behavior until an explicit save; the adapter never writes or starts work.
+V2 starts with both schedules off, local storage on and S3 upload off. Full
+schedule defaults to 03:00/Sunday; database to hourly interval 1/minute 0 or
+daily/weekly 02:00/all weekdays. Full supports off/daily/weekly; database also
+supports hourly intervals 1,2,3,4,6,8,12 at local divisible hours and minute 0-59.
+Examples after explicit v2 adoption:
+
+```sh
+printf '%s\n' '{"frequency":"hourly","every_hours":2,"minute":15,"timezone":"UTC"}' |
+  bin/paymenter-backups --app /srv/paymenter schedule set --kind database
+printf '%s\n' '{"frequency":"weekly","time":"03:00","weekdays":[6]}' |
+  bin/paymenter-backups --app /srv/paymenter schedule set --kind full
+bin/paymenter-backups --app /srv/paymenter schedule show
+bin/paymenter-backups --app /srv/paymenter schedule disable --kind full
+bin/paymenter-backups --app /srv/paymenter schedule disable
+```
+
+Unqualified set/enable selects the sole non-off kind or refuses
+schedule-kind-required; it never enables both. Explicit enable of an off kind
+uses daily for full/hourly for database. V1 unqualified commands retain their
+old fields; --kind must match its selected legacy mode. Enabling/editing starts
+in the future, including an exact-minute save. Timezone edits reset both epochs;
+other edits affect only their kind. Catch-up is one latest slot within eight
+days per kind, with expiry measured from queue creation. DST gaps skip and
+repeated v2 wall times run once. Both due obligations are queued with explicit
+modes; eligible full wins an initial tie, deferred work is retried fairly.
+A verified/service-recovered full snapshot at or after a waiting scheduled
+database slot durably satisfies that slot before delivery; manual tasks remain.
+
+V2 retention uses retention_keep_full=7 / retention_keep_database=24 and
+s3_retention_policy_{full,database}=local-count, inactive counts 30/168 and
+ages 90/90. Ordinary deletion requires another verified same-kind copy at each
+selected location. Unknown/inconsistent modes stay. Newest S3 copies are
+protected separately by kind. Keep-local/upload-S3 must have at least one true.
+S3-only uploads require full remote proof before journaled local staging removal;
+already-delivered/remote-only retry follows the same proof. Retrieved copies
+have a 24-hour lease; only expired retrievals can use this same-run exception.
+This exception does not authorize ordinary Delete. Disk budgets include staging.
+
+Settings validation and initialization use credential-free read-settings, so
+unreadable saved keys do not prevent nonsecret repair. Combined credential
+submissions merge requested S3/site namespaces in one credential write; omitted
+or null groups stay unchanged. Settings and credentials are separate resources.
+Binary paths may be blank to detect via fixed trusted directories; explicit pins
+remain authoritative. PHP follows the hosting version. Overview names the tool,
+store and job behind a refusal and returns clock-time billing-window boundaries.
+
+V2 encryption defaults on. Check encryption settings and remote formats.
+Encrypted delivery must refuse when encryption support is unavailable. Plaintext upload requires acknowledgement, including a fresh
+explicit acknowledgement when turning encryption off. Existing acknowledged v1
+S3 uploads remain plaintext until adoption. See ARCHITECTURE.md for the exact
+overview fields and encryption requirements.

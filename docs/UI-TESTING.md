@@ -8,56 +8,82 @@ downloads separately from native Livewire assertions.
 ## Workflow map
 
 "Fixture" means the disposable pinned Paymenter application, MariaDB socket,
-private root and fake credentials created by `tools/native_integration.py`.
+private root and fake credentials created by `tools/native_integration.py` or
+`tools/native_ui_fixture.py`.
 
 | Workflow | Page control | Engine call and durable result | Isolated test |
 | --- | --- | --- | --- |
-| Status, readiness | Backups tab: setup checklist, Overview, Backup history | `overview`: whitelisted runs, requests, per-mode admission, next slot, scheduler check-in | `test_admin_workflows`, native `check` and `ui-history render` |
-| Edit settings | Settings tab, Save settings | Filament rules, then `config check`, then changed native rows through Eloquent (audited). Credentials untouched | Native `check`: invalid values, disclosed hidden malformed JSON repair, strict guard refusal/native editor repair, billing window, row diff, audit, credential digest |
-| Native fallback | Extensions editor | Same labels and engine-matching rules as stored strings; `updated()` advisory | Native `check`: zero, weekday 7 and relative path refused |
-| S3 keys | Settings, S3 access keys for S3 or previously saved keys | Bridge `credentials-write`, or `{"clear":true}`; probe namespace kept | Native `check`: validation reset, canary absence, encryption, removal. Contract test `admin_contracts.php modals`: the Remove confirmation renders outside the tab panels |
-| HTTP Basic authentication | Settings, collapsed advanced HTTP Basic section for full backups or saved credentials | Bridge `maintenance-probe-credentials-write`; origin taken on the server from Paymenter's https URL | Native `check`: browser-sent origin ignored, HTTP save refused, HTTP removal available, purpose preserved, unreadable store kept, removal keeps S3 |
-| Create backup | Header action, mode choice, blocking reasons | `requests create --action run` with `mode`, `actor`; tick starts it | Native `check`: pending request, no capture in FPM |
-| Cancel waiting task | Row Cancel, or More actions, Cancel task | `requests cancel` | Native `check` cancels spooled requests |
-| Download | Row Download link | Panel-authenticated route, `artifact-stream`, recorded identity; bounded startup and idle waits | Native `ui-history download`: exact bytes, headers, audit; HTTP 302 without session. `test_runtime_stream`: silent, SIGTERM-ignoring and idle children stopped. Contract test `admin_contracts.php download_anchor`: with SPA mode on, the rendered link has no `wire:navigate` and no new tab |
-| Verify | Row Verify or Verify again | Queued `verify` under the run lock, records identity or damage | Native: stale identity refused, queued verify restores download; unit damage test |
-| Copy to S3 | More actions, Copy to S3 | Queued `deliver` | S3 protocol unit tests |
-| Retrieve from S3 | Remote-only row action | Queued `retrieve` verifies and publishes a local archive before Download | S3 fixture retrieval and isolated native/browser checks |
-| Delete selected copies | More actions, Delete, preview modal | `delete ID --location local|s3|all` preview; queued `delete` with location | Native: last backup refused, selected backup removed, survivor intact; unit refusal, resume, parent-swap and replaced-file tests |
-| Storage test | Overview header action | Queued `destination-test` | Native `check` spools it |
-| Retention | Overview header action, shown when the engine reports local or S3 candidates | Queued `retention` with `execute` | Native `check`: hidden with no backups; `ui-history retention`: offered with two verified backups and keep 1, queued only after confirmation |
-| First save | Settings, Save settings with no field changed | `config check`, then `init`; rows unchanged | Contract test `admin_contracts.php first_use` |
-| Recovery, export, restore | Help tab terminal commands | CLI only | `test_cli`, restore drill |
+| Setup readiness | Backups tab, Setup: per type, named items with fixes | `overview` `configuration.readiness[mode]`, capture `admission[mode]`, `checks` | Native `check`: Create dialog names blockers once, never counts; `admin_contracts.php field_help`: deep-link targets |
+| Status | Overview, Backup history | `overview`: runs, requests, `last_good`, `schedules`, `storage` | Native `ui-history render` |
+| Edit settings | Settings, one Save settings | Rules, then `config check`, then changed native rows through Eloquent (audited), then `init` with row rollback | Native `check`: invalid values, GiB conversion, weekly days, no storage place, billing overlap, row diff, audit, credential digest; contract test `validation`, `baseline` |
+| First v2 save | Save settings on 0.3 rows | `Settings::fromLegacy()` view; writes `settings_version=2` and every v2 key | `tests/integration/settings_migration.php` against the shared vectors |
+| Malformed rows | Save settings | Defaults written and named in a warning; malformed guard JSON refused | Native `check`; contract test `repair` |
+| S3 keys | Storage, Upload to S3, key fields | `Runtime::saveCredentials()` after settings and `init`; `{"clear":true}` to remove | Native `check`: incomplete pair writes nothing, canaries cleared, encrypted at rest, settings-only save keeps keys, removal keeps the site password; contract test `credentials`, `modals` |
+| Site password | Full backup requirements, Site password (HTTP Basic) | Same Save; origin taken on the server from Paymenter's https URL | Native `check`: browser origin ignored, http refused, removal over http, unreadable store kept; contract test `basic_states` |
+| Recovery key | Storage and Setup: Show, Download, I saved it, Create a new recovery key, Discard | `Runtime::encryptionKey()`, `revealRecoveryKey()` (render only), `recoveryKeyUrl()` | Native `check`: Save offers the key, key only in the dialog partial, confirmation needs the checkbox and activates the key |
+| Native fallback | Extensions editor | Same labels and engine-matching rules on stored strings; `updated()` advisory | Native `check`: zero, weekday 7, unsupported hours, relative path refused |
+| Create backup | Header action, type choice | `requests create --action run` with `mode`, `actor` | Native `check`: pending request, no capture in FPM |
+| Cancel waiting task | Row Cancel, or More actions, Cancel | `requests cancel` | Native `check` cancels spooled requests |
+| Download | Row Download link | Panel-authenticated route, `artifact-stream` | Native `ui-history download`; contract test `download_anchor` |
+| Verify | Row Verify or More actions, Verify | Queued `verify` | Native `ui-history verifyFirst` |
+| Upload to S3 | More actions, Upload to S3 | Queued `deliver` | S3 protocol unit tests |
+| Download from S3 | Row action for S3-only backups | Queued `retrieve` | Contract test `download_anchor`; S3 fixture retrieval |
+| Delete | More actions, Delete, preview | `delete ID --location` preview; queued `delete` | Native `ui-history delete`, `delete-refused`; contract test `delete_gate` |
+| Storage test | Overview, Test storage; Setup item | Queued `destination-test`; `result_verified` decides "Passed" | Native `check` spools it |
+| Delete old backups now | Overview header, disabled with nothing to delete | Queued `retention` with `execute` | Native `check`: disabled with nothing to delete; `ui-history retention` |
+| First save | Save and finish setup with no field changed | `config check`, then `init`; rows unchanged | Contract test `first_use` |
+| Recovery, export, restore | Help, Command line and Restoring | CLI only | `test_cli`, restore drill |
 
-## Validation contracts
+The native `check` and contract-test phases exercise engine readiness items,
+`config check` for version 2 keys, schedule overlap refusals, and recovery-key
+state.
 
-* Positive integer settings use `min:1` in both the page and native fallback,
-  matching the engine. Floats and non-digit strings refuse.
-* Weekdays are checkboxes on the page and a strict JSON list in the fallback.
-  An enabled weekly schedule needs at least one day. Path lists are one
-  absolute path per line on the page and a strict JSON list in the fallback.
-* Cross-field engine checks run before persistence through `config check`, so a
-  refused page save leaves native rows unchanged.
-* Status is a table with dates, type, size, status, location and row actions.
-  Queued, running, failed, interrupted, damaged and deleted states have their
-  own labels. Request IDs and run IDs moved to Details.
-* Verify records an identity that download relies on; a queued request is not
-  treated as verification.
+## Browser checklist
+
+Run `tools/browser_ui_checks.mjs` against a disposable `ui-` fixture, then check
+by eye:
+
+* Backups tab on a fresh fixture: Setup names the cron line, copyable over
+  HTTPS and selectable over HTTP; database backups read Ready or Not ready
+  without listing full-only items; nothing is counted.
+* Settings: both schedule fieldsets side by side from 768 px and stacked on a
+  390 px phone; hourly shows the run times; the billing window shows clock
+  times; turning Upload to S3 on reveals S3 fields, keys, retention per type and
+  encryption; turning encryption off reveals the unencrypted confirmation.
+* One Save: an incomplete key pair, missing bucket, over-byte-limit Unicode
+  credential or passphrase with a Unicode control character keeps every native
+  row and the credential file unchanged and clears the typed secrets.
+* Save with encryption on and no key: the "Show the recovery key?" confirmation
+  opens; the key shows once in its dialog, copy works over HTTPS, Download
+  saves a file, "I saved it" needs the checkbox; afterwards Setup no longer
+  lists the key. Replace a pending key while its confirmation is open: the
+  original confirmation must refuse and never activate the replacement.
+* Full backup requirements: detected jobs with their current and replacement
+  lines, detected drivers with the `.env` change, the confirmation, and the
+  collapsed Site password section.
+* Create backup: one callout naming what's missing, one info line, disabled
+  types not selectable, "See what's needed" opens Setup. Missing, unconfirmed
+  or invalid archive keys and an unavailable encryption tool explain why
+  uploads wait without preventing admissible local capture. Billing window
+  labels match the engine's HH:MM clock values, including midnight wrap.
+* History: Created column names the time zone, Show deleted appears only with
+  deleted backups, Delete preview names what is removed and refuses the last
+  usable backup.
+* Light and dark, keyboard focus, no horizontal overflow at 390 px.
 
 ## Remaining limits
 
-* Disabling automatic backups does not stop manual tasks. Disabling the
-  native extension stops its tick.
-* The scheduler check-in is the time of the last engine tick, not a guarantee
-  that the server launcher keeps running.
-* Download serves local archives. Remote-only copies require queued Retrieve
-  from S3 first. Provider access and disk capacity can refuse retrieval.
-* The page cannot move an initialized private root or run recovery.
-* Browser behaviour (keyboard order, focus, dark mode, 390 px layout, a real
-  download event from the Download link, a visible confirmation on the
-  Settings tab) needs a real browser. The Livewire tests check state,
-  rendering and secrets only. A direct authenticated GET proves the bytes but
-  not the click.
+* Disabling a schedule does not stop manual tasks. Disabling the native
+  extension stops its tick.
+* The cron check-in is the time of the last engine tick, not a guarantee that
+  the server's cron job keeps running.
+* Typing in a key field and then changing a field that updates the form (such
+  as Upload to S3) clears the typed key, because secrets are reset on every
+  response. Enter keys last, then save.
+* The page cannot move an initialized data directory or run recovery.
+* Browser behaviour (keyboard order, dark mode, 390 px layout, a real download
+  event, clipboard) needs a real browser. Livewire tests check state,
+  rendering and secrets only.
 
 ## Primary source contracts
 
@@ -65,27 +91,9 @@ private root and fake credentials created by `tools/native_integration.py`.
   [messages](../extension/Backups/Messages.php),
   [settings](../extension/Backups/Settings.php),
   [download route](../extension/Backups/Http/DownloadController.php),
-  [runtime bridge](../extension/Backups/Runtime.php),
-  [credential bridge](../extension/Backups/bridge.php).
-* [Artifact resolution](../src/paymenter_backups/artifacts.py),
-  [overview](../src/paymenter_backups/presentation.py),
-  [requests](../src/paymenter_backups/requests.py),
-  [delete and retention](../src/paymenter_backups/storage.py),
-  [CLI dispatch](../src/paymenter_backups/cli.py).
+  [runtime bridge](../extension/Backups/Runtime.php).
 * [Native checks](../tests/integration/native_checks.php),
+  [admin contract tests](../tests/integration/admin_contracts.php),
+  [settings migration vectors](../tests/integration/settings_migration.php),
+  [browser checks](../tools/browser_ui_checks.mjs),
   [fixture orchestration](../tools/native_integration.py).
-
-## Copy and field help checks
-
-The browser `inspect` phase checks that native command controls copy their exact
-text with a click, Enter and Space over HTTPS. HTTP checks ensure the commands
-remain selectable and automatic copying is not offered. It verifies the shell function keeps its
-argument quoting. It also opens the job lock help by keyboard and click, closes
-it with Close and Escape, and compares native rows and encrypted credential
-digests before and after. Native `check` verifies the help dialog renders and
-keeps settings and credentials unchanged. HTTP Basic purpose and the Paymenter
-login distinction remain visible before credentials are saved, after saving, and
-when the configured address uses HTTP. These assertions need a run against the exact release candidate before they
-complete these checks. Public-directory guards remain strict: malformed JSON refuses
-ordinary page saves with a named native-editor remedy, and EditExtension can
-correct the validated JSON path list without changing encrypted credentials.

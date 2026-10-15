@@ -1,8 +1,8 @@
 # Architecture and build contract
 
 This document defines the implementation contracts and consistency guarantees.
-Default behavior: a full database/files checkpoint with brief maintenance.
-Online database snapshots remain selectable. Implementation and tests use
+Settings v2 starts with both automatic schedules off and local storage on.
+Full checkpoints and online database snapshots have independent schedules. Implementation and tests use
 disposable fixtures with fake credentials.
 
 ## Module and interface
@@ -40,6 +40,15 @@ runtime secrets on a private pipe. Native-row writes use a booted extension
 Artisan command/Eloquent for events/auditing. Credential-file writes are atomic
 and fsynced through the cold bridge.
 
+Both CLI recovery-key export and ordinary recovery-kit export read current
+native document roots through the cold bridge's `document-roots` verb before
+checking an output destination. That read validates application, owner, private
+root and installation identity, and refuses malformed or unavailable roots;
+cached `policy.json` cannot authorize an export. It returns no credentials and
+does not decrypt the credential store or read billing settings. Export privacy
+checks require no capture tools or capture readiness, so a failed `init` cannot
+leave a newly declared public directory eligible for plaintext export.
+
 Admin configuration, manual requests, backup history, verify, download,
 per-backup delete, delivery retry, retention and destination testing use the
 same engine. Native authentication, CSRF and the native extension-edit
@@ -65,19 +74,45 @@ include `maintenance_driver`, `cache_driver`, `session_driver`, `queue_driver`,
 Billing fields include `daily_time` and its timezone. Tools specify absolute
 Python/PHP/dump/tar/gzip paths. Public output redacts secrets.
 
-Settings use structured daily/weekly schedule, HH:MM, weekdays and timezone;
-mode `full-quiesced` or `database-online`; enabled flag; destination `local` or
-`s3`; endpoint/region/bucket/prefix/path-style; local byte budget; timeouts and
-grace/deferral limits; optional shared job lock paths; retention policy; and
-explicit plaintext-offsite acknowledgement. Provide documented safe defaults
-and fail clearly when a consistency prerequisite is unconfigured.
+The persisted `settings_version` is read before defaults: absent/1 preserves
+0.3 scheduling, storage and total-count retention; 2 adopts independent policies.
+The Python `from_legacy` and PHP `Settings::fromLegacy` adapter contract is
+`tests/fixtures/settings-migration.json`. Adapter output proposes v2 values but
+never changes the marker or writes rows. A legacy schedule maps only to its
+selected mode; disabled schedules remain off with their time/weekdays retained.
+Local storage maps to local only; legacy S3 maps to local plus S3. Counts/policies
+copy to both kinds, full assumptions map by AND, and acknowledged legacy S3
+stays plaintext until explicit adoption. Existing program/lock pins are kept.
+
+V2 defaults: full off, 03:00, Sunday [6]; database off, hourly interval 1 at
+minute 0, daily/weekly time 02:00, weekdays [0,1,2,3,4,5,6]; timezone UTC.
+Full allows off/daily/weekly; database additionally allows hourly, with local
+hours divisible by 1,2,3,4,6,8 or 12 at minute 0-59. Weekly requires days 0-6.
+`mode` remains the terminal default. `keep_local=true`, `upload_s3=false`; at
+least one must be true. `destination` is derived as s3 iff uploads are enabled.
+Local counts are full 7/database 24; S3 policies default to local-count, with
+inactive independent counts 30/168 and ages 90/90 days. Positive counts are
+required even for S3-only storage. Empty v2 program paths select trusted
+candidates; nonempty paths pin. Python >=3.10, PHP CLI >=8.3, GNU tar and supported
+MariaDB/MySQL client identities are checked with bounded probes. Configured and
+resolved paths remain distinct. PHP detection follows the running CLI or the
+FPM version's PHP_BINDIR/php, with no fallback to another system PHP.
+
+`s3_encryption=true`, `gpg=''` (detect). Plaintext acknowledgement is required
+only for uploads without encryption; explicitly turning encryption off requires
+an acknowledgement in that submission. `deliver_payload` and `checked_remote`
+dispatch by recorded remote format to the encrypted delivery and full
+decrypt-and-verify implementation. Missing
+encryption setup never permits a plaintext fallback.
 
 Native setting rows contain nonsecrets only. Store access key, secret and session
 token and optional maintenance probe Basic credentials in a private file encrypted with the native Illuminate Encrypter/APP_KEY.
 The default native extension edit loads all setting values into browser state,
 including undeclared rows, so secrets must never be stored there. Custom secret
-fields are blank/write-only and reset after save. Native settings edits preserve
-the external credential store.
+fields are blank/write-only and reset after save. The page runs the shared
+pure credential and archive-secret validators before persistence, including
+UTF-8 byte limits and Unicode control-character refusal. Native settings edits
+preserve the external credential store.
 
 Credential headers bind schema version, installation UUID, cipher and an HMAC
 key fingerprint; support native previous keys. A mismatch/decryption failure
@@ -109,10 +144,18 @@ Eloquent, so native auditing records them. The browser cannot supply that
 baseline. The page then runs `init`; if it fails, the written rows are put
 back and the page reports the refusal, never "saved". The first save runs
 `config check` and `init` even when every default is kept, so first-time setup
-needs no edited field. `init` validates before it creates an identity. A
-settings save never opens the credential file, and saving keys or the site
-password never creates private storage. The page refuses to change an
-initialized private root (the field is disabled, and the server rechecks the
+needs no edited field. `init` validates before it creates an identity.
+Settings-only `config check`, `init`, CLI settings updates and schedule updates
+use bridge `read-settings`, which never opens credentials.json or constructs an
+encrypter. Explicit secret submissions occur after initialization. The combined
+`credentials-merge` / `Runtime::saveCredentials` API accepts `{s3: object|null,
+site: object|null}`; null/omitted groups preserve saved values, both groups are
+validated before merging, and missing session_token clears the previous token
+when replacing S3 keys. One credential flock covers decrypt/merge/encrypt/fsynced
+publication and preserves other namespaces. Credentials never create private
+storage. Settings and secrets remain separate writes: a later credential failure
+keeps successfully saved settings and the prior credential file. The page refuses
+to change an initialized private root (the field is disabled, and the server rechecks the
 installation file), because a new root would start a new identity without the
 saved keys and history. When the engine itself cannot start, the page saves
 only the private root, document roots and program paths needed to repair it.
@@ -197,14 +240,29 @@ systemd timer or cron job that invokes its scheduler. Backups never installs,
 enables, disables or edits those host jobs. Help links to Paymenter's
 installation guide and explains this ownership.
 
-Saving a changed schedule records a private fingerprint and start time.
+V2 schedule.json holds schema_version 2 and `kinds.full` / `kinds.database`,
+each with fingerprint/since. Legacy state keeps schema_version 1 unchanged.
+Saving a changed schedule records a private fingerprint and start time per kind;
+timezone changes affect both, unrelated edits affect neither.
 Enabling or editing the schedule starts with the next future slot. After an
 outage, the tick chooses only the latest due slot and queues one fresh snapshot,
 without creating a backlog for earlier slots. A weekly lookup is bounded to
 eight days; queued task expiry starts at creation, not at the old slot's time.
 Unstarted requests from a disabled, edited or superseded schedule are cancelled.
-Request files are atomic/fsynced, identified by installation, schedule epoch
-and slot, and durable across deferred/busy runs.
+Request files are atomic/fsynced, identified by installation, kind, schedule
+epoch and wall slot, with explicit mode/schedule_kind. Each kind catches up its
+latest slot within eight days; supersession never crosses kinds. Hourly slots
+skip DST gaps and the second occurrence of repeated wall times. Least recently
+attempted eligible work is selected fairly with a 60-second retry delay; a new
+same-tick full obligation wins the initial tie. Legacy mode-less waiting requests
+are frozen before terminal default edits.
+
+Immediately before the SQL dump, capture persists database_snapshot_lower_bound.
+After archive verification and service recovery it persists database_coverage
+before delivery. Reconciliation marks only waiting scheduled database requests
+with an earlier/equal slot `satisfied`, naming covered_by. Failed/unrecovered or
+pre-slot full captures never cover; manual requests never cover. Coverage proof
+survives upload failure, staging removal and restart.
 Scheduled metadata is part of the first locked request write, so cancellation
 cannot be overwritten by a later metadata update. CLI configuration writes
 hold the scheduler lock through schedule synchronization and refuse before
@@ -235,13 +293,40 @@ the protected minute and actual hold interval. Native Laravel daily schedules
 do not catch up automatically after a skipped minute. UTC is recommended;
 document and test DST gaps and repeated local slots.
 
+V2 full admission uses the same sanitized discovery/parser module as overview.
+The tick refreshes owner-private discovery.json no more than once every five
+minutes; overview only reads it and labels data older than 15 minutes stale.
+Capture always rediscovers and validates; cached diagnostics never authorize it.
+Inventory covers the account crontab and system/user systemd timer targets and
+active/enabled standalone services, with bounded reads and plain-table fallback.
+No scheduler, failed/incomplete discovery, unsupported/uncoordinated jobs,
+continuous workers, unsafe/missing locks and explicit-list mismatch refuse.
+Empty v2 job_lock_paths derives the verified union; nonempty lists must match.
+Locks open without creation, in stable order, and identity/remaining workers
+are rechecked after acquisition. init creates only the suggested scheduler.lock
+and queue.lock as private regular files. Backups never edits host launchers.
+The parser accepts documented /dev/null redirection tails, common PHP/Artisan
+flags and hosting PHP basenames, with shell expansion/wrappers refused.
+Commands are reconstructed from recognized nonsecret tokens; ini values, raw
+cron/service/process text and process identities never enter discovery records.
+
+V2 full plan also checks effective cached framework stores: database-backed
+stores must use the captured connection; file stores and a local filesystem
+disk must resolve within the app. Unsupported and unknown stores refuse full.
+The full assumptions confirmation still covers custom extensions, direct Redis,
+other connections, panel/Supervisor launchers and undeclared writers. Both kinds
+retain the no-concurrent-DDL confirmation; absence of visible migrations proves
+nothing. Busy/billing/job-lock states are waiting, recovery is needs-recovery,
+other refusals are needs-setup. Bounded running jobs retain coordination's wait;
+continuous workers are setup blockers.
+
 ## Capture modes
 
 `database-online` produces a transactional InnoDB SQL snapshot without
 maintenance, under a no-concurrent-DDL condition. Its manifest clearly excludes
 an atomic application/files snapshot and external provider state.
 
-`full-quiesced` acquires a private backup lock and configured job coordination
+`full-quiesced` acquires a private backup lock and verified job coordination
 locks, enters native prerendered maintenance, drains existing requests/jobs and
 captures SQL plus the full app while controlled writers remain excluded. Idle
 observations choose a quiet time; they never substitute for admission control.
@@ -334,12 +419,13 @@ Local completion and remote delivery are distinct. S3 uses pinned isolated
 boto3/botocore, verified TLS, endpoint/region/bucket/path-style configuration,
 bounded retries/timeouts and multipart. Default request/response checksum
 policies to `when_required` for compatibility. Verify whole-object SHA256 through
-streamed GET; never substitute multipart ETag/composite checksums. Manifest is
-published last. Preserve local data on delivery failure.
+streamed GET; never substitute multipart ETag/composite checksums. The commit
+descriptor is published last. Preserve local data on delivery failure.
 
-New installation bindings choose `PRIVATE_ROOT/backups`; existing bindings
-without the new directory field continue to use `PRIVATE_ROOT/artifacts`.
-Explicit `local_path` overrides either default. No files or identity are moved.
+New installation bindings choose PRIVATE_ROOT/backups. V1 bindings without the
+directory field keep PRIVATE_ROOT/artifacts. For v2, empty local_path selects
+PRIVATE_ROOT/backups for future captures even with an old binding. Explicit
+local_path overrides this. Recorded old paths, UUID and binding bytes are kept.
 Space accounting includes earlier journaled archive directories after a path
 change, as well as the private data directory.
 
@@ -355,7 +441,26 @@ operator can resolve them through the known provider or a bucket rule that
 aborts incomplete multipart uploads; changing settings cannot establish that
 missing ownership evidence.
 
-`retention_keep` is the local newest-N policy. Independent S3 policies are
+V1 `retention_keep` remains total newest-N. V2 partitions by the recorded mode
+in agreement with its owned manifest. Unknown/inconsistent mode never permits
+deletion or survivor substitution. Local keep sets are newest verified N of
+that kind; ordinary local/S3 deletion requires another fully verified survivor
+of the same kind at each affected location. The newest S3 copy of each kind is
+protected. S3 local-count uses the configured count for that kind even when
+keep_local=false. lastmanifest.json retains its latest-overall meaning.
+
+For S3-only storage, delivery's held run-lock attempt proves provider scope,
+whole-object SHA256/size, matching manifest and archive contents, then journals
+staging_removal_intent before manifest-first descriptor-relative local unlinks.
+Historic delivered flags and HEAD/ETag never permit cleanup. Retries reprove the
+remote copy and resume partial unlinks, including after staging is already gone.
+The journal remains remote-only, never whole-run deleted. Failed/uncertain upload
+keeps staging. Retrieved copies keep their 24-hour lease; expired retrievals may
+use the same-run remote proof for cleanup. This exception never applies to
+manual Delete. Budgets still include staging, retrievals and older directories.
+Provider lifecycle rules can independently remove remote copies.
+
+For each kind, independent S3 policies are
 `local-count`, `count`, `age` and `keep-all`. The compatibility default
 `local-count` preserves the previous configured count. `s3_retention_keep=30`
 and `s3_retention_days=90` are inactive until their policy is selected. Age is
@@ -376,7 +481,152 @@ automatic local retention runs once before capture re-admits, without entering
 maintenance first. Track incomplete multipart work. Destination-test is explicitly
 requested and performs owned probe/readback/cleanup only. Bucket policy is never
 modified. Document least-privilege credentials, optional versioning/Object Lock,
-and plaintext archives containing private data and APP_KEY.
+and plaintext local archives containing private data and APP_KEY.
+
+### Encrypted remote artifacts
+
+`encryption.py` owns the pinned GnuPG profile and private subprocess transport;
+`remote_artifacts.py` owns versioned object names, public descriptors, encrypted
+recovery documents and frozen delivery preparation. Storage calls these at
+explicit remote lifecycle seams. Local tar.gz manifests and Download retain
+their existing contract.
+
+Settings use `s3_encryption` (default true for v2) and `gpg` (empty detects
+`/usr/bin/gpg`, then PATH; a nonempty value pins the executable). Missing tools,
+keys or acknowledgement affect delivery readiness, not local configuration
+initialization or legacy plaintext retrieval. Legacy v1 interpretation belongs
+to the settings adapter: accepted plaintext S3 uploads continue until the
+administrator saves v2. Plaintext upload requires explicit current plaintext
+acknowledgement. Encryption never falls back to plaintext.
+
+The fixed remote format is `openpgp-symmetric-aes256-seipd-v1`: binary symmetric
+AES256, SEIPD v1/MDC, salted iterated S2K mode 3/SHA256/count 65011712, no extra
+compression, source filename, recipients or signatures. `--rfc4880` precedes
+algorithm options. Secrets travel over private pipes, never arguments,
+environment or temporary passphrase files. GnuPG uses an owner-private home,
+bounded concurrent input/output/status/stderr draining and deadlines. Only
+owned helpers may be supervised or stopped; personal GnuPG state and account
+wide helper shutdown are prohibited. Successful decryption requires exit zero,
+expected `DECRYPTION_INFO`, `DECRYPTION_OKAY`, completed decryption, and no MDC
+or profile failure. Early plaintext output is untrusted until completion.
+
+An encrypted generation has `RUN.tar.gz.gpg`, `RUN.recovery.json.gpg` and
+`RUN.manifest.json`. The encrypted recovery document contains the full original
+manifest and binds the archive ciphertext digest/size, exact object name,
+installation/run, provider scope and fingerprint. The public descriptor contains
+only format/identity, key fingerprint parameters and ciphertext names/digests/
+sizes. It excludes grants, payload hashes, app paths and plaintext archive
+hashes. Both documents have fixed bounded schemas; provider-supplied names
+cannot override the journal's exact inventory. `lastmanifest.json` is discovery
+metadata referring to the descriptor, never authority for provider scope or
+freshness.
+
+Delivery first fully checks the local archive, freezes private ciphertext
+spools and their identities/digests, checks a decryption round trip, and
+persists immutable format, key and provider binding before uploading. Every
+spool byte counts toward the local budget and minimum-free-space reserve.
+Retries reuse frozen bytes; missing or altered required spools refuse rather
+than regenerating a committed generation. After exact successful delivery,
+identity-checked spools are removed and immutable transport metadata remains;
+an idempotent retry accepts missing spools only if all required remote bytes
+already match. A process crash during unfinished preparation retains a refusing
+intent for operator resolution; caught preparation failures remove only owned
+unpublished spools. Upload/readback order is archive,
+encrypted recovery document, then descriptor. Deletion reverses publication:
+descriptor first, recovery document next, archive last, with journaled resumable
+absence handling. An interrupted uncommitted generation can be removed only
+after checking its full local/frozen recovery proof and every extant owned
+ciphertext object; absent unpublished objects do not block that cleanup.
+Failed or uncertain uploads retain the local source.
+
+Delivery and destination testing take the run lock before invoking a trusted
+`envelope_loader` callback to refresh settings and credentials. CLI and queued
+workers supply that callback; callers providing an already read envelope must
+also supply a loader when concurrent configuration/key changes are possible.
+Plaintext authorization and delivery retain the same continuous lock. A
+prepared intent always keeps its recorded fingerprint across rotations.
+
+Retrieval decrypts into private unpublished output and checks ciphertext and
+plaintext SHA256/size, successful GnuPG/MDC completion and full archive contents
+before descriptor-relative local publication. The existing no-overwrite rule
+and 24-hour retention lease apply. Survivor and staging-removal proofs perform
+the same full restore check under the held run lock. Ciphertext hashes or HEAD
+presence alone cannot authorize removing a local copy. Each copy selects its
+recorded fingerprint, including retired keys; a missing key preserves affected
+copies. Recognized pre-encryption records resolve as `plaintext-v1` regardless
+of current settings; malformed or unknown explicit formats refuse.
+
+Destination tests use the selected active acknowledged key for an encrypted
+synthetic upload/readback/decrypt/compare/cleanup round trip. Test evidence binds
+provider scope, format and fingerprint; key rotation invalidates older evidence
+without changing provider ownership. Overview destination-test requests expose
+only the authoritative boolean `result_verified` beside `result_destination_id`.
+It is true only for a completed successful test matching the current destination
+binding and remote format, plus the active acknowledged fingerprint for encrypted
+S3. Legacy plaintext tests become stale when encryption is enabled; activation
+of a rotated key makes earlier encrypted tests stale. A pending rotation preserves
+a test using the still-active key. Other request actions do not gain this field.
+
+### Archive key credentials and PHP interface
+
+The APP_KEY-encrypted credential payload adds `archive_encryption` version 1,
+with `active_fingerprint`, `pending_fingerprint` and fingerprint-indexed `keys`.
+Records hold secret, source (`generated` or `passphrase`), fingerprint parameters,
+creation time, state and an optional acknowledgement bound to that fingerprint.
+The private bridge envelope exposes it only as
+`archive_encryption_credentials`; ordinary output redacts the entire namespace.
+All credential mutations preserve S3 and maintenance-probe namespaces under
+the existing shared flock. Unreadable credentials are never replaced. Generate
+creates 32 random bytes as 64 lowercase hex characters; supplied passphrases
+preserve exact UTF-8, require 20 characters, forbid controls and cap at 1024
+bytes.
+
+Fingerprints use `pbkdf2-hmac-sha256-v1`, PBKDF2-HMAC-SHA256 with 600000
+iterations, 32-byte output, and salt
+`paymenter-backups-key-fingerprint-v1\0` followed by 32 random bytes. Exported
+identity imports preserve that salt. A short fingerprint is display metadata;
+full fingerprints authorize acknowledgement. Rotation stages pending, reveals/
+exports, acknowledges, then activates under run-lock-before-credential-lock.
+Retired keys stay available indefinitely. APP_KEY rewrapping preserves every
+namespace and archive secret. The page freezes the full pending fingerprint
+when an acknowledgement dialog opens and submits that identity; an intervening
+key replacement refuses instead of acknowledging the new key.
+
+The page consumes these static Runtime methods:
+
+- `encryptionKey('generate'): array` and
+  `encryptionKey('import', ['passphrase' => $secret]): array` return
+  `{fingerprint, short, state: "pending"}`.
+- `encryptionKey('acknowledge', ['fingerprint' => $fingerprint]): array`
+  includes activation; `encryptionKey('discard-pending'): array` discards only
+  the pending key.
+- `revealRecoveryKey(): array` returns `{secret, fingerprint}` solely for a
+  confirmation-bound sensitive response; never persist it in Livewire state.
+- `recoveryKeyUrl(): string` supplies a five-minute signed admin attachment
+  URL. The response checks `admin.extensions.update`, records secret-free audit
+  evidence before releasing material, and uses no-store/no-referrer headers.
+
+The UI owns route registration in `Admin/Pages/Backups.php::routes()`. It must
+call `RecoveryKeyController::register(Panel $panel, string $path, string $name,
+array $middleware, array $without)` from that authenticated panel route group;
+the encryption module supplies the helper and controller. The recovery-key
+attachment includes secret, full fingerprint/parameters, installation UUID and
+restore instructions. Neither normal export nor overview includes the secret.
+
+Overview exposes this whitelist:
+`configuration.encryption = {enabled, tool: {ok, path, code}, key: {state,
+short, source, acknowledged, created_at, pending_short, pending_fingerprint}, readiness_code}`.
+Key state is `none`, `pending` or `active`; tool path may be null.
+`runs[].remote_format` is `plaintext-v1`,
+`openpgp-symmetric-aes256-seipd-v1` or null; `runs[].key_short` is a display
+fingerprint or null. Full secret records never enter overview, journals,
+requests, notifications, normal CLI JSON or stderr.
+
+The ZIP includes standalone stdlib `runtime/verify_recovery.py` for fresh-host
+transport and complete plaintext verification without Laravel, DB or the S3
+SDK. [RECOVERY.md](RECOVERY.md) defines the separate successful GnuPG/MDC step
+and isolated restore procedure. Run restore tests with the exact release ZIP.
+Validate host configuration and providers separately.
 
 ## Test requirements
 
@@ -395,3 +645,71 @@ Use disposable applications, databases and storage for tests.
 
 The project uses MIT and includes third-party notices. CI runs tests, PHP lint,
 reproducible builds and native integration tests. Dependency updates use the same checks.
+
+## Overview fields for settings version 2
+
+The existing overview envelope stays schema_version 1. These are the exact new
+fields for an available v2 configuration (types are shown below); unavailable
+configuration retains `{available:false, valid:false, error:code}`. Operational
+program/lock/directory paths are narrowly allowed configuration diagnostics;
+archive/manifest paths, raw discovery output, secrets and processes remain absent.
+
+```text
+configuration.settings_version: 1|2
+configuration.schedules:
+  timezone: string
+  full: {frequency, time, weekdays:[integer], next_at:number|null}
+  database: {frequency, every_hours:integer, minute:integer, time,
+             weekdays:[integer], next_at:number|null}
+configuration.storage:
+  {keep_local:boolean, upload_s3:boolean, local_path:string,
+   default_local_path:string, legacy_default_path:string|null,
+   s3_bucket, s3_region, s3_endpoint, s3_prefix, s3_path_style:boolean}
+configuration.retention:
+  {automatic:boolean,
+   full:{local_keep:integer, s3_policy, s3_keep:integer, s3_days:integer},
+   database:{local_keep:integer, s3_policy, s3_keep:integer, s3_days:integer},
+   pending:{full:{local:integer|null,s3:integer|null},
+            database:{local:integer|null,s3:integer|null}},
+   last_apply:{at,skipped_count,local_removed,s3_removed}|null}
+configuration.readiness:
+  full-quiesced|database-online:
+    {state:ready|waiting|needs-setup|needs-recovery,
+     items:[{code:string,field:string|null,detail:object}]}
+configuration.checks:
+  jobs:{checked_at:number|null,state:ok|stale|failed|unknown,error:string|null,
+        items:[{id,source:crontab|systemd,label,kind:scheduler|queue-worker,
+                coordination:coordinated|uncoordinated|unsupported|continuous,
+                command:string,lock:string|null,reason:string|null}],
+        suggestions:{scheduler:string,queue:string},crontab_user:string}
+  stores:[{kind:maintenance|cache|session|queue|filesystem,driver:string,
+           env:string,supported:boolean|null,suggest:string|null}]
+  tools: python|php|dump|mysql|tar|gzip|gpg:
+    {configured:string,resolved:string|null,ok:boolean,code:string|null}
+  billing:{time:string|null,timezone:string|null,
+           window_before:HH:MM|null,window_after:HH:MM|null}
+last_good: {local,s3,full,database,s3_full,s3_database}: run ID|null
+requests[]: existing fields plus schedule_kind:full|database|null,
+            covered_by:run ID|null; covered request status is satisfied
+runs[]: existing fields plus remote_format:plaintext-v1|
+        openpgp-symmetric-aes256-seipd-v1|null, key_short:string|null,
+        ciphertext_size:number|null, remote_verification_level:string|null,
+        staging_removal_pending:boolean, staging_removal_error:string|null
+```
+
+`configuration.destination` and `admission` remain. V1 retains singleton
+schedule/retention fields and total pending counts alongside the per-kind
+pending counts, and additionally shows the
+adapted proposed schedules/storage and per-kind retention settings. The clock
+window brackets the daily billing minute using lock/drain/capture/cleanup and
+safety bounds, wrapping midnight; actual admission uses observed UTC instants.
+The encryption summary uses the real delivery tool/key readiness and retains
+the nonsecret pending fingerprint for acknowledgement. Encryption delivery
+items (`archive-key-required`, `archive-key-save-required` and tool codes)
+appear in per-mode readiness, but do not enter capture `admission_errors` or
+the compatibility `configuration.admission`. Local capture remains admissible
+and delivery failure preserves its local source. Overview reuses a single
+current-key validation across historical destination tests and both modes.
+Encrypted staging removal, expired retrieval cleanup and same-type remote
+survivors require the full decrypt-and-verify proof under the held run lock;
+ciphertext presence or digest alone cannot authorize local removal.
