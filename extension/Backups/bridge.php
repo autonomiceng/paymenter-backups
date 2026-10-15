@@ -44,7 +44,7 @@ try {
         if ($row['encrypted'] || preg_match('/access_key|secret_key|session_token|password|maintenance_probe/i', $row['key'])) { throw new RuntimeException('native-secret-row-refused'); }
         $settings[$row['key']] = $row['value'];
     }
-    $settings = \Paymenter\Extensions\Others\Backups\Settings::normalize($settings);
+    $settings = \Paymenter\Extensions\Others\Backups\Settings::normalize($settings, preserveInvalidJson: true);
     $root = PrivateStore::root($base, $arguments['--private-root'] ?? ($settings['private_root'] ?? null), false, $settings['extra_docroots']);
     $billingRows = $pdo->query("SELECT `key`,value FROM {$prefix}settings WHERE settingable_type IS NULL AND `key` IN ('cronjob_time','timezone','app_url')")->fetchAll(PDO::FETCH_KEY_PAIR);
     if (!isset($billingRows['cronjob_time'])) { throw new RuntimeException('billing-settings-unreadable'); }
@@ -113,7 +113,7 @@ try {
         'billing' => $billing, 'tools' => ['php' => $settings['php'] ?: PHP_BINARY, 'python' => $settings['python'] ?? '/usr/bin/python3', 'dump' => $settings['dump'] ?? '/usr/bin/mariadb-dump', 'mysql' => $settings['mysql'] ?? '/usr/bin/mariadb', 'tar' => $settings['tar'] ?? '/usr/bin/tar', 'gzip' => $settings['gzip'] ?? '/usr/bin/gzip'],
     ], JSON_THROW_ON_ERROR | JSON_UNESCAPED_SLASHES) . "\n";
 } catch (Throwable $error) {
-    $safe = ['private-pipe-required', 'application-unavailable', 'database-driver-unsupported', 'database-tls-unsupported', 'database-prefix-unsupported', 'extension-uninstalled', 'native-secret-row-refused', 'private-root-invalid', 'document-roots-invalid', 'private-root-unavailable', 'billing-settings-unreadable', 'installation-mismatch', 'installation-missing', 'credentials-unreadable', 'credentials-invalid', 'bridge-command-invalid', 'private-file-invalid', 'private-write-failed', 'maintenance-probe-credentials-invalid', 'maintenance-probe-origin-mismatch'];
+    $safe = ['private-pipe-required', 'application-unavailable', 'database-driver-unsupported', 'database-tls-unsupported', 'database-prefix-unsupported', 'extension-uninstalled', 'native-secret-row-refused', 'private-root-invalid', 'document-roots-invalid', 'private-root-unavailable', 'billing-settings-unreadable', 'installation-mismatch', 'installation-missing', 'credentials-unreadable', 'credentials-invalid', 'bridge-command-invalid', 'private-file-invalid', 'private-write-failed', 'maintenance-probe-credentials-invalid', 'maintenance-probe-origin-invalid', 'maintenance-probe-origin-mismatch'];
     $code = in_array($error->getMessage(), $safe, true) ? $error->getMessage() : 'bridge-unavailable';
     fwrite(STDERR, json_encode(['error' => $code]) . "\n"); exit(1);
 }

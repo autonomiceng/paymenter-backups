@@ -5,7 +5,7 @@ use Illuminate\Console\Command;
 
 final class ConfigSetCommand extends Command
 {
-    protected $signature = 'backups:config-set';
+    protected $signature = 'backups:config-set {--defer-init : Internal use when the Python caller owns the scheduler lock}';
     protected $description = 'Set non-secret backup configuration through native audited Eloquent rows (JSON stdin)';
 
     public function handle(): int
@@ -24,8 +24,10 @@ final class ConfigSetCommand extends Command
             }
             $record = \App\Models\Extension::where('extension', 'Backups')->where('type', 'other')->firstOrFail();
             SettingsWriter::write($record, $input);
-            Runtime::command(['init']);
-            (new Backups)->updated($record);
+            if (!$this->option('defer-init')) {
+                Runtime::command(['init']);
+                (new Backups)->updated($record);
+            }
             $this->line(json_encode(['ok' => true]));
             return self::SUCCESS;
         } catch (\Throwable $error) {
