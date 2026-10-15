@@ -14,7 +14,10 @@ class Backups extends Extension
     {
         $record = \App\Models\Extension::where('extension', 'Backups')->where('type', 'other')->first();
         if (!$record) { return; } // Native upload precedes the separate install action.
+        // Rows written by 0.3 keep their legacy meaning until the Backups page saves settings once.
+        $fresh = !$record->settings()->exists();
         foreach (Settings::DEFAULTS as $key => $value) {
+            if ($key === 'settings_version') { $value = $fresh ? 2 : 1; }
             $record->settings()->firstOrCreate(['key' => $key], ['value' => is_array($value) ? json_encode($value) : (is_bool($value) ? ($value ? '1' : '0') : (string) $value), 'type' => 'string', 'encrypted' => false]);
         }
     }

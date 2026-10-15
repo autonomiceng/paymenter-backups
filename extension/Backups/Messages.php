@@ -1,199 +1,290 @@
 <?php
 namespace Paymenter\Extensions\Others\Backups;
 
-/** Every administrator-facing sentence for engine codes, statuses and tasks. */
+/** Every administrator-facing sentence for engine codes, statuses, tasks and setup items. */
 final class Messages
 {
     private const ERRORS = [
         // Scheduling and admission
-        'busy' => 'Another backup task was running. This task retries when the scheduler next runs.',
-        'billing-guard-stale' => 'Full backups need a recent daily billing report from Paymenter\'s scheduler. Check its server scheduler on Help.',
-        'billing-window-protected' => 'Paused to stay clear of Paymenter\'s daily billing run. It will retry automatically.',
-        'schedule-overlaps-billing' => 'This full backup could overlap daily billing. Choose a time outside the window shown under Time.',
-        'job-lock-busy' => 'A Paymenter job was still running. The backup will retry automatically.',
-        'job-locks-unverified' => 'Full backups could not confirm every Paymenter scheduled job uses a listed flock file. Compare Host checks with the existing systemd services or crontab. Uncoordinated workers also block full backups.',
-        'cooperative-writers-acknowledged' => 'Under Settings, Host checks, confirm that only Paymenter and its scheduled jobs write its files and database.',
-        'external-state-acknowledged' => 'Under Settings, Host checks, confirm Paymenter keeps its data in its directory and database.',
-        'no-concurrent-ddl-acknowledgement-required' => 'Under Settings, Host checks, confirm database schema changes never run during a backup.',
-        'recovery-required' => 'An earlier full backup did not finish cleanly. Use the recovery check on Help, then resolve or acknowledge it before new backups.',
-        'installation-not-initialized' => 'Save settings once to create the extension data directory used for backup history and encrypted credentials.',
-        'initial-maintenance-scheduled-skip' => 'Skipped because the site was already in maintenance mode. Scheduled full backups preserve existing maintenance.',
-        'worker-interrupted' => 'The task stopped unexpectedly. It retries when the scheduler next runs.',
-        'request-not-cancellable' => 'This task has already started and can no longer be cancelled.',
-        'request-action-invalid' => 'This task type is not supported.',
-        'request-arguments-invalid' => 'This task request is not valid.',
+        'busy' => 'Another backup task was running. This one will try again next minute.',
+        'billing-guard-stale' => 'Full backups need Paymenter\'s cron job to have run in the last few minutes, so they can avoid the daily billing run. Check the cron job on the Backups tab.',
+        'billing-window-protected' => 'Waiting until Paymenter\'s daily billing run is over.',
+        'schedule-overlaps-billing' => 'This time is too close to Paymenter\'s daily billing run. Pick a time outside the window shown under the time.',
+        'schedule-field-invalid' => 'A schedule setting is invalid. Open Settings and save.',
+        'schedule-kind-required' => 'Name the schedule: add --kind full or --kind database.',
+        'scheduler-missing' => 'No cron job runs Paymenter\'s scheduler. Add the cron job shown on the Backups tab.',
+        'job-lock-busy' => 'A Paymenter cron job was still running. The backup will try again next minute.',
+        'job-locks-unverified' => 'A Paymenter cron job or queue worker has no lock file. The Backups tab shows which one and the line to use instead.',
+        'job-uncoordinated' => 'A Paymenter cron job has no lock file. Replace it with the line shown on the Backups tab.',
+        'job-unparseable' => 'Backups can\'t read one of Paymenter\'s cron jobs. Replace it with the line shown on the Backups tab.',
+        'worker-continuous' => 'A queue worker runs all the time. Full backups need queue jobs to run from cron with a lock file.',
+        'discovery-failed' => 'Backups couldn\'t read the crontab or systemd units for this site\'s user.',
+        'discovery-stale' => 'The cron job check is out of date. It refreshes when Paymenter\'s cron job runs.',
+        'continuous-worker-present' => 'A queue worker runs all the time. Full backups need queue jobs to run from cron with a lock file.',
+        'job-command-unsupported' => 'Backups can\'t read one of Paymenter\'s cron jobs. Replace it with the line shown on the Backups tab.',
+        'job-discovery-failed' => 'Backups couldn\'t read the crontab or systemd units for this site\'s user.',
+        'job-discovery-incomplete' => 'Backups couldn\'t read every crontab entry or systemd unit for this site\'s user.',
+        'job-discovery-stale' => 'The cron job check is out of date. It refreshes when Paymenter\'s cron job runs.',
+        'job-discovery-unknown' => 'Cron jobs haven\'t been checked yet. The check runs from Paymenter\'s cron job.',
+        'job-lock-unsafe' => 'A lock file is missing or unsafe. It must be a regular file owned by the site user, with permissions 600.',
+        'job-lock-override-mismatch' => 'The lock files under Advanced don\'t match the ones your cron jobs use. Clear the field to use the detected ones.',
+        'job-workers-running' => 'A Paymenter writer is still running after its lock files were acquired. Full backups wait until it stops.',
+        'tool-capability-unsupported' => 'A binary is installed but lacks a feature backups need. Check its version under Advanced, Binary paths.',
+        'cooperative-writers-acknowledged' => 'Confirm in Settings that no other program writes to Paymenter\'s database or files.',
+        'external-state-acknowledged' => 'Confirm in Settings that no other program writes to Paymenter\'s database or files.',
+        'full-host-assumptions-acknowledgement-required' => 'Confirm in Settings that no other program writes to Paymenter\'s database or files.',
+        'no-concurrent-ddl-acknowledgement-required' => 'Confirm in Settings that updates and migrations don\'t run during backups.',
+        'recovery-required' => 'A full backup didn\'t finish cleanly. Run paymenter_backups recover to see what to fix (Help, Recovery).',
+        'installation-not-initialized' => 'Save settings once to finish setup.',
+        'initial-maintenance-scheduled-skip' => 'Skipped: the site was already in maintenance mode.',
+        'worker-interrupted' => 'The task stopped unexpectedly. It will try again next minute.',
+        'request-not-cancellable' => 'This task has already started and can\'t be cancelled.',
+        'request-action-invalid' => 'This task type isn\'t supported.',
+        'request-arguments-invalid' => 'This task request isn\'t valid.',
+        'request-not-launchable' => 'This task is no longer waiting to start. Refresh the task list before trying again.',
 
         // Configuration
-        'config-invalid' => 'A saved Backups setting is invalid. Open Settings, review the values and save to correct it.',
-        'config-write-failed' => 'Paymenter could not save these settings. Check that php artisan runs for this site from a terminal.',
-        'tool-unavailable' => 'A required program was missing or could not run. Check the program paths under Advanced.',
-        'tool-path-invalid' => 'Program paths must be absolute, for example /usr/bin/tar.',
-        'plaintext-offsite-acknowledgement-required' => 'S3 storage needs a bucket name and your confirmation that archives are stored unencrypted.',
-        's3-tls-required' => 'The S3 endpoint must start with https://.',
-        's3-endpoint-invalid' => 'Enter an HTTPS S3 API address without a username, query or #.',
-        's3-prefix-invalid' => 'The object prefix cannot contain empty parts, "." or "..", or backslashes.',
-        'private-root-invalid' => 'The extension data directory must be an absolute path outside Paymenter and public web directories, owned by the site user with mode 700.',
-        'private-root-inside-app' => 'The extension data directory must be outside Paymenter\'s directory.',
-        'private-root-inside-docroot' => 'The extension data directory is inside a public web directory. Choose a directory that no site serves.',
-        'private-root-unsafe' => 'The extension data directory must not be a link. Enter its real path.',
-        'private-root-unavailable' => 'The web server cannot create or open the extension data directory. Check its owner and the PHP open_basedir setting.',
-        'document-roots-invalid' => 'In Paymenter, open Extensions, edit Backups and correct Other public web directories. Enter a JSON list of existing absolute paths.',
-        'owner-mismatch' => 'The extension data and Paymenter directories must belong to the site user. The extension data directory needs mode 700.',
-        'private-state-permissions' => 'A file or directory in the extension data directory has the wrong owner or permissions. The site user must own files with mode 600 and directories with mode 700.',
-        'private-file-invalid' => 'A file or directory in the extension data directory has the wrong owner or permissions. The site user must own files with mode 600 and directories with mode 700.',
-        'private-write-failed' => 'The extension data directory is not writable. Check its owner and free disk space.',
-        'state-unreadable' => 'A file in the extension data directory could not be read. It may be damaged or incomplete.',
-        'installation-mismatch' => 'This extension data directory belongs to a different Paymenter installation. Use this site\'s original directory.',
-        'installation-missing' => 'Save settings once to create the extension data directory before saving credentials.',
-        'extension-uninstalled' => 'The Backups extension is not installed.',
-        'native-secret-row-refused' => 'An encrypted or secret-named Backups setting exists in Paymenter\'s database. Remove that row. Save credentials through the encrypted sections on this page.',
-        'billing-settings-unreadable' => 'Paymenter\'s daily billing time could not be read. Save Cron Job Time in Paymenter\'s settings.',
-        'database-tls-unsupported' => 'Database connections that require TLS are not supported yet.',
+        'config-invalid' => 'A saved setting is invalid. Open Settings and save.',
+        'storage-required' => 'Keep backups on this server, upload them to S3, or enable both under Storage.',
+        'storage-untested' => 'Test storage with the current settings and recovery key before enabling automatic uploads.',
+        'config-write-failed' => 'Paymenter couldn\'t save settings to its database. Check the database connection and try again.',
+        'tool-unavailable' => 'A required binary wasn\'t found. Fix it under Advanced, Binary paths, or leave the path empty to detect it.',
+        'tool-path-invalid' => 'Enter a full path, for example /usr/bin/tar.',
+        'plaintext-offsite-acknowledgement-required' => 'To upload unencrypted backups to S3, confirm that backups in S3 won\'t be encrypted.',
+        'remote-configuration-required' => 'Enter a bucket name to upload backups to S3.',
+        's3-tls-required' => 'The endpoint must start with https://.',
+        's3-endpoint-invalid' => 'Enter the provider\'s https:// API URL, without a username or query.',
+        's3-prefix-invalid' => 'The folder in bucket can\'t contain "//", ".", ".." or "\\".',
+        'private-root-invalid' => 'The data directory must be a full path outside Paymenter and any public web folder, owned by the site user, with permissions 700.',
+        'private-root-inside-app' => 'The data directory must be outside Paymenter\'s folder.',
+        'private-root-inside-docroot' => 'The data directory is inside a public web folder. Choose a folder that no site serves.',
+        'private-root-unsafe' => 'The data directory can\'t be a symlink. Enter its real path.',
+        'private-root-unavailable' => 'The web server can\'t create or open the data directory. Check its owner and PHP\'s open_basedir.',
+        'document-roots-invalid' => 'The saved list of other public web folders is damaged. In Paymenter, open Extensions, edit Backups and enter it as a JSON list, for example ["/var/www/site2"]. This page doesn\'t guess, because the list keeps backups out of public folders.',
+        'owner-mismatch' => 'The data directory and Paymenter must belong to the same user. Set the data directory\'s permissions to 700.',
+        'private-state-permissions' => 'A file in the data directory has the wrong owner or permissions. As the site user, set the data directory to 700 and its files to 600.',
+        'private-file-invalid' => 'A file in the data directory has the wrong owner or permissions. As the site user, set the data directory to 700 and its files to 600.',
+        'private-write-failed' => 'The data directory isn\'t writable. Check its owner and free disk space.',
+        'state-unreadable' => 'A file in the data directory couldn\'t be read. It may be damaged or incomplete.',
+        'installation-mismatch' => 'This data directory belongs to another Paymenter installation. Use this site\'s original data directory.',
+        'installation-missing' => 'Save settings once to finish setup.',
+        'extension-uninstalled' => 'The Backups extension isn\'t installed.',
+        'native-secret-row-refused' => 'A Backups setting in Paymenter\'s database looks like a secret. Remove it in Extensions, Backups. Enter keys on this page only.',
+        'billing-settings-unreadable' => 'Paymenter\'s daily billing time isn\'t set. Save "Cron Job Time" in Paymenter\'s settings.',
+        'database-tls-unsupported' => 'Databases that require TLS aren\'t supported yet.',
         'database-driver-unsupported' => 'Only MySQL and MariaDB databases are supported.',
         'database-prefix-unsupported' => 'The database table prefix contains unsupported characters.',
-        'application-unavailable' => 'The backup program could not load Paymenter\'s files. Check the site user can read its directory and vendor/autoload.php.',
-        'python-binary-invalid' => 'The Python path is not a working Python 3.10 or newer program. Check it under Advanced.',
-        'php-binary-mismatch' => 'The PHP path is not a working PHP command-line program. Check it under Advanced.',
-        'engine-unavailable' => 'The web server could not start the backup program. Check the Python and PHP paths under Settings, Advanced.',
-        'bridge-failed' => 'The backup program could not read Paymenter\'s configuration or database. Check .env and database access.',
-        'bridge-identity-mismatch' => 'The backup program read a different Paymenter installation than expected.',
+        'application-unavailable' => 'Backups couldn\'t load Paymenter. Check that the site user can read Paymenter\'s folder.',
+        'python-binary-invalid' => 'Python 3.10 or newer wasn\'t found at the configured path. Fix it under Advanced, Binary paths.',
+        'php-binary-mismatch' => 'The configured PHP path isn\'t PHP CLI, or isn\'t the PHP version Paymenter runs on. Fix it under Advanced, Binary paths.',
+        'engine-unavailable' => 'Backups couldn\'t start Python. Check the Python and PHP binaries under Advanced, Binary paths.',
+        'bridge-failed' => 'Backups couldn\'t read Paymenter\'s .env or database.',
+        'bridge-identity-mismatch' => 'Backups read a different Paymenter installation than expected.',
+        'bridge-required' => 'This command needs the extension\'s configuration bridge. Use the command shown under Help, Command line.',
+        'bridge-command-invalid' => 'The configuration bridge does not support this operation. Reinstall a matching extension ZIP.',
+        'bridge-unavailable' => 'The configuration bridge could not finish. Check that Paymenter\'s configuration and database are readable by the site user.',
+        'private-pipe-required' => 'Runtime configuration must travel through a private pipe. Use the extension page or its documented command.',
+        'billing-event-unverified' => 'Backups could not verify Paymenter\'s daily billing schedule. Check the native cron job and billing time before running full backups.',
+        'billing-guard-unavailable' => 'The cron job could not record Paymenter\'s billing schedule. Check that the site user can write the data directory.',
+        'backup-tick-unavailable' => 'Paymenter\'s scheduler could not start Backups. Check the configured binaries and the data directory.',
 
         // Credentials
-        'credentials-unreadable' => 'Saved credentials cannot be decrypted. Restore the previous APP_KEY or APP_PREVIOUS_KEYS. If the key is lost, move credentials.json out of the extension data directory, then save credentials again.',
-        'credentials-invalid' => 'Enter both the access key ID and the secret access key.',
-        'credentials-save-failed' => 'The encrypted credentials file could not be written. Check that the site user can write the extension data directory.',
-        'maintenance-probe-credentials-invalid' => 'Enter the HTTP Basic username and password. The username cannot contain a colon or control characters.',
-        'maintenance-probe-origin-mismatch' => 'HTTP Basic credentials were saved for another App URL. Save them for the current HTTPS address or remove them before a full backup.',
-        'maintenance-probe-https-required' => 'HTTP Basic credentials require HTTPS. Change App URL in Paymenter\'s settings to HTTPS first.',
-        's3-credentials-required' => 'Save S3 access keys in Settings before copying backups to S3.',
+        'credentials-unreadable' => 'Saved credentials or recovery keys could not be read. Restore the matching APP_KEY or APP_PREVIOUS_KEYS and keep credentials.json. Replacing it can lose keys needed for earlier S3 backups.',
+        'credentials-invalid' => 'Enter both access key ID and secret access key.',
+        'credentials-save-failed' => 'The encrypted keys file couldn\'t be written. Check that the site user can write the data directory.',
+        'maintenance-probe-credentials-invalid' => 'Enter both username and password. The username can\'t contain ":".',
+        'maintenance-probe-origin-mismatch' => 'The saved site password is for a different App URL. Enter it again or remove it.',
+        'maintenance-probe-https-required' => 'A site password needs an https:// App URL.',
+        'maintenance-probe-http-saved' => 'App URL now uses http://, so the saved site password can\'t be sent. Full backups can\'t start. Remove the password or change App URL to https://.',
+        'maintenance-probe-origin-invalid' => 'App URL isn\'t a valid web address. Fix it in Paymenter\'s settings.',
+        's3-credentials-required' => 'Add S3 keys in Settings, Storage, to upload backups.',
+
+        // Encryption
+        'archive-encryption-tool-missing' => 'GnuPG (gpg) wasn\'t found. Install it, or set its path under Advanced, Binary paths.',
+        'archive-encryption-tool-unusable' => 'GnuPG (gpg) is installed but can\'t encrypt here. Check its version and the path under Advanced, Binary paths.',
+        'archive-key-required' => 'Uploads to S3 need a recovery key. Save settings with "Encrypt backups in S3" on to create one.',
+        'archive-key-save-required' => 'Save the recovery key outside this server and confirm it. Uploads to S3 start after that.',
+        'archive-key-invalid' => 'The recovery key or its fingerprint is invalid. Passphrases need at least 20 characters, no control characters, and at most 1024 UTF-8 bytes.',
+        'archive-key-unavailable' => 'The recovery key for this S3 backup isn\'t on this server. Restore it from the copy you saved.',
+        'archive-key-mismatch' => 'This key doesn\'t match the key the backup was encrypted with.',
+        'archive-key-change-busy' => 'A backup task is running. Try again in a minute.',
+        'archive-key-pending-exists' => 'A new recovery key is already waiting for confirmation. Confirm or discard it first.',
+        'archive-key-already-exists' => 'This key is already saved here.',
+        'archive-key-limit' => 'This server already keeps 128 recovery keys, the most it can hold. Earlier backups still need them, so none was removed.',
+        'archive-key-audit-failed' => 'The recovery-key action stopped because the audit log could not record it. Check that the data directory is writable.',
+        'recovery-key-output-invalid' => 'Export the recovery key to a private folder outside Paymenter and any public web folder.',
+        'recovery-key-output-exists' => 'A file with that name already exists. Choose a new name.',
+        'recovery-key-export-failed' => 'The recovery key file couldn\'t be written.',
+        'sensitive-command-refused' => 'This command can\'t handle recovery keys.',
+        'command-invalid' => 'This command isn\'t supported.',
+        'recovery-file-unsafe' => 'The recovery file isn\'t a regular file.',
+        'recovery-file-changed' => 'The recovery file changed while it was read. Copy it again.',
+        'recovery-object-mismatch' => 'The downloaded file doesn\'t match its recorded size or checksum. Download it again.',
+        'recovery-unreadable' => 'The recovery file is unreadable or damaged.',
+        'archive-encryption-failed' => 'Encrypting the backup failed. The copy on this server is kept. Upload again.',
+        'archive-decryption-failed' => 'The S3 backup couldn\'t be decrypted with its recovery key. The key may be wrong or the copy damaged.',
+        'archive-integrity-failed' => 'The S3 backup failed its integrity check after decryption. Don\'t restore from it.',
+        'remote-format-unsupported' => 'This S3 backup uses a format this version doesn\'t read.',
+        'remote-descriptor-invalid' => 'The S3 backup\'s description file is invalid or doesn\'t match the backup.',
+        'delivery-ciphertext-unavailable' => 'The encrypted bytes for this unfinished upload changed or are missing. An operator must restore those exact bytes or resolve the unfinished upload. Retrying cannot recreate them.',
+        'legacy-plaintext-delivery-blocked' => 'This unfinished upload was recorded as unencrypted and is blocked by the current encryption policy. An operator must resolve it, or explicitly authorize plaintext uploads. Retrying cannot change its format.',
 
         // Capture
-        'maintenance-probe-failed' => 'The maintenance check did not receive Paymenter\'s exact 503 page. Check App URL, redirects, TLS and proxies. If a browser password prompt protects the site, save its HTTP Basic credentials in Settings.',
-        'maintenance-unsafe' => 'Full backups need a plain 503 maintenance page without bypasses, redirects or exceptions. Check Paymenter\'s maintenance configuration before retrying.',
-        'maintenance-driver-unsupported' => 'Full backups need file-based maintenance. Set APP_MAINTENANCE_DRIVER=file.',
-        'maintenance-changed' => 'Maintenance files changed during the backup. Check whether someone ran artisan up or down before retrying.',
-        'maintenance-ownership-uncertain' => 'The backup could not safely reopen the site. Check the site and run the recovery check on Help.',
-        'process-state-uncertain' => 'A backup process may still be running. Check the server and run the recovery check on Help.',
-        'external-durable-state-unsupported' => 'Full backups require local data: database or sync queues; file or database sessions; file, database or array cache; local or public file storage.',
-        'external-symlink-target' => 'Paymenter\'s directory links to files outside it, which a full backup cannot include.',
-        'unsupported-db-objects' => 'The database has views, triggers, routines, events or non-InnoDB tables, which these backups do not support.',
+        'maintenance-probe-failed' => 'Full backup stopped: App URL didn\'t show Paymenter\'s maintenance page (HTTP 503). Check App URL and any redirect, proxy or CDN in front of the site. If the site asks for a password, add it under Site password.',
+        'maintenance-unsafe' => 'Full backups need Paymenter\'s standard maintenance mode, with no secret bypass URL or redirect. Run php artisan up, then try again.',
+        'maintenance-driver-unsupported' => 'Full backups need file-based maintenance mode. Set APP_MAINTENANCE_DRIVER=file in .env.',
+        'maintenance-changed' => 'Someone turned maintenance mode on or off during the backup. Try again.',
+        'maintenance-ownership-uncertain' => 'The site may still be in maintenance mode. Run paymenter_backups recover (Help, Recovery).',
+        'process-state-uncertain' => 'A backup process may still be running. Run paymenter_backups recover (Help, Recovery).',
+        'external-durable-state-unsupported' => 'Paymenter keeps data outside its database and files, for example in Redis. Full backups need file or database storage. The Backups tab lists the .env changes.',
+        'external-symlink-target' => 'Paymenter\'s folder has a symlink to a file outside the folder. Full backups can\'t include it.',
+        'unsupported-db-objects' => 'The database has views, triggers, routines, events or non-InnoDB tables. These backups support InnoDB tables only.',
         'unsupported-database' => 'Only MySQL and MariaDB databases are supported.',
-        'database-inventory-failed' => 'The database could not be inspected. Check the database user\'s permissions.',
-        'database-changed-during-capture' => 'The database changed while the site was paused. Check for jobs that ignore maintenance mode.',
-        'capture-timeout' => 'The backup exceeded Capture time limit and stopped. Increase that limit under Advanced.',
-        'child-timeout' => 'A backup step exceeded its time limit and stopped. Review Capture time limit under Advanced.',
-        'child-failed' => 'A backup step failed. Check the program paths and database access.',
-        'child-output-limit' => 'The backup would exceed the space limit or disk reserve. Free space or review Retention and space.',
-        'capture-failed' => 'An unexpected error stopped the backup before completion. Check the server before retrying.',
-        'capture-interrupted' => 'The backup process stopped before completion, for example during a server restart.',
+        'database-inventory-failed' => 'The database couldn\'t be inspected. Check the database user\'s permissions.',
+        'database-changed-during-capture' => 'The database changed during the full backup. Something outside Paymenter\'s cron jobs wrote to it.',
+        'capture-timeout' => 'The backup took longer than the backup time limit. Raise it under Advanced, Time limits.',
+        'child-timeout' => 'The backup took longer than the backup time limit. Raise it under Advanced, Time limits.',
+        'child-failed' => 'A backup step failed. Check database access and binary paths.',
+        'child-output-limit' => 'Not enough space: the backup would go over the space limit or minimum free disk space.',
+        'capture-failed' => 'The backup failed unexpectedly.',
+        'capture-interrupted' => 'The backup stopped, for example because the server restarted.',
+        'failed-work-cleanup-failed' => 'Temporary files from a failed backup could not be removed safely. Check their ownership and the private task record before trying again.',
+        'recovery-failed' => 'Backups could not confirm that the site reopened safely. Run paymenter_backups recover and follow the recovery steps in Help.',
+        'unresolved-run-not-found' => 'That backup has no unresolved recovery record. Run paymenter_backups recover to see the records that still need attention.',
         'dump-empty' => 'The database export was empty. Check the database name and user in Paymenter\'s .env.',
-        'disk-reserve-exceeded' => 'The extension data or backup disk is below Keep this much disk free. Free space or lower that reserve.',
-        'local-byte-budget-exceeded' => 'Backups reached the space limit or the disk is nearly full. Delete older copies or review Retention and space.',
-        'destination-unsafe' => 'The backup directory must be private, owned by the site user, and outside Paymenter and its public directories.',
-        'destination-inside-docroot' => 'The backup directory is inside a public web directory. Choose a directory that no site serves.',
-        'private-root-move-refused' => 'The extension data directory holds this installation\'s ID, keys and backup history, so it cannot be moved from this page. Keep this path unchanged. Changing it would lose access to saved credentials and history.',
+        'disk-reserve-exceeded' => 'Disk is below the minimum free space. Free space, or lower the minimum in Settings, Storage.',
+        'local-byte-budget-exceeded' => 'Backup space is full. Delete old backups or raise the limit in Settings, Storage.',
+        'destination-unsafe' => 'The backup directory must be owned by the site user, have permissions 700, and be outside Paymenter and any public web folder.',
+        'destination-inside-docroot' => 'The backup directory is inside a public web folder. Choose a folder that no site serves.',
+        'private-root-move-refused' => 'The data directory can\'t be changed after setup. It holds your backup history and saved keys.',
 
         // Archives
-        'archive-checksum-mismatch' => 'The archive does not match its checksum. Do not restore from it.',
-        'archive-payload-mismatch' => 'Files inside the archive do not match their checksums. Do not restore from it.',
-        'archive-layout-invalid' => 'The archive contains unexpected files. Do not restore from it.',
-        'archive-manifest-mismatch' => 'The archive\'s manifest does not match. Do not restore from it.',
-        'archive-unreadable' => 'The archive is damaged or incomplete. Do not restore from it.',
-        'archive-changed-during-verification' => 'The archive changed while it was being checked. Verify it again.',
-        'archive-changed-during-download' => 'The archive changed while it was being read. Verify it again.',
-        'archive-changed-during-export' => 'The archive changed while it was being copied. Verify it again.',
-        'archive-changed-during-delivery' => 'The archive changed while it was being copied to S3. Verify it again.',
+        'archive-checksum-mismatch' => 'The backup doesn\'t match its checksum. Don\'t restore from it.',
+        'archive-payload-mismatch' => 'Files inside the backup don\'t match their checksums. Don\'t restore from it.',
+        'archive-layout-invalid' => 'The backup contains unexpected files. Don\'t restore from it.',
+        'archive-manifest-mismatch' => 'The backup\'s manifest doesn\'t match. Don\'t restore from it.',
+        'artifact-manifest-mismatch' => 'The backup\'s manifest doesn\'t match. Don\'t restore from it.',
+        'archive-unreadable' => 'The backup is damaged or incomplete. Don\'t restore from it.',
+        'archive-changed-during-verification' => 'The backup changed while it was being checked. Verify it again.',
+        'archive-changed-during-download' => 'The backup changed while it was being read. Verify it again.',
+        'archive-changed-during-export' => 'The backup changed while it was being copied. Verify it again.',
+        'archive-changed-during-delivery' => 'The backup changed while it was uploading to S3. Verify it again.',
         'artifact-changed' => 'The backup files changed while they were being read. Try again.',
-        'artifact-missing' => 'The archive is missing from its backup directory.',
-        'artifact-unsafe' => 'The archive file has unexpected permissions or links, so it will not be used. Check the backup directory.',
-        'artifact-location-invalid' => 'The archive is outside this installation\'s private backup directory, so it will not be used.',
+        'artifact-missing' => 'The backup file is missing from the backup directory.',
+        'artifact-unsafe' => 'The backup file has unexpected permissions or links, so it isn\'t used. Check the backup directory.',
+        'artifact-location-invalid' => 'The backup file is outside this site\'s backup directory, so it isn\'t used.',
         'artifact-manifest-invalid' => 'The backup\'s manifest is damaged.',
         'artifact-identity-mismatch' => 'This backup belongs to a different installation.',
         'artifact-deleted' => 'This backup was deleted.',
-        'verification-required' => 'The archive has no current verification. Verify it before downloading.',
-        'artifact-stream-timeout' => 'The download did not start in time. Try again. If it keeps failing, use the export command on the Help tab.',
-        'run-incomplete' => 'This backup did not finish.',
-        'run-not-found' => 'This backup does not exist.',
-        'invalid-run-id' => 'This backup does not exist.',
+        'verification-required' => 'Verify this backup before downloading.',
+        'artifact-stream-timeout' => 'The download didn\'t start. Try again, or copy the backup with paymenter_backups export (Help, Command line).',
+        'export-destination-unsafe' => 'Export to a new folder that doesn\'t exist yet, outside Paymenter and any public web folder.',
+        'run-incomplete' => 'This backup didn\'t finish.',
+        'run-not-found' => 'This backup doesn\'t exist.',
+        'invalid-run-id' => 'This backup doesn\'t exist.',
 
-        // Storage, delivery and deletion
-        'installation-state-orphaned' => 'Saved extension data has no valid installation ID. Restore the original extension data before starting backups.',
-        'legacy-local-source-damaged' => 'The older local backup did not pass verification. Use another verified copy.',
-        'legacy-manifest-replaced' => 'The older backup record changed while being checked. Verify the local copy before retrying.',
-        'retrieve-local-copy-changed' => 'The retrieved local copy changed before publication. It was not made available for download.',
-        'retrieve-intent-invalid' => 'The unfinished retrieval record is invalid. Check the extension data directory before retrying.',
-        'retention-pointer-update-failed' => 'The latest S3 backup record could not be updated. Check S3 write permissions, then apply retention again.',
-        'maintenance-probe-http-saved' => 'Saved HTTP Basic credentials require HTTPS, but App URL uses http://. Full backups cannot start. Remove the saved credentials in Settings or restore an HTTPS App URL.',
-        'maintenance-probe-origin-invalid' => 'App URL is not valid for this maintenance check. Correct it in Paymenter settings. HTTP Basic credentials require HTTPS.',
-        'remote-copy-missing' => 'The S3 copy is missing. A bucket lifecycle rule may have removed it. Use another available copy.',
-        'remote-copy-damaged' => 'The S3 copy did not match its backup record. Use another verified copy.',
-        'remote-copy-unknown' => 'The S3 copy has not been checked successfully. Verify it before relying on it.',
-        'remote-copy-error' => 'The S3 copy could not be checked. Check the S3 settings and keys before retrying.',
-        'remote-check-failed' => 'The S3 verification could not finish. Check S3 access and retry.',
-        'remote-archive-size-mismatch' => 'The S3 archive has the wrong size. It was not made available for download.',
-        'remote-archive-checksum-mismatch' => 'The S3 archive failed its checksum check. It was not made available for download.',
-        'remote-scope-changed' => 'This copy belongs to an earlier S3 location. Restore its original S3 settings before checking or retrieving it.',
-        'remote-location-unbound' => 'This older S3 copy has no verified destination binding. Check its original S3 settings before relying on it.',
-        'delivery-destination-changed' => 'The destination changed since the unfinished upload began. Restore the original S3 settings before retrying.',
-        'delete-no-verified-local-survivor' => 'No other local backup passed verification. Create or verify another local backup before deleting this copy.',
-        'delete-no-verified-s3-survivor' => 'No other S3 backup passed verification. Copy another verified backup to S3 before deleting this copy.',
-        'delete-last-s3-backup' => 'This is the only recorded S3 backup. Copy another verified backup to S3 before deleting it.',
-        'delete-remote-location-unbound' => 'This S3 copy has no verified destination binding, so it cannot be deleted here. Local-only deletion can still be selected.',
-        'delete-location-invalid' => 'Choose this server, S3 or all copies for deletion.',
-        'delete-location-changed' => 'The earlier deletion targeted another location. Select that same location to finish the deletion.',
-        'retrieve-local-copy-exists' => 'This backup already has a local copy, or another file occupies its retrieval path. Check local history and the original backup directory before retrying.',
-        'retrieve-spool-changed' => 'An interrupted S3 download file changed. Ask the server administrator to inspect it before retrying.',
-        'multipart-location-unbound' => 'An older unfinished upload has no recorded S3 location. Ask the storage provider to remove it, or use a rule that removes incomplete uploads. The extension kept it.',
-        'installation-state-orphaned' => 'The extension data directory contains files but has no installation record. Restore that record or choose a new empty directory. Existing files were kept.',
-        'schedule-superseded' => 'This scheduled task was cancelled because the schedule changed or a newer backup time replaced it.',
-        'remote-object-too-large' => 'The S3 backup record exceeds its size limit. It was not used.',
-        'retention-remote-scope-changed' => 'Retention kept an S3 copy outside the current bucket or object prefix.',
-        'retention-skipped-damaged' => 'Retention kept a damaged backup. Check another verified copy before deleting it manually.',
-        's3-client-failed' => 'The S3 client could not start. Check the region and endpoint.',
+        // Storage, uploads and deletion
+        'installation-state-orphaned' => 'The data directory has files but no installation.json. Restore that file, or choose a new empty directory.',
+        'legacy-local-source-damaged' => 'This older backup failed verification. Use another one.',
+        'legacy-manifest-replaced' => 'This older backup\'s record changed. Verify it, then try again.',
+        'retrieve-local-copy-changed' => 'The downloaded copy changed before it was ready, so it isn\'t offered. Try again.',
+        'retrieve-intent-invalid' => 'An earlier download from S3 left a damaged record. Check the data directory.',
+        'retention-pointer-update-failed' => 'Couldn\'t update the "latest backup" file in S3. Check the keys can write, then run cleanup again.',
+        'remote-copy-missing' => 'The S3 copy is missing. A bucket lifecycle rule may have removed it. Use another backup.',
+        'remote-copy-damaged' => 'The S3 copy doesn\'t match its backup record. Use another backup.',
+        'remote-copy-unknown' => 'The S3 copy hasn\'t been checked yet. Verify it.',
+        'remote-copy-error' => 'The S3 copy couldn\'t be checked. Check the S3 settings and keys, then try again.',
+        'remote-copy-unavailable' => 'No completed S3 copy is recorded for this backup. Check its upload status before downloading from S3.',
+        'remote-check-failed' => 'The S3 check couldn\'t finish. Check S3 access and try again.',
+        'remote-archive-size-mismatch' => 'The S3 copy has the wrong size, so it isn\'t offered for download.',
+        'remote-archive-checksum-mismatch' => 'The S3 copy failed its checksum check, so it isn\'t offered for download.',
+        'remote-scope-changed' => 'This copy is in an old S3 bucket or folder. Switch back to those S3 settings to use it.',
+        'remote-location-unbound' => 'This older S3 copy hasn\'t been checked against your current S3 settings. Verify it.',
+        'delivery-destination-changed' => 'S3 settings changed during an upload. Switch back to the old settings to finish it, or upload again.',
+        'delete-no-verified-local-survivor' => 'No other verified backup on this server. Create or verify one first.',
+        'delete-no-verified-s3-survivor' => 'No other verified backup in S3. Upload one first.',
+        'delete-last-s3-backup' => 'This is the newest backup in S3. Upload a newer one first.',
+        'delete-remote-location-unbound' => 'This S3 copy can\'t be deleted here because it hasn\'t been checked. You can still delete the copy on this server.',
+        'delete-location-invalid' => 'Choose where to delete from: this server, S3, or both.',
+        'delete-location-changed' => 'An earlier deletion of this backup targeted another place. Choose that same place to finish it.',
+        'retrieve-local-copy-exists' => 'A file with this backup\'s name already exists on this server. Check the backup directory.',
+        'retrieve-spool-changed' => 'An interrupted download from S3 changed on disk. Check the data directory, then try again.',
+        'multipart-location-unbound' => 'An old unfinished upload is still in S3. Add a bucket lifecycle rule that deletes incomplete uploads.',
+        'multipart-destination-mismatch' => 'An unfinished upload is in an old S3 bucket or folder. Add a bucket lifecycle rule that deletes incomplete uploads.',
+        'schedule-superseded' => 'Replaced by a newer scheduled backup, or the schedule changed.',
+        'remote-object-too-large' => 'A backup record in S3 is larger than allowed, so it isn\'t used.',
+        'retention-remote-scope-changed' => 'Cleanup kept an S3 copy that\'s outside the current bucket or folder.',
+        'retention-skipped-damaged' => 'Cleanup kept a damaged backup. Delete it yourself once another backup is verified.',
+        'retention-last-good-local-copy' => 'Cleanup kept this verified copy to preserve the required backups on this server.',
+        'retention-last-good-s3-copy' => 'Cleanup kept this usable S3 copy as a protected backup.',
+        'retention-mode-unknown' => 'Cleanup could not confirm whether this is a full or database backup, so it was kept. Check its backup record and manifest.',
+        'delete-mode-unknown' => 'Deletion could not confirm whether this is a full or database backup. Check its backup record and manifest before deleting it.',
+        'staging-removal-conflict' => 'Another deletion of this backup is unfinished. Resolve it before removing the temporary copy on this server.',
+        'staging-removal-remote-proof-required' => 'The temporary local copy was kept because Backups could not prove its completed S3 copy in the current bucket and folder.',
+        'staging-removal-ownership-mismatch' => 'The temporary local files have unexpected ownership, paths or links, so they were kept.',
+        'staging-removal-local-verification-failed' => 'The temporary local files changed or failed verification, so they were kept. Verify the backup before resolving the cleanup.',
+        'staging-removal-local-delete-failed' => 'The S3 upload completed, but its temporary local files could not be removed. Check the backup directory and retry the upload task to finish cleanup.',
+        's3-client-failed' => 'The S3 client couldn\'t start. Check the region and endpoint.',
         'isolated-s3-sdk-missing' => 'The bundled S3 library is missing. Reinstall the extension ZIP.',
-        's3-readback-mismatch' => 'The copy in S3 did not match after upload. The local backup is kept. Retry the copy.',
-        's3-manifest-readback-mismatch' => 'The manifest in S3 did not match after upload. The local backup is kept. Retry the copy.',
-        's3-delivery-failed' => 'Copying to S3 failed. The local backup is kept. Check the S3 settings and keys, then retry.',
-        'multipart-destination-mismatch' => 'An unfinished upload belongs to an earlier S3 location. Restore those S3 settings and copy again, or use the provider\'s incomplete-upload cleanup rule.',
-        'destination-probe-failed' => 'The storage test could not write and read back a test file.',
+        's3-readback-mismatch' => 'The S3 copy didn\'t match after upload. The copy on this server is kept. Upload again.',
+        's3-manifest-readback-mismatch' => 'The S3 copy didn\'t match after upload. The copy on this server is kept. Upload again.',
+        's3-delivery-failed' => 'Upload to S3 failed. The copy on this server is kept. Check S3 settings and keys, then upload again.',
+        'destination-probe-failed' => 'The storage test couldn\'t write and read back a test file.',
         'destination-readback-mismatch' => 'The storage test read back different data than it wrote.',
-        'destination-test-failed' => 'The storage test could not write to the bucket. Check the endpoint, region, bucket and key permissions.',
-        'destination-probe-cleanup-failed' => 'The storage test file could not be removed from S3. Check that the keys allow deletes.',
-        'delete-last-backup' => 'No other usable backup exists. Create another backup before deleting this copy.',
-        'delete-latest-remote-copy' => 'This is the newest backup in S3. Keep it until a newer backup is copied there.',
-        'delete-no-verified-survivor' => 'No other copy passed verification at the selected location. The selected copies were kept.',
+        'destination-test-failed' => 'Couldn\'t write to the bucket. Check endpoint, region, bucket name and key permissions.',
+        'destination-probe-cleanup-failed' => 'The test file couldn\'t be deleted from S3. The keys need delete permission.',
+        'delete-last-backup' => 'This is your only usable backup. Create another first.',
+        'delete-latest-remote-copy' => 'This is the newest backup in S3. Upload a newer one first.',
+        'delete-no-verified-survivor' => 'No other verified backup is left in that place, so nothing was deleted.',
         'delete-conflict' => 'Another task is using this backup. Wait for it to finish.',
         'delete-confirmation-required' => 'Confirm the deletion first.',
-        'delete-remote-scope-changed' => 'This S3 copy is outside the current S3 location. Restore its S3 settings or remove it in the provider. Local-only deletion can still be selected.',
-        'delete-ownership-mismatch' => 'These files are not in this installation\'s backup directory or S3 prefix, so they were kept.',
-        'delete-remote-verification-failed' => 'The S3 copy is missing or did not match the backup. It was kept.',
-        'delete-remote-delete-failed' => 'Deleting the S3 copy failed. Check delete permissions and retry. Copies already removed stay removed.',
-        'delete-local-delete-failed' => 'Deleting the local files failed. Retry.',
-        'delete-local-verification-failed' => 'The local files changed after verification, so they were kept.',
-        'retention-ownership-mismatch' => 'Retention found files outside this installation\'s backup directory or S3 prefix and kept them.',
-        'retention-remote-verification-failed' => 'Retention could not verify an S3 copy and kept it. Check that copy before applying retention again.',
-        'retention-remote-delete-failed' => 'Retention could not delete an S3 copy. Check the keys allow deletes, then use Apply retention.',
-        'retention-local-delete-failed' => 'Retention could not delete a local copy. Check its backup directory, then use Apply retention.',
-        'retention-local-verification-failed' => 'Retention found local files that changed since the backup and kept them.',
+        'delete-remote-scope-changed' => 'This S3 copy is in an old bucket or folder. Switch back to those S3 settings or delete it at your provider. You can still delete the copy on this server.',
+        'delete-ownership-mismatch' => 'These files aren\'t in this site\'s backup directory or S3 folder, so they were kept.',
+        'delete-remote-verification-failed' => 'The S3 copy is missing or didn\'t match the backup, so it was kept.',
+        'delete-remote-delete-failed' => 'Deleting the S3 copy failed. Check the keys can delete, then try again.',
+        'delete-local-delete-failed' => 'Deleting the files on this server failed. Try again.',
+        'delete-local-verification-failed' => 'The files on this server changed after they were checked, so they were kept.',
+        'retention-ownership-mismatch' => 'Cleanup found files outside this site\'s backup directory or S3 folder and kept them.',
+        'retention-remote-verification-failed' => 'Cleanup couldn\'t verify an S3 copy and kept it. Check that copy, then run cleanup again.',
+        'retention-remote-delete-failed' => 'Cleanup couldn\'t delete an S3 copy. Check the keys can delete, then run cleanup again.',
+        'retention-local-delete-failed' => 'Cleanup couldn\'t delete a backup on this server. Check the backup directory, then run cleanup again.',
+        'retention-local-verification-failed' => 'Cleanup found backup files that changed after the backup and kept them.',
+
+        // Terminal request validation and bounded operations
+        'json-stdin-required' => 'Pass the requested JSON through standard input, using the command shown under Help.',
+        'json-stdin-invalid' => 'The standard input is not a valid JSON object. Check the command input before trying again.',
+        'input-too-large' => 'The command input exceeds its allowed size. Submit only the required settings or credentials.',
+        'run-id-required' => 'Name the backup to use. The backup list shows its ID.',
+        'request-id-required' => 'Name the task to use. The task list shows its ID.',
+        'execute-required' => 'This command needs --execute to perform the requested operation.',
+        'artifact-stream-pipe-required' => 'Downloads must use a private stream. Use Download on the page or the documented export command.',
+        'operation-interrupted' => 'The command was interrupted. Check its task record before starting it again.',
+        'operation-failed' => 'The command could not finish. Check its private task record and the configured binaries before trying again.',
     ];
 
     public static function error(?string $code): string
     {
         if ($code === null || $code === '') { return ''; }
-        return self::ERRORS[$code] ?? 'The task failed with error code ' . (preg_match('/^[a-z0-9-]{1,64}$/D', $code) ? $code : 'unknown') . '.';
+        return self::ERRORS[$code] ?? 'The task failed with an unrecognized error. Check its private task record from the command line.';
     }
 
     public static function known(string $code): bool { return isset(self::ERRORS[$code]); }
 
-    /** Settings field that an engine configuration refusal points at. */
+    private static function shellWord(string $word): string
+    {
+        return preg_match('~^[A-Za-z0-9_@%+=:,./-]+$~D', $word) ? $word : escapeshellarg($word);
+    }
+
+    /** Settings field that an engine configuration refusal points at, or null. */
     public static function field(string $code): ?string
     {
         return [
-            'schedule-overlaps-billing' => 'schedule_time', 's3-tls-required' => 's3_endpoint', 's3-endpoint-invalid' => 's3_endpoint',
+            'schedule-overlaps-billing' => 'full_time', 's3-tls-required' => 's3_endpoint', 's3-endpoint-invalid' => 's3_endpoint',
             's3-prefix-invalid' => 's3_prefix', 'plaintext-offsite-acknowledgement-required' => 'plaintext_offsite_acknowledged',
-            'billing-guard-stale' => 'enabled', 'private-root-invalid' => 'private_root', 'private-root-inside-docroot' => 'private_root',
+            'remote-configuration-required' => 's3_bucket',
+            'private-root-invalid' => 'private_root', 'private-root-inside-docroot' => 'private_root',
             'private-root-inside-app' => 'private_root', 'private-root-unsafe' => 'private_root', 'owner-mismatch' => 'private_root',
-            'installation-mismatch' => 'private_root', 'document-roots-invalid' => 'extra_docroots', 'tool-path-invalid' => 'python',
+            'installation-mismatch' => 'private_root', 'document-roots-invalid' => 'extra_docroots',
             'python-binary-invalid' => 'python', 'php-binary-mismatch' => 'php', 'destination-unsafe' => 'local_path',
             'destination-inside-docroot' => 'local_path', 'private-root-move-refused' => 'private_root',
         ][$code] ?? null;
@@ -201,10 +292,18 @@ final class Messages
 
     public const MODES = [
         'full-quiesced' => 'Full backup',
-        'database-online' => 'Database only',
+        'database-online' => 'Database backup',
+    ];
+
+    /** Short type names for the history table. */
+    public const TYPES = [
+        'full-quiesced' => 'Full',
+        'database-online' => 'Database',
     ];
 
     public static function mode(?string $mode): string { return self::MODES[$mode] ?? 'Backup'; }
+
+    public static function type(?string $mode): string { return self::TYPES[$mode] ?? 'Backup'; }
 
     /** [label, Filament color] for a backup row. */
     public static function runStatus(array $run): array
@@ -213,21 +312,21 @@ final class Messages
         return match ($run['status']) {
             'ready' => match ($run['download']) {
                 'ready' => ['Verified', 'success'],
-                'retrieve' => [$run['remote'] === 'present' ? 'Present in S3' : 'In S3', 'info'],
+                'retrieve' => ['In S3', 'info'],
                 'verify' => ['Not verified', 'warning'],
                 default => match ($run['remote']) {
                     'missing' => ['S3 copy missing', 'warning'], 'damaged' => ['S3 copy damaged', 'danger'],
-                    'scope-changed' => ['Previous S3 location', 'warning'], 'unbound' => ['S3 location unverified', 'warning'],
+                    'scope-changed' => ['Old S3 folder', 'warning'], 'unbound' => ['S3 copy unchecked', 'warning'],
                     default => ['Unavailable', 'danger'],
                 },
             },
             'damaged' => ['Damaged', 'danger'],
-            'running' => ['Creating', 'info'],
+            'running' => ['Running', 'info'],
             'failed' => ['Failed', 'danger'],
-            'attention' => ['Needs attention', 'warning'],
+            'attention' => ['Needs recovery', 'warning'],
             'interrupted' => ['Interrupted', 'danger'],
             'deleting' => ['Deleting', 'info'],
-            'delete-interrupted' => ['Delete interrupted', 'warning'],
+            'delete-interrupted' => ['Deletion incomplete', 'warning'],
             'deleted' => ['Deleted', 'gray'],
             default => ['Unknown', 'gray'],
         };
@@ -243,65 +342,77 @@ final class Messages
         return match ($run['status']) {
             'ready' => match ($run['download']) {
                 'ready' => $run['remote'] === 'failed' ? self::error($run['delivery_error'] ?: 's3-delivery-failed') : null,
-                'retrieve' => 'Stored only in S3. Retrieve it to verify a local copy and make Download available.',
-                'verify' => 'No current verification is recorded. Verify this backup before downloading.',
+                'retrieve' => 'Only in S3. Use Download from S3.',
+                'verify' => 'Verify before downloading.',
                 default => self::error($run['download']),
             },
             'damaged' => self::error($run['verification_error']),
-            'running' => $run['mode'] === 'database-online' ? 'Writing the backup. The site stays online.' : (in_array($run['phase'] ?? '', ['entering-maintenance', 'draining', 'capturing'], true) ? 'Copying data while visitors see the maintenance page.' : 'Finishing the archive after the site reopens.'),
+            'running' => $run['mode'] === 'database-online' ? 'Copying the database. The site stays online.'
+                : (in_array($run['phase'] ?? '', ['entering-maintenance', 'draining', 'capturing'], true) ? 'Copying. The site is in maintenance mode.' : 'Compressing. The site is back online.'),
             'failed' => self::error($run['error'] ?: 'capture-failed'),
-            'attention' => (($run['maintenance'] ?? false) ? 'The site shows its maintenance page. ' : 'The site is online. ') . self::error($run['recovery_error'] ?: 'maintenance-ownership-uncertain'),
-            'interrupted' => 'The backup process stopped before it finished.',
-            'deleting' => 'Deletion is queued or running.',
+            'attention' => (($run['maintenance'] ?? false) ? 'Site in maintenance mode. ' : 'Site online. ') . self::error($run['recovery_error'] ?: 'maintenance-ownership-uncertain'),
+            'interrupted' => 'The backup stopped before it finished.',
+            'deleting' => 'Deletion queued or running.',
             'delete-interrupted' => 'Some files may remain. Delete it again to finish.',
-            'deleted' => $run['deletion_reason'] === 'manual' ? 'Deleted by an administrator.' : 'Removed by retention.',
+            'deleted' => $run['deletion_reason'] === 'manual' ? 'Deleted manually.' : 'Deleted by cleanup.',
             default => null,
         };
     }
 
-    public static function location(array $run, array $configuration): string
+    /** Where a backup's copies are, in a few words. */
+    public static function location(array $run, bool $uploadsToS3): string
     {
         if (!$run['local']) {
-            return $run['status'] === 'deleted' ? 'Removed' : match ($run['remote']) {
-                'delivered', 'present' => 'S3 only', 'missing' => 'S3 copy missing', 'damaged' => 'S3 copy damaged',
-                'scope-changed' => 'Previous S3 location', 'unbound' => 'S3 location needs checking', default => 'Not stored',
+            return $run['status'] === 'deleted' ? '—' : match ($run['remote']) {
+                'delivered', 'present' => 'S3', 'missing' => 'S3 copy missing', 'damaged' => 'S3 copy damaged',
+                'scope-changed' => 'Old S3 folder', 'unbound' => 'S3 (unchecked)', default => '—',
             };
         }
         return match ($run['remote']) {
-            'delivered', 'present' => 'This server and S3',
-            'failed' => 'This server, S3 copy failed',
-            'missing' => 'This server, S3 copy missing', 'damaged' => 'This server, S3 copy damaged',
-            'scope-changed' => 'This server, previous S3 location', 'unbound' => 'This server, S3 location needs checking',
-            default => (($configuration['destination']['type'] ?? 'local') === 's3') ? 'This server, not yet in S3' : 'This server',
+            'delivered', 'present' => 'This server, S3',
+            'failed' => 'This server (S3 upload failed)',
+            'missing' => 'This server (S3 copy missing)', 'damaged' => 'This server (S3 copy damaged)',
+            'scope-changed' => 'This server, old S3 folder', 'unbound' => 'This server, S3 (unchecked)',
+            default => $uploadsToS3 ? 'This server (not uploaded yet)' : 'This server',
+        };
+    }
+
+    /** Label for how an S3 copy is stored, or null when there is none. */
+    public static function remoteFormat(?string $format, ?string $keyShort = null): ?string
+    {
+        return match ($format) {
+            'openpgp-symmetric-aes256-seipd-v1' => 'Encrypted' . ($keyShort ? ' with recovery key ' . $keyShort : ''),
+            'plaintext-v1' => 'Not encrypted',
+            null => null,
+            default => 'Unknown format',
         };
     }
 
     public const TASKS = [
-        'run' => 'Create backup', 'verify' => 'Verify backup', 'deliver' => 'Copy to S3',
-        'retrieve' => 'Retrieve from S3', 'retention' => 'Apply retention', 'destination-test' => 'Test storage', 'delete' => 'Delete backup',
+        'run' => 'Create backup', 'verify' => 'Verify', 'deliver' => 'Upload to S3',
+        'retrieve' => 'Download from S3', 'retention' => 'Delete old backups', 'destination-test' => 'Test storage', 'delete' => 'Delete backup',
     ];
 
     public static function task(array $request): string
     {
         if ($request['action'] === 'run') {
-            $label = $request['scheduled'] ? 'Scheduled backup' : 'Create backup';
-            return $request['mode'] ? $label . ', ' . strtolower(self::mode($request['mode'])) : $label;
+            return self::mode($request['mode'] ?? null) . ', ' . (($request['scheduled'] ?? false) ? 'scheduled' : 'manual');
         }
         return self::TASKS[$request['action']] ?? 'Backup task';
     }
 
     public static function taskProgress(string $action, string $status): string
     {
-        $label = match ($action) { 'verify' => 'Verification', 'deliver' => 'Copy to S3', 'retrieve' => 'S3 retrieval', 'delete' => 'Deletion', default => self::TASKS[$action] ?? 'Task' };
-        return $label . match ($status) { 'pending' => ' queued.', 'deferred' => ' waiting to retry.', 'launching' => ' starting.', default => ' in progress.' };
+        $label = match ($action) { 'verify' => 'Verification', 'deliver' => 'Upload to S3', 'retrieve' => 'Download from S3', 'delete' => 'Deletion', 'retention' => 'Cleanup', default => self::TASKS[$action] ?? 'Task' };
+        return $label . match ($status) { 'pending' => ' queued.', 'deferred' => ' retrying soon.', 'launching' => ' starting.', default => ' in progress.' };
     }
 
     /** [label, Filament color] for a task row. */
     public static function taskStatus(string $status): array
     {
         return match ($status) {
-            'pending' => ['Waiting for scheduler', 'info'],
-            'deferred' => ['Waiting to retry', 'warning'],
+            'pending' => ['Queued', 'info'],
+            'deferred' => ['Retrying soon', 'warning'],
             'launching' => ['Starting', 'info'],
             'running' => ['Running', 'info'],
             'complete' => ['Done', 'success'],
@@ -309,6 +420,7 @@ final class Messages
             'cancelled' => ['Cancelled', 'gray'],
             'expired' => ['Expired', 'gray'],
             'skipped' => ['Skipped', 'gray'],
+            'satisfied' => ['Covered', 'gray'],
             default => ['Unknown', 'gray'],
         };
     }
@@ -328,4 +440,146 @@ final class Messages
     }
 
     public const WEEKDAYS = [0 => 'Monday', 1 => 'Tuesday', 2 => 'Wednesday', 3 => 'Thursday', 4 => 'Friday', 5 => 'Saturday', 6 => 'Sunday'];
+
+    /** Names for binaries in Advanced, Binary paths. */
+    public const TOOLS = [
+        'python' => 'Python 3', 'php' => 'PHP', 'dump' => 'mysqldump or mariadb-dump', 'mysql' => 'mysql or mariadb client',
+        'tar' => 'tar', 'gzip' => 'gzip', 'gpg' => 'GnuPG (gpg)',
+    ];
+
+    /** Names for the storage drivers that full backups check. */
+    public const STORES = [
+        'maintenance' => 'Maintenance mode', 'cache' => 'Cache', 'session' => 'Sessions', 'queue' => 'Queue', 'filesystem' => 'File storage',
+    ];
+
+    /**
+     * A setup item from engine readiness, as words and fixes. Context carries
+     * only display data the page already holds: suggestions, detected jobs and
+     * stores, the crontab user and the last cron check-in.
+     *
+     * @return array{title: string, text: string, fixes: list<array{lead: ?string, code: string}>, action: ?array{kind: string, label: string, target: ?string}, tone: string}
+     */
+    public static function readinessItem(string $code, array $detail, array $context = []): array
+    {
+        $suggest = $context['suggestions'] ?? [];
+        $user = $context['crontab_user'] ?? null;
+        $cronLead = 'Add this line to the crontab of ' . ($user ?: 'the site user') . ' (run crontab -e as that user). If a schedule:run line is already there, replace it.';
+        $scheduler = filled($suggest['scheduler'] ?? null) ? [['lead' => $cronLead, 'code' => $suggest['scheduler']]] : [];
+        $settings = static fn (string $label, string $target) => ['kind' => 'settings', 'label' => $label, 'target' => $target];
+        $item = static fn (string $title, string $text, array $fixes = [], ?array $action = null, string $tone = 'warning') => compact('title', 'text', 'fixes', 'action', 'tone');
+        // Engine names for the same conditions.
+        $code = ['continuous-worker-present' => 'worker-continuous', 'job-command-unsupported' => 'job-unparseable', 'job-discovery-failed' => 'discovery-failed',
+            'job-discovery-incomplete' => 'discovery-failed', 'job-discovery-stale' => 'discovery-stale'][$code] ?? $code;
+        $job = is_string($detail['job'] ?? null) ? ($context['jobs'][$detail['job']] ?? null) : null;
+        if ($job === null && $code === 'worker-continuous') {
+            foreach ($context['jobs'] ?? [] as $candidate) { if (($candidate['coordination'] ?? null) === 'continuous') { $job = $candidate; break; } }
+        }
+        $jobName = $job ? ($job['command'] ?: $job['label']) : null;
+        $queueFix = filled($suggest['queue'] ?? null) ? [['lead' => 'Run queue jobs from cron instead, with their own lock file:', 'code' => $suggest['queue']]] : [];
+
+        switch ($code) {
+            case 'installation-not-initialized':
+            case 'installation-missing':
+                return $item('Save your settings', 'This creates the private data directory for backup history and saved keys.', [], $settings('Go to Settings', 'settings'), 'info');
+            case 'scheduler-missing':
+                return $item('Add Paymenter\'s cron job', 'Backups run from Paymenter\'s scheduler, once a minute. No cron job runs it yet.', $scheduler);
+            case 'billing-guard-stale':
+                $last = $context['last_tick'] ?? null;
+                return $item('Paymenter\'s cron job isn\'t running', ($last ? 'It last ran ' . $last . '.' : 'It hasn\'t run yet.') . ' It should run every minute.', $scheduler);
+            case 'job-uncoordinated':
+                $isQueue = ($job['kind'] ?? null) === 'queue-worker';
+                $fix = $isQueue ? $queueFix : $scheduler;
+                if ($fix) { $fix[0]['lead'] = 'Replace it with:'; }
+                return $item('Add a lock file to this ' . ($isQueue ? 'queue job' : 'cron job'), 'Full backups use the lock file to pause it while the database and files are copied.',
+                    [...($jobName ? [['lead' => 'Now:', 'code' => $jobName]] : []), ...$fix]);
+            case 'job-unparseable':
+                $fix = (($job['kind'] ?? null) === 'queue-worker') ? $queueFix : $scheduler;
+                if ($fix) { $fix[0]['lead'] = 'Backups can\'t read this line. Replace it with:'; }
+                return $item('Backups can\'t read a cron job', 'Full backups need to know which lock file each Paymenter job uses.',
+                    [...($jobName ? [['lead' => 'Now:', 'code' => $jobName]] : []), ...$fix]);
+            case 'worker-continuous':
+                $unit = ($job['source'] ?? null) === 'systemd' ? ($job['label'] ?? null) : null;
+                $fixes = [];
+                if ($unit) { $fixes[] = ['lead' => 'Stop and disable the service:', 'code' => 'systemctl disable --now ' . $unit]; }
+                elseif ($jobName) { $fixes[] = ['lead' => 'Now:', 'code' => $jobName]; }
+                return $item('A queue worker runs all the time' . ($unit ? ': ' . $unit : ''), 'Full backups can\'t pause a worker that never stops. Database backups aren\'t affected. Queued emails may wait up to a minute after this change.', [...$fixes, ...$queueFix]);
+            case 'job-locks-unverified':
+                return $item('Add lock files to Paymenter\'s cron jobs', 'Full backups use lock files to pause cron jobs and queue workers while the database and files are copied.', $scheduler);
+            case 'discovery-failed':
+                return $item('Backups couldn\'t read the crontab', 'Full backups check every Paymenter cron job and worker for ' . ($user ?: 'the site user') . ' first. Check that the site user can run crontab -l.');
+            case 'job-discovery-unknown':
+                return $item('Cron jobs haven\'t been checked yet', 'The check runs from Paymenter\'s cron job every few minutes. Full backups wait for it.', [], null, 'info');
+            case 'job-lock-unsafe':
+                $lock = is_string($detail['lock'] ?? null) ? $detail['lock'] : null;
+                return $item('Fix a lock file' . ($lock ? ': ' . $lock : ''), 'It must be a regular file owned by the site user, with permissions 600. Create it with:',
+                    $lock ? [['lead' => null, 'code' => 'touch ' . self::shellWord($lock) . ' && chmod 600 ' . self::shellWord($lock)]] : []);
+            case 'job-lock-override-mismatch':
+                return $item('Lock files override doesn\'t match', 'The lock files under Advanced must be exactly the ones your cron jobs use. Clear the field to use the detected ones.', [], $settings('Go to Advanced', 'advanced'));
+            case 'tool-capability-unsupported':
+                return $item('A binary lacks a needed feature', self::error($code), [], $settings('Go to Binary paths', 'advanced'));
+            case 'discovery-stale':
+                return $item('The cron job check is out of date', 'It refreshes every few minutes while Paymenter\'s cron job runs.', $scheduler, null, 'info');
+            case 'external-durable-state-unsupported':
+                $stores = array_values(array_filter((array) ($detail['stores'] ?? ($context['unsupported_stores'] ?? [])), 'is_array'));
+                $drivers = array_values(array_unique(array_filter(array_map(static fn ($store) => is_string($store['driver'] ?? null) ? $store['driver'] : null, $stores))));
+                $named = $drivers === ['redis'] ? 'Redis' : ($drivers ? implode(', ', $drivers) : 'an outside service');
+                $lines = [];
+                foreach ($stores as $store) {
+                    if (is_string($store['env'] ?? null) && is_string($store['suggest'] ?? null)) { $lines[] = $store['env'] . '=' . $store['suggest']; }
+                }
+                $fixes = $lines ? [['lead' => 'Change these in ' . ($context['env_path'] ?? '.env') . ', then run php artisan config:cache if you cache config. Users are logged out once.', 'code' => implode("\n", $lines)]] : [];
+                return $item('Paymenter stores data in ' . $named, 'Full backups can\'t copy data held outside Paymenter\'s database and files.', $fixes);
+            case 'maintenance-driver-unsupported':
+                return $item('Use file-based maintenance mode', 'Full backups show Paymenter\'s maintenance page and need it stored as a file.', [['lead' => 'Set this in ' . ($context['env_path'] ?? '.env') . ':', 'code' => 'APP_MAINTENANCE_DRIVER=file']]);
+            case 'cooperative-writers-acknowledged':
+            case 'external-state-acknowledged':
+            case 'full-host-assumptions-acknowledgement-required':
+                return $item('Confirm nothing else writes to Paymenter', 'Cron jobs and workers are paused during a full backup. Other programs aren\'t.', [], $settings('Confirm in Settings', 'full-backup-requirements'));
+            case 'no-concurrent-ddl-acknowledgement-required':
+                return $item('Confirm updates don\'t run during backups', 'A Paymenter update or migration during a backup can leave the copy unusable.', [], $settings('Confirm in Settings', 'before-backups-run'));
+            case 's3-credentials-required':
+                return $item('Add your S3 access keys', 'Backups can\'t upload to S3 without keys.', [], $settings('Go to Storage settings', 'storage'));
+            case 'remote-configuration-required':
+                return $item('Enter your S3 bucket', 'Backups can\'t upload to S3 without a bucket name.', [], $settings('Go to Storage settings', 'storage'));
+            case 'plaintext-offsite-acknowledgement-required':
+                return $item('Confirm unencrypted uploads', 'Encryption is off, so backups in S3 won\'t be encrypted. Confirm this, or turn encryption on.', [], $settings('Go to Storage settings', 'storage'));
+            case 'archive-key-required':
+                return $item('Create a recovery key', 'Backups in S3 are encrypted with a recovery key. Save settings with "Encrypt backups in S3" on to create one.', [], $settings('Go to Storage settings', 'storage'));
+            case 'archive-key-save-required':
+                return $item('Save your recovery key', 'Uploads to S3 start after you save it outside this server and confirm. Without it, encrypted backups can\'t be restored if this server is lost.', [], ['kind' => 'recovery-key', 'label' => '', 'target' => null]);
+            case 'archive-encryption-tool-missing':
+            case 'archive-encryption-tool-unusable':
+                $path = $detail['path'] ?? ($context['tools']['gpg']['resolved'] ?? null) ?? ($context['tools']['gpg']['configured'] ?? null);
+                return $item('Install GnuPG', 'Backups use gpg to encrypt uploads to S3' . (is_string($path) && $path !== '' ? '. It wasn\'t usable at ' . $path : ', and it wasn\'t found') . '. Install the gnupg package, or set its path under Binary paths.', [], $settings('Go to Binary paths', 'advanced'));
+            case 'tool-unavailable':
+                $tool = is_string($detail['tool'] ?? null) ? $detail['tool'] : null;
+                $name = self::TOOLS[$tool] ?? 'A required binary';
+                $path = is_string($detail['path'] ?? null) && $detail['path'] !== '' ? $detail['path'] : null;
+                return $item($name . ' not found', ($path ? 'Nothing usable at ' . $path . '. ' : '') . 'Fix the path under Binary paths, or leave it empty to detect it.', [], $settings('Go to Binary paths', 'advanced'));
+            case 'billing-settings-unreadable':
+                return $item('Set Paymenter\'s billing time', 'Full backups avoid Paymenter\'s daily billing run and need its time. Save "Cron Job Time" in Paymenter\'s settings.');
+            case 'recovery-required':
+            case 'maintenance-ownership-uncertain':
+            case 'process-state-uncertain':
+                return $item('A full backup didn\'t finish cleanly', 'The site may still be in maintenance mode. As the site user, see what needs fixing (this changes nothing):',
+                    [['lead' => null, 'code' => 'paymenter_backups recover']], ['kind' => 'help', 'label' => 'Recovery steps', 'target' => 'command-line'], 'danger');
+            case 'maintenance-probe-failed':
+                return $item('Add your site password', 'The last full backup couldn\'t see the maintenance page. If your web server asks for a username and password, full backups need them.', [], $settings('Go to Settings', 'site-password'));
+            case 'maintenance-probe-http-saved':
+            case 'maintenance-probe-origin-mismatch':
+            case 'maintenance-probe-origin-invalid':
+            case 'maintenance-probe-https-required':
+                return $item('Check the site password', self::error($code), [], $settings('Go to Settings', 'site-password'));
+            case 'billing-window-protected':
+                return $item('Waiting for the billing run', self::error($code), [], null, 'info');
+            case 'job-lock-busy':
+            case 'busy':
+                return $item('Waiting for a running task', self::error($code), [], null, 'info');
+            case 'config-invalid':
+            case 'schedule-field-invalid':
+                return $item('Check your settings', self::error($code), [], $settings('Go to Settings', 'settings'));
+        }
+        $field = is_string($context['field'] ?? null) ? $context['field'] : null;
+        return $item(self::known($code) ? 'Needs attention' : 'Backups can\'t start', self::error($code), [], $field ? $settings('Go to Settings', 'settings') : null);
+    }
 }

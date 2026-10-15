@@ -41,29 +41,44 @@ final class Runtime
         $extension = \App\Models\Extension::where('extension', 'Backups')->where('type', 'other')->firstOrFail();
         $configured = $extension->settings()->where('key', 'php')->value('value');
         $php = $configured ?: (PHP_SAPI === 'cli' ? PHP_BINARY : PHP_BINDIR . '/php');
-        $python = $extension->settings()->where('key', 'python')->value('value') ?: '/usr/bin/python3';
+        $python = $extension->settings()->where('key', 'python')->value('value');
+        $pythonCandidates = $python ? [$python] : ['/usr/local/bin/python3', '/usr/bin/python3', '/bin/python3'];
         if (!str_starts_with($php, '/') || str_contains($php, "\0")) { throw new RuntimeException('php-binary-mismatch'); }
-        if (!str_starts_with($python, '/') || str_contains($python, "\0")) { throw new RuntimeException('python-binary-invalid'); }
+        foreach ($pythonCandidates as $candidate) {
+            if (!str_starts_with($candidate, '/') || str_contains($candidate, "\0")) { throw new RuntimeException('python-binary-invalid'); }
+        }
         // This probe checks only public executable paths. Private state/credentials retain PHP's own guards.
         $probe = <<<'PYTHON'
 import json, os, sys
 python, php, current = sys.argv[1:]
 def executable(path):
     return os.path.isabs(path) and os.path.isfile(path) and os.access(path, os.X_OK)
-print(json.dumps({"python_valid": executable(python) and os.path.realpath(python) == os.path.realpath(sys.executable),
+print(json.dumps({"python_valid": sys.version_info >= (3, 10) and executable(python) and os.path.realpath(python) == os.path.realpath(sys.executable),
                   "php_valid": executable(php), "php_canonical": os.path.realpath(php),
                   "current_canonical": os.path.realpath(current)}))
 PYTHON;
-        try {
-            $process = new Process([$python, '-I', '-B', '-c', $probe, $python, $php, PHP_BINARY], base_path(), self::safeEnvironment());
-            $process->setTimeout(5);
-            $process->mustRun();
-            $result = json_decode($process->getOutput(), true, 8, JSON_THROW_ON_ERROR);
-        } catch (\Throwable $error) { throw new RuntimeException('python-binary-invalid'); }
+        $result = null;
+        foreach ($pythonCandidates as $candidate) {
+            try {
+                $process = new Process([$candidate, '-I', '-B', '-c', $probe, $candidate, $php, PHP_BINARY], base_path(), self::safeEnvironment());
+                $process->setTimeout(5);
+                $process->mustRun();
+                $result = json_decode($process->getOutput(), true, 8, JSON_THROW_ON_ERROR);
+                if (($result['python_valid'] ?? false) === true) { $python = $candidate; break; }
+            } catch (\Throwable $error) { $result = null; }
+        }
         if (!is_array($result) || ($result['python_valid'] ?? false) !== true) { throw new RuntimeException('python-binary-invalid'); }
         if (($result['php_valid'] ?? false) !== true || (PHP_SAPI === 'cli' && $result['php_canonical'] !== $result['current_canonical'])) {
             throw new RuntimeException('php-binary-mismatch');
         }
+        // Automatic PHP follows this hosting PHP version; never choose a
+        // different system PHP when the corresponding CLI is missing.
+        try {
+            $check = new Process([$php, '-r', 'echo PHP_SAPI, " ", PHP_VERSION_ID;'], base_path(), self::safeEnvironment());
+            $check->setTimeout(5);
+            $check->mustRun();
+            if (!preg_match('/^cli ([0-9]+)$/D', $check->getOutput(), $version) || (int) $version[1] < 80300) { throw new RuntimeException('php-binary-mismatch'); }
+        } catch (\Throwable $error) { throw new RuntimeException('php-binary-mismatch'); }
         return ['python' => $python, 'php' => $php];
     }
 
@@ -86,6 +101,7 @@ PYTHON;
     /** Public engine JSON only; runtime secrets are never returned to a browser. */
     public static function command(array $arguments, ?array $input = null, int $timeout = 10): array
     {
+        if (in_array($arguments[0] ?? '', ['encryption-key', 'recovery-key', 'credentials-rewrap'], true)) { throw new RuntimeException('sensitive-command-refused'); }
         $process = new Process(self::engine($arguments), base_path(), self::safeEnvironment(), $input === null ? null : json_encode($input === [] ? new \stdClass : $input, JSON_THROW_ON_ERROR));
         $process->setTimeout($timeout);
         $process->run();
@@ -178,6 +194,80 @@ PYTHON;
             if (!$status['running']) { break; }
         }
         proc_close($process);
+    }
+
+    /** Merge requested namespaces under one private credential flock. Null keeps saved values. */
+    public static function saveCredentials(array $input): void
+    {
+        $process = new Process([self::php(), __DIR__ . '/bridge.php', 'credentials-merge', '--app', realpath(base_path()), '--private-root', self::privateRoot()], base_path(), self::safeEnvironment(), json_encode($input, JSON_THROW_ON_ERROR));
+        $process->setTimeout(10);
+        $process->run();
+        if (!$process->isSuccessful()) { throw new RuntimeException(self::errorCode($process->getErrorOutput(), 'credentials-save-failed')); }
+    }
+
+    /** Encryption setup returns only public metadata; secrets have dedicated paths below. */
+    public static function encryptionKey(string $action, array $input = []): array
+    {
+        if (!in_array($action, ['generate', 'import', 'acknowledge', 'discard-pending'], true)) {
+            throw new RuntimeException('bridge-command-invalid');
+        }
+        $allowed = match ($action) { 'import' => ['passphrase', 'fingerprint'], 'acknowledge' => ['fingerprint'], default => [] };
+        if (array_diff(array_keys($input), $allowed)) { throw new RuntimeException('archive-key-invalid'); }
+        $result = self::keyResponse('archive-key-' . $action, $input);
+        if (array_diff(array_keys($result), ['fingerprint', 'short', 'state'])) { throw new RuntimeException('archive-key-invalid'); }
+        return $result;
+    }
+
+    /** Called inside a confirmation modal renderer, never assigned to Livewire state. */
+    public static function revealRecoveryKey(): array
+    {
+        $result = self::keyResponse('archive-key-reveal');
+        if (!is_string($result['secret'] ?? null) || !is_string($result['fingerprint'] ?? null)
+            || array_diff(array_keys($result), ['secret', 'fingerprint'])) { throw new RuntimeException('archive-key-invalid'); }
+        return $result;
+    }
+
+    /** The short-lived link is bound to one fingerprint, even if rotation follows. */
+    public static function recoveryKeyUrl(): string
+    {
+        $result = self::keyResponse('archive-key-status');
+        if (!is_string($result['fingerprint'] ?? null)) { throw new RuntimeException('archive-key-required'); }
+        $url = \Illuminate\Support\Facades\URL::temporarySignedRoute(
+            \Paymenter\Extensions\Others\Backups\Admin\Pages\Backups::getRouteName() . '.recovery-key',
+            now()->addMinutes(5), ['fingerprint' => $result['fingerprint']]
+        );
+        \Filament\Support\Facades\FilamentView::spaUrlExceptions([$url]);
+        return $url;
+    }
+
+    /** Sensitive export data may only be used by the protected attachment response. */
+    public static function exportRecoveryKey(string $fingerprint): array
+    {
+        if (!preg_match('/^[a-f0-9]{64}$/D', $fingerprint)) { throw new RuntimeException('archive-key-invalid'); }
+        return self::keyResponse('archive-key-export', ['fingerprint' => $fingerprint]);
+    }
+
+    /** Refresh APP_KEY wrapping without changing the independent recovery secrets. */
+    public static function rewrapCredentials(): void
+    {
+        self::keyResponse('credentials-rewrap');
+    }
+
+    /** Private bridge pipe; authenticated callers cannot supply their own audit actor. */
+    private static function keyResponse(string $verb, array $input = []): array
+    {
+        abort_unless(\Illuminate\Support\Facades\Auth::user()?->hasPermission('admin.extensions.update') ?? false, 403);
+        $actor = \Illuminate\Support\Facades\Auth::id();
+        $input['actor'] = $actor === null ? null : (int) $actor;
+        $process = new Process([self::php(), __DIR__ . '/bridge.php', $verb, '--app', realpath(base_path()), '--private-root', self::privateRoot()],
+            base_path(), self::safeEnvironment(), json_encode($input, JSON_THROW_ON_ERROR));
+        // PBKDF2 and durable credential writes are bounded; this never starts a transfer.
+        $process->setTimeout(10);
+        $process->run();
+        if (!$process->isSuccessful()) { throw new RuntimeException(self::errorCode($process->getErrorOutput(), 'archive-key-unavailable')); }
+        $result = json_decode($process->getOutput(), true, 16, JSON_THROW_ON_ERROR);
+        if (!is_array($result)) { throw new RuntimeException('archive-key-invalid'); }
+        return $result;
     }
 
     public static function credentials(array $input, bool $maintenanceProbe = false): void
