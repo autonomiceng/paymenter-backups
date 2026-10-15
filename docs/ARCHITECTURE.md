@@ -395,6 +395,11 @@ descriptors without acquiring these launcher locks. Only full-mode admission
 and capture coordination acquire launcher locks; held launchers do not block
 database-only capture, settings saves, schedule changes or initialization.
 Backups never edits host launchers.
+Legacy `systemd_locks` skips an explicit `activates: null` timer entry: it has
+no target and cannot launch `schedule:run` or `queue:work`. Other entries must
+name one valid service; missing or malformed targets still refuse with a
+bounded `detail["activates"]` diagnostic. A null entry does not bypass lock
+verification for other timers.
 The parser accepts documented /dev/null redirection tails, common PHP/Artisan
 flags and hosting PHP basenames, with shell expansion/wrappers refused.
 Commands are reconstructed from recognized nonsecret tokens; ini values, raw

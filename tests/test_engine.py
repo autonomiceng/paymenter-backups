@@ -13,12 +13,13 @@ import threading
 import time
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from unittest.mock import patch
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "src"))
 from paymenter_backups.common import BackupError, State, atomic_json, digest, identity
 from paymenter_backups.config import DEFAULTS, billing_fingerprint, normalize, redact, validate
 from paymenter_backups.engine import capture, check_archive, external_symlinks, inventory, verify
-from paymenter_backups.maintenance import MARKERS, billing_admission, cleanup, cron_lock, recover
+from paymenter_backups.maintenance import MARKERS, billing_admission, cleanup, cron_lock, recover, systemd_locks
 from paymenter_backups.process import group_members, process_identity, run
 from paymenter_backups.requests import cancel, create, due_slots
 
@@ -52,6 +53,7 @@ payload={'status':503,'except':[],'secret':None,'redirect':None,'template':'fixt
         self.settings["job_lock_paths"] = [str(lock)]
         cron = f"* * * * * /usr/bin/flock {lock} /usr/bin/php {self.app}/artisan schedule:run"
         self.envelope["tools"]["crontab"] = str(self.script("crontab", "print(" + repr(cron) + ")"))
+        self.envelope["tools"]["systemctl"] = str(self.script("systemctl", "print('[]')"))
         now = time.time()
         atomic_json(self.state.root / "billing-guard.json", {"generated_at": now,
             "fingerprint": billing_fingerprint(self.envelope["billing"]),
@@ -108,6 +110,34 @@ payload={'status':503,'except':[],'secret':None,'redirect':None,'template':'fixt
         raw_journal = json.dumps(journal)
         self.assertNotIn("fake-canary-secret", raw_journal)
         self.assertNotIn("fixture-canary-key", raw_journal)
+
+    def test_full_capture_uses_fixture_launchers_with_invalid_host_timer(self):
+        host_systemctl = self.script("host-systemctl", "print(" + repr(json.dumps([
+            {"next": None, "left": None, "last": 0, "passed": 0,
+             "unit": "invalid.timer", "activates": ""}])) + ")")
+        host_crontab = self.script("host-crontab", "raise SystemExit(2)")
+        host_tools = {"/usr/bin/systemctl": host_systemctl, "/usr/bin/crontab": host_crontab}
+        host_calls = []
+        is_file = pathlib.Path.is_file
+
+        def exists(path):
+            return str(path) in host_tools or is_file(path)
+
+        def read(command, *args, **kwargs):
+            if command[0] in host_tools:
+                host_calls.append(command)
+                command = [str(host_tools[command[0]]), *command[1:]]
+            return run(command, *args, **kwargs)
+
+        with patch("pathlib.Path.is_file", autospec=True, side_effect=exists), \
+                patch("paymenter_backups.maintenance.run", side_effect=read):
+            with self.assertRaisesRegex(BackupError, "job-locks-unverified"):
+                systemd_locks(self.app, self.settings["job_lock_paths"], {})
+            self.assertTrue(host_calls)
+            host_calls.clear()
+            journal = capture(self.state, self.envelope)
+            self.assertTrue(journal["service_recovered"])
+            self.assertEqual(host_calls, [])
 
     def test_online_excludes_app_and_maintenance(self):
         self.settings["mode"] = "database-online"

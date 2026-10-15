@@ -59,6 +59,8 @@ class PrivateFixture(unittest.TestCase):
                                        'stores': {kind: {'driver': driver, 'supported': True} for kind, driver in
                                                   (('maintenance', 'file'), ('cache', 'file'), ('session', 'file'), ('queue', 'database'), ('filesystem', 'local'))}},
                          'billing': {'daily_time': '00:00', 'timezone': 'UTC'}}
+        self.envelope['tools']['systemctl'] = self.script('systemctl', "print('[]')")
+        self.envelope['tools']['crontab'] = self.script('crontab', "print('# no fixture jobs')")
         self.store = ObjectStore()
         patched = patch.object(storage, 'client', return_value=self.store)
         patched.start()
