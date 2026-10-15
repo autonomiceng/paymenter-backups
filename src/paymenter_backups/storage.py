@@ -540,8 +540,7 @@ def _deliver_plaintext(state, envelope, run_id, locked=False):
                      and item["created_at"] > journal["created_at"] and item.get("remote", {}).get("bucket") == bucket
                      and item["remote"].get("manifest_key") == base + item["run_id"] + ".manifest.json"]
             if not newer:
-                last = json.dumps({"installation_uuid": state.uuid, "run_id": run_id, "manifest_key": manifest_key}).encode()
-                s3.put_object(Bucket=bucket, Key=base + "lastmanifest.json", Body=last, ContentLength=len(last))
+                publish_pointer(state, s3, dict(journal, remote=target))
             journal.update({"remote_delivered": True, "delivery_error": None,
                             "remote": dict(target, delivered_at=time.time()),
                             "remote_observation": {"status": "delivered", "checked_at": time.time()},
@@ -654,6 +653,44 @@ def pointer_bytes(state, item):
         value.update(format=encryption.FORMAT, descriptor_sha256=remote["descriptor_digest"]["sha256"])
         return remote_artifacts.encode(value)
     return json.dumps(value).encode()
+
+
+def publish_pointer(state, s3, item):
+    """Read, compare and verify discovery metadata under the caller's run lock."""
+    remote = item['remote']
+    bucket = remote['bucket']
+    key = remote['scope']['prefix'] + 'lastmanifest.json'
+    try:
+        body = s3.get_object(Bucket=bucket, Key=key)['Body']
+    except Exception as error:
+        if getattr(error, 'response', {}).get('Error', {}).get('Code') not in ('NoSuchKey', '404', 'NotFound'):
+            raise
+    else:
+        try:
+            data = body.read(65537)
+        finally:
+            body.close()
+        try:
+            if len(data) > 65536:
+                raise ValueError()
+            current = json.loads(data)
+            if current['installation_uuid'] != state.uuid:
+                raise ValueError()
+            previous = artifacts.journal(state, current['run_id'])
+            previous_remote = previous.get('remote') or previous.get('delivery_intent') or {}
+            if (previous_remote.get('scope') != remote['scope']
+                    or current['manifest_key'] != previous_remote.get('manifest_key')):
+                raise ValueError()
+            gone = ((previous.get('remote_observation') or {}).get('status') == 'missing'
+                    or previous.get('remote_delete_intent'))
+            if previous['created_at'] > item['created_at'] and not gone:
+                return
+        except (BackupError, KeyError, TypeError, ValueError, OSError):
+            raise BackupError('s3-pointer-invalid') from None
+    value = pointer_bytes(state, item)
+    s3.put_object(Bucket=bucket, Key=key, Body=value, ContentLength=len(value))
+    if whole_hash(s3, bucket, key, limit=len(value)) != (hashlib.sha256(value).hexdigest(), len(value)):
+        raise BackupError('s3-pointer-readback-mismatch')
 
 
 def latest_remote_run(state, envelope, complete, mode=None):
@@ -866,11 +903,35 @@ def _retention(state, envelope, execute=False, locked=False, local_only=False, m
     with contextlib.nullcontext() if locked else state.lock(create=execute):
         settings = envelope["settings"]
         keep = settings["retention_keep"]
-        items = [item for item in available_runs(state) if not artifacts.deleting(item) and not item.get("staging_removal_intent")
+        available = available_runs(state)
+        latest = latest_remote_run(state, envelope, available, mode)
+        if execute and not local_only:
+            for item in available:
+                if item['run_id'] == latest and item.get('retention_delete_intent') and not artifacts.deleting(item):
+                    item.pop('retention_delete_intent')
+                    if (item.get('remote_delete_intent') or {}).get('reason') == 'retention':
+                        item.pop('remote_delete_intent')
+                    state.save(item)
+        items = [item for item in available if not artifacts.deleting(item) and not item.get("staging_removal_intent")
                  and (mode is None or recorded_mode(state, item) == mode)]
         skipped = []
+        damaged = []
         checked = {}
         checked_local = {}
+        healthy = []
+        for item in items:
+            if item.get('local_complete') and not item.get('local_delete_intent'):
+                try:
+                    verify(state, item['run_id'], record=execute)
+                    checked_local[item['run_id']] = None
+                except (BackupError, OSError) as error:
+                    code = error.code if isinstance(error, BackupError) else 'retention-local-verification-failed'
+                    checked_local[item['run_id']] = code
+                    damaged.append({'run_id': item['run_id'], 'code': code})
+                    skipped.append({'run_id': item['run_id'], 'location': 'local', 'code': code})
+                    continue
+            healthy.append(item)
+        items = healthy
         if execute and not local_only:
             for item in items:
                 if not item.get("remote_delivered"):
@@ -908,7 +969,7 @@ def _retention(state, envelope, execute=False, locked=False, local_only=False, m
                   "local_delete": [item["run_id"] for item in local_candidates],
                   "remote_delete": [item["run_id"] for item in remote_candidates],
                   "delete": list(dict.fromkeys(item["run_id"] for item in remote_candidates + local_candidates)),
-                  "s3_policy": policy, "skipped": skipped, "protected": [],
+                  "s3_policy": policy, "skipped": skipped, "damaged": damaged, "protected": [],
                   "removed": {"local": [], "s3": []}, "execute_required": not execute}
         if not execute:
             return result
@@ -929,8 +990,7 @@ def _retention(state, envelope, execute=False, locked=False, local_only=False, m
             try:
                 overall = next((run for run in available_runs(state) if run.get("remote_delivered") and scope_matches(state, envelope, run) and not artifacts.deleting(run) and (run.get("remote_observation") or {}).get("status") in ("delivered", "present")), None)
                 if overall:
-                    value = pointer_bytes(state, overall)
-                    s3.put_object(Bucket=settings["s3_bucket"], Key=pointer, Body=value, ContentLength=len(value))
+                    publish_pointer(state, s3, overall)
                 elif not any(item.get("remote_delivered") and scope_matches(state, envelope, item)
                              and (item.get("remote_observation") or {}).get("status") == "unknown" for item in available_runs(state)):
                     s3.delete_object(Bucket=settings["s3_bucket"], Key=pointer)
@@ -982,8 +1042,7 @@ def _retention(state, envelope, execute=False, locked=False, local_only=False, m
                          and not item.get("remote_delete_intent") and (item.get("remote_observation") or {}).get("status") in ("delivered", "present")]
             try:
                 if refreshed:
-                    value = pointer_bytes(state, refreshed[0])
-                    s3.put_object(Bucket=settings["s3_bucket"], Key=pointer, Body=value, ContentLength=len(value))
+                    publish_pointer(state, s3, refreshed[0])
             except Exception:
                 skipped.append({"run_id": None, "location": "s3", "code": "retention-pointer-update-failed"})
         atomic_json(state.root / "retention.json", {"at": time.time(), "skipped_count": len(skipped),
@@ -1028,6 +1087,7 @@ def retention(state, envelope, execute=False, locked=False, local_only=False, en
         result['local_delete'] = list(dict.fromkeys(staging + result['local_delete']))
         result['delete'] = list(dict.fromkeys(staging + result['delete']))
         result.update(by_kind=results, staging_removal=staging,
+                      damaged=[item for part in results.values() for item in part['damaged']],
                       skipped=skipped + [item for part in results.values() for item in part['skipped']],
                       protected=[item for part in results.values() for item in part['protected']],
                       removed={location: list(dict.fromkeys((staging if execute and location == 'local' else []) + [run for part in results.values() for run in part['removed'][location]])) for location in ('local', 's3')},

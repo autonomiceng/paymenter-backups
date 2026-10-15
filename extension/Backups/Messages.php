@@ -234,6 +234,8 @@ final class Messages
         'isolated-s3-sdk-missing' => 'The bundled S3 library is missing. Reinstall the extension ZIP.',
         's3-readback-mismatch' => 'The S3 copy didn\'t match after upload. The copy on this server is kept. Upload again.',
         's3-manifest-readback-mismatch' => 'The S3 copy didn\'t match after upload. The copy on this server is kept. Upload again.',
+        's3-pointer-readback-mismatch' => 'The S3 latest-backup record didn\'t match after upload. The copy on this server is kept. Check that record in S3 before uploading again.',
+        's3-pointer-invalid' => 'The S3 latest-backup record doesn\'t match this installation\'s backup history. The copy on this server is kept. Check the S3 destination and its latest-backup record before uploading again.',
         's3-delivery-failed' => 'Upload to S3 failed. The copy on this server is kept. Check S3 settings and keys, then upload again.',
         'destination-probe-failed' => 'The storage test couldn\'t write and read back a test file.',
         'destination-readback-mismatch' => 'The storage test read back different data than it wrote.',

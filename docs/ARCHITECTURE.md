@@ -430,7 +430,7 @@ symlink targets and uncontrolled writers. Document the no-DDL, bounded-request
 and cooperative-writer assumptions. Never kill provider work to achieve idle.
 
 After native down, require file driver, empty exceptions, no secret/redirect,
-nonempty rendered template and status503; verify an actual early-bootstrap HTTP
+nonempty rendered template and status 503; verify an actual early-bootstrap HTTP
 503. Plain down allows settings/extension bootstrap before middleware rejects.
 Probe a nonce path without redirects and require body equality with the exact
 native template, not status alone. Optional HTTP Basic credentials live in an independent encrypted
@@ -443,7 +443,7 @@ of inherited environment overrides. Python independently validates stored and
 current origins immediately before transport and is authoritative for credential
 use; PHP uses the same strict grammar for early save feedback. Parser differences
 therefore refuse at use rather than authorizing a different target. Tests cover
-canonical/parity cases; IPv4-mapped IPv6 and non-ASCII hostnames refuse. A10-second
+canonical/parity cases; IPv4-mapped IPv6 and non-ASCII hostnames refuse. A 10-second
 wall-clock deadline covers response headers and exact bounded body proof, including
 slow-drip peers. Native templates above 64 KiB refuse before any request. An existing
 caller SIGALRM timer is preserved and causes proof refusal. Only exact 503/template bytes prove success;
@@ -497,6 +497,9 @@ SIGINT/SIGTERM perform bounded cleanup. Linux child processes use PDEATHSIG with
 parent recheck and verified process-group closure. A held run lock is the
 authoritative live-run guard; PID/starttime/boot ID support diagnosis and safe
 group handling. Recovery never removes markers merely because bytes match.
+Streaming dump hashes use the same fallback group registration and successful
+group-closure check as other capture children. A bounded cleanup wait expiring
+does not replace the original child-timeout error.
 Remove only owned unchanged down first, then bootstrap, and preserve original
 maintenance or operator replacements. Uncertain ownership/process state stays
 visible and closed.
@@ -553,6 +556,14 @@ that kind; ordinary local/S3 deletion requires another fully verified survivor
 of the same kind at each affected location. The newest S3 copy of each kind is
 protected. S3 local-count uses the configured count for that kind even when
 keep_local=false. lastmanifest.json retains its latest-overall meaning.
+Executing retention clears an interrupted retention deletion intent on the
+newest remote run of each kind and keeps that remote copy. Manual deletion
+intents and independent local deletion intents retain their own lifecycle.
+Pointer publication reads the current remote pointer and compares the named
+run's creation time with the candidate under the run lock. It never replaces a
+newer run with an older one, even if local delivery flags are stale. Missing or
+invalid ownership evidence refuses publication. Every pointer write is read
+back and checked by whole-object SHA256 and size before reporting success.
 
 For S3-only storage, delivery's held run-lock attempt proves provider scope,
 whole-object SHA256/size, matching manifest and archive contents, then journals
@@ -578,10 +589,17 @@ Retention deletes only verified owned copies and protects a fully verified
 survivor independently at each location. Failed uploads preserve their local
 sources. Damaged, missing and out-of-scope copies are reported and skipped
 without blocking unrelated cleanup. Local and remote intents resume separately.
+Both retention previews and execution verify local archives per run. A failed
+verification or filesystem read records the run ID and safe error code in
+`damaged`, excludes that run from the kept set and all automatic deletions, and
+continues with the other runs. Damaged runs require an operator decision.
+Already journaled partial local unlinks resume through their owned deletion
+intent rather than being treated as newly damaged archives.
 Kept S3 copies use cheap presence checks; full archive proofs are reserved for
 deletion targets, required survivors and local-removal delivery checks, cached
 within the held-lock attempt. Lifecycle disappearance repairs the latest-copy
-pointer using an available present copy. This pointer is untrusted discovery
+pointer using an available present copy; a confirmed-missing or deleting run
+does not block that repair. This pointer is untrusted discovery
 metadata; it never substitutes for full survivor, retrieval or deletion proof.
 Retention reports skipped copies
 to the overview. If admission fails only because the local budget is full,

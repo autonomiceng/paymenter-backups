@@ -695,7 +695,9 @@ class StorageTests(PrivateFixture):
         result = storage.retention(self.state, self.envelope, execute=True)
         self.assertEqual(result['removed']['local'], [])
         self.assertTrue(self.item('old-full')['local_complete'])
-        self.assertTrue(any(item['run_id'] == 'old-full' for item in result['protected']))
+        self.assertEqual(set(result['keep']), {'old-full', 'database'})
+        self.assertEqual([item['run_id'] for item in result['damaged']], ['bad-full'])
+        self.assertTrue(newest.exists())
 
     def test_replaced_files_refuse_unlink_and_durable_intent_survives(self):
         archive, _ = self.delivered_with_local()

@@ -25,6 +25,35 @@ class EncryptedStorageTests(PrivateFixture):
         provider.start()
         self.addCleanup(provider.stop)
 
+    def test_encrypted_pointer_readback_damage_preserves_staging(self):
+        archive, _ = self.backup('candidate')
+        put = self.s3.put_object
+        pointer = storage.prefix(self.state, self.envelope) + 'lastmanifest.json'
+        def corrupt(**kwargs):
+            result = put(**kwargs)
+            if kwargs['Key'] == pointer:
+                self.s3.objects[pointer] = b'corrupt'
+            return result
+        with patch.object(self.s3, 'put_object', side_effect=corrupt):
+            with self.assertRaisesRegex(BackupError, 's3-pointer-readback-mismatch'):
+                storage.deliver(self.state, self.envelope, 'candidate')
+        self.assertTrue(archive.exists())
+        self.assertNotIn('staging_removal_intent', self.item('candidate'))
+        self.assertEqual(self.item('candidate')['delivery_error'], 's3-pointer-readback-mismatch')
+
+    def test_encrypted_delivery_does_not_rewind_pointer_with_stale_local_flags(self):
+        self.settings['keep_local'] = True
+        self.backup('older', created_at=1)
+        self.backup('newer', created_at=2, deliver=True)
+        newer = self.item('newer')
+        newer['remote_delivered'] = False
+        self.state.save(newer)
+        pointer = storage.prefix(self.state, self.envelope) + 'lastmanifest.json'
+        before = self.s3.objects[pointer]
+        storage.deliver(self.state, self.envelope, 'older')
+        self.assertEqual(self.s3.objects[pointer], before)
+        self.assertTrue(self.item('older')['remote_delivered'])
+
     def test_encrypted_s3_only_removal_and_remote_only_retry_decrypt(self):
         archive, manifest = self.backup('only')
         result = storage.deliver(self.state, self.envelope, 'only')

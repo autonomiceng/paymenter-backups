@@ -228,7 +228,9 @@ def hash_stream(command, timeout, register=None):
                             stderr=subprocess.DEVNULL, close_fds=True, start_new_session=True,
                             preexec_fn=lambda: child_setup(parent), env=safe_environment())
     group = process_identity(proc.pid)
-    if register and group:
+    if group is None:
+        group = {"pid": proc.pid, "pgid": proc.pid, "starttime": "unknown", "boot_id": boot_id()}
+    if register:
         register(group)
     hasher = hashlib.sha256()
     selector = selectors.DefaultSelector()
@@ -244,15 +246,28 @@ def hash_stream(command, timeout, register=None):
                     hasher.update(chunk)
                 else:
                     selector.unregister(key.fileobj)
-        if proc.wait(timeout=max(0.1, deadline - time.monotonic())):
+        try:
+            code = proc.wait(timeout=max(0.1, deadline - time.monotonic()))
+        except subprocess.TimeoutExpired:
+            raise BackupError("child-timeout") from None
+        if code:
             raise BackupError("child-failed")
+        if group_members(group):
+            raise BackupError("process-state-uncertain")
         return hasher.hexdigest()
     finally:
         selector.close()
-        if proc.poll() is None and group:
-            terminate(group)
-            proc.wait(timeout=3)
-        proc.stdout.close()
+        try:
+            if proc.poll() is None:
+                try:
+                    terminate(group)
+                finally:
+                    try:
+                        proc.wait(timeout=3)
+                    except subprocess.TimeoutExpired:
+                        pass
+        finally:
+            proc.stdout.close()
 
 
 def app_workers(app):
