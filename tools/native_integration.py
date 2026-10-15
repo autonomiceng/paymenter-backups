@@ -171,7 +171,7 @@ def admin_history(args, app, checker, cli, private, run, native_url, work):
     json.loads(execute(ui + ['download', run['run_id'], again]))
     if hashlib.sha256(again.read_bytes()).hexdigest() != expected:
         raise RuntimeError('reverified download differs')
-    execute(ui + ['delete-refused', run['run_id'], 'No other usable backup'])
+    execute(ui + ['delete-refused', run['run_id'], 'only usable backup'])
     # A second, database-only backup can be deleted; the full backup survives.
     online = json.loads(execute(cli + ['run', '--execute', '--mode', 'database-online'], timeout=300))
     # Two verified backups and a limit of one: retention is offered, queued, then cancelled.
