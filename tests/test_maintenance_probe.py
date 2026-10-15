@@ -133,7 +133,7 @@ class ProbeTests(unittest.TestCase):
             self.require_auth = False
             probe(self.envelope(url, False))
             before = len(self.calls)
-            self.assert_fails(self.envelope(url), 'maintenance-probe-credentials-invalid')
+            self.assert_fails(self.envelope(url), 'maintenance-probe-http-saved')
             self.assertEqual(len(self.calls), before)
 
     def test_slow_drip_total_deadline_and_oversized_native_template(self):
@@ -179,7 +179,7 @@ class ProbeTests(unittest.TestCase):
             self.assertFalse(self.calls)
 
     def test_transport_request_uses_canonical_authority_and_effective_port(self):
-        cases = [('https://EXAMPLE.com:443/base/', 'example.com'), ('https://EXAMPLE.com:8443/base', 'example.com:8443'), ('http://EXAMPLE.com:443/base', 'example.com:443'), ('http://EXAMPLE.com/base', 'example.com'), ('http://EXAMPLE.com:80/base', 'example.com:80'), ('https://[0:0:0:0:0:0:0:1]:443/base', '[::1]')]
+        cases = [('https://EXAMPLE.com:443/base/', 'example.com'), ('https://EXAMPLE.com:8443/base', 'example.com:8443'), ('http://EXAMPLE.com:443/base', 'example.com:443'), ('http://EXAMPLE.com/base', 'example.com'), ('http://EXAMPLE.com:80/base', 'example.com'), ('https://[0:0:0:0:0:0:0:1]:443/base', '[::1]')]
         with self.trusted():
             for url, authority in cases:
                 with self.subTest(url=url):

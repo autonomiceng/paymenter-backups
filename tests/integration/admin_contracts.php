@@ -24,7 +24,7 @@ try {
         if (!$condition) { throw new RuntimeException($message); }
     }
     $selected = $argv[2] ?? 'all';
-    testCheck(in_array($selected, ['all', 'permission', 'validation', 'credentials', 'root', 'baseline', 'download', 'download_anchor', 'modals', 'presentation', 'first_use', 'runtime'], true), 'Unknown test phase');
+    testCheck(in_array($selected, ['all', 'permission', 'validation', 'credentials', 'basic_states', 'root', 'baseline', 'repair', 'cli_config', 'download', 'download_anchor', 'delete_gate', 'modals', 'field_help', 'presentation', 'first_use', 'runtime'], true), 'Unknown test phase');
     function testPhase(string $name): bool {
         global $selected;
         return $selected === 'all' || $selected === $name;
@@ -241,6 +241,38 @@ try {
         $results['native_auditing'] = true;
         }
 
+        if (testPhase('basic_states')) {
+        $currentPhase = 'basic_states';
+        $runtime = Paymenter\Extensions\Others\Backups\Runtime::class;
+        $keys = ['access_key' => 'TEST-SECRET-CANARY-BASIC-ACCESS', 'secret_key' => 'TEST-SECRET-CANARY-BASIC-KEY'];
+        $runtime::credentials($keys);
+        foreach (['http://fixture-test.example.invalid', 'https://different-test.example.invalid'] as $appUrl) {
+            App\Models\Setting::whereNull('settingable_type')->where('key', 'app_url')->update(['value' => 'https://fixture-test.example.invalid']);
+            App\Providers\SettingsProvider::flushCache();
+            $runtime::credentials(['origin' => 'https://fixture-test.example.invalid',
+                'username' => 'TEST-SECRET-CANARY-BASIC-USER', 'password' => 'TEST-SECRET-CANARY-BASIC-PASSWORD'], true);
+            App\Models\Setting::whereNull('settingable_type')->where('key', 'app_url')->update(['value' => $appUrl]);
+            App\Providers\SettingsProvider::flushCache();
+            $page = Livewire\Livewire::test($class);
+            $page->update(calls: [['method' => '$refresh', 'params' => []]],
+                updates: ['settings.mode' => 'database-online', 'settings.destination' => 'local']);
+            testCheck($page->instance()->removeSitePasswordAction()->isVisible(),
+                        'Saved HTTP Basic removal is unavailable after URL/mode/destination change');
+            testCheck(str_contains($page->html(), 'HTTP Basic'), 'HTTP Basic purpose disappeared when its form was unavailable');
+            $page->update(calls: [['method' => 'mountAction', 'params' => ['removeSitePassword']]], updates: []);
+            testCheck(count($page->get('mountedActions') ?? []) === 1, 'HTTP Basic removal confirmation did not mount');
+            $partial = $page->effects['partials']['action-modals'] ?? $page->html();
+            testCheck(str_contains($partial, 'Remove saved HTTP Basic credentials?'), 'HTTP Basic confirmation was not rendered');
+            $page->update(calls: [['method' => 'callMountedAction', 'params' => []]], updates: []);
+            testSecretReset($page);
+            $overview = $runtime::command(['overview']);
+            testCheck(($overview['configuration']['saved_keys']['site'] ?? true) === false, 'HTTP Basic removal left credentials configured');
+            testCheck(($overview['configuration']['saved_keys']['s3'] ?? false) === true, 'HTTP Basic removal lost S3 keys');
+        }
+        testCheck(file_get_contents($root . '/installation.json') === $identity, 'HTTP Basic removal changed installation identity');
+        $results['basic_removal_available_for_http_mismatch_and_unsaved_switches'] = true;
+        }
+
         if (testPhase('credentials') || testPhase('root')) {
         $currentPhase = 'credentials';
         // Saved credentials are encrypted, write-only and preserve each namespace.
@@ -303,6 +335,97 @@ try {
             testCheck(rowValues($record) === $before, 'Refused relocation partially changed native settings');
         }
         $results['root_transition_preserves_identity_and_secrets'] = true;
+        }
+
+        if (testPhase('repair')) {
+        $currentPhase = 'repair';
+        $defaults = Paymenter\Extensions\Others\Backups\Settings::DEFAULTS;
+        $credentialDigest = is_file($credentialFile) ? hash_file('sha256', $credentialFile) : null;
+        $requestCount = count(glob($root . '/requests/*'));
+        $runCount = count(glob($root . '/runs/*'));
+        foreach (['retention_keep' => 'invalid-integer', 'automatic_retention' => 'invalid-boolean',
+                  'schedule_weekdays' => 'invalid-json', 'job_lock_paths' => 'invalid-json'] as $key => $malformed) {
+            session()->forget(['filament.notifications', 'filament.claimed_notifications']);
+            $record->settings()->where('key', $key)->update(['value' => $malformed]);
+            $page = Livewire\Livewire::test($class);
+            $page->update(calls: [['method' => 'saveSettings', 'params' => []]], updates: []);
+            testCheck($page->instance()->getErrorBag()->isEmpty(), 'Visible default could not repair malformed native row: ' . $key);
+            $expected = is_array($defaults[$key]) ? json_encode($defaults[$key])
+                : (is_bool($defaults[$key]) ? ($defaults[$key] ? '1' : '0') : (string) $defaults[$key]);
+            if ($record->settings()->where('key', $key)->value('value') !== $expected) {
+                $notifications = array_map(static fn ($item) => array_intersect_key($item, array_flip(['title', 'body', 'status'])),
+                    session()->get('filament.notifications', []));
+                file_put_contents($work . '/test-repair-effects.json', json_encode(['notifications' => $notifications], JSON_PRETTY_PRINT | JSON_THROW_ON_ERROR));
+            }
+            testCheck($record->settings()->where('key', $key)->value('value') === $expected,
+                        'Unchanged visible default left malformed native row persisted: ' . $key
+                        . '; actual=' . json_encode($record->settings()->where('key', $key)->value('value'))
+                        . '; expected=' . json_encode($expected));
+            $notifications = session()->pull('filament.claimed_notifications') ?? session()->pull('filament.notifications') ?? [];
+            testCheck(array_filter($notifications, static fn ($item) => ($item['status'] ?? null) === 'warning'
+                && ($item['title'] ?? null) === 'Settings saved with corrections'
+                && str_contains($item['body'] ?? '', Paymenter\Extensions\Others\Backups\Settings::LABELS[$key][0])) !== [],
+                'Repair silently replaced the saved value without warning about its field: ' . $key);
+            $record->settings()->where('key', $key)->update(['value' => $initialRows[$key]]);
+        }
+        // The documented public-directory guard intentionally refuses malformed
+        // JSON before a page override. Its supported native editor rules repair it.
+        foreach (['invalid-json', '', 'null', 'false', '0', '{}', '{"0":"/tmp"}', '"/tmp"'] as $invalidRoots) {
+            $record->settings()->where('key', 'extra_docroots')->update(['value' => $invalidRoots]);
+            try {
+                Paymenter\Extensions\Others\Backups\Runtime::privateRoot();
+                throw new LogicException('Malformed public-directory guard opened private storage');
+            } catch (RuntimeException $error) {
+                testCheck($error->getMessage() === 'document-roots-invalid', 'Malformed public-directory guard gave a misleading startup error');
+            }
+            $page = Livewire\Livewire::test($class);
+            $page->update(calls: [['method' => 'saveSettings', 'params' => []]], updates: []);
+            testCheck($page->instance()->getErrorBag()->has('settings.extra_docroots'), 'Malformed public-directory guard did not identify its field');
+            testCheck($record->settings()->where('key', 'extra_docroots')->value('value') === $invalidRoots, 'Page silently defaulted the public-directory guard');
+        }
+        $remedy = Paymenter\Extensions\Others\Backups\Messages::error('document-roots-invalid');
+        testCheck(str_contains($remedy, 'Extensions') && str_contains($remedy, 'Backups') && str_contains($remedy, 'JSON list'),
+                    'Public-directory refusal does not explain the native editor remedy');
+        testCheck(Illuminate\Support\Facades\Validator::make(['extra_docroots' => $initialRows['extra_docroots']],
+            ['extra_docroots' => Paymenter\Extensions\Others\Backups\Settings::rules('extra_docroots')])->passes(),
+            'Original public-directory value is not accepted by native editor validation');
+        Paymenter\Extensions\Others\Backups\SettingsWriter::write($record, ['extra_docroots' => $initialRows['extra_docroots']]);
+        $page = Livewire\Livewire::test($class);
+        $page->update(calls: [['method' => 'saveSettings', 'params' => []]], updates: []);
+        testCheck($page->instance()->getErrorBag()->isEmpty(), 'Explicit native repair did not restore page settings');
+        testCheck(file_get_contents($root . '/installation.json') === $identity, 'Repair changed installation identity');
+        testCheck(($credentialDigest === null && !is_file($credentialFile))
+            || ($credentialDigest !== null && hash_file('sha256', $credentialFile) === $credentialDigest), 'Repair changed encrypted credentials');
+        testCheck(count(glob($root . '/requests/*')) === $requestCount && count(glob($root . '/runs/*')) === $runCount,
+                    'Repair queued work or captured a backup');
+        $results['malformed_native_rows_repaired_by_unchanged_visible_defaults'] = true;
+        $results['malformed_public_directory_guard_refuses_with_native_editor_remedy'] = true;
+        }
+
+        if (testPhase('cli_config')) {
+        $currentPhase = 'cli_config';
+        $credentialDigest = is_file($credentialFile) ? hash_file('sha256', $credentialFile) : null;
+        $requestsBefore = count(glob($root . '/requests/*'));
+        $runsBefore = count(glob($root . '/runs/*'));
+        $desired = ((int) $record->settings()->where('key', 'retention_keep')->value('value')) + 1;
+        $result = Paymenter\Extensions\Others\Backups\Runtime::command(['config', 'set'], ['settings' => ['retention_keep' => $desired]]);
+        testCheck(($result['updated'] ?? false) === true, 'Actual Python configuration save did not complete its native writer');
+        testCheck((int) $record->settings()->where('key', 'retention_keep')->value('value') === $desired, 'Actual Python configuration save did not persist the requested value');
+        $native = new Symfony\Component\Process\Process([PHP_BINARY, $base . '/artisan', 'backups:config-set'], $base);
+        $native->setInput(json_encode(['retention_keep' => $desired + 1], JSON_THROW_ON_ERROR));
+        $native->setTimeout(30);
+        $native->mustRun();
+        testCheck((int) $record->settings()->where('key', 'retention_keep')->value('value') === $desired + 1,
+                    'Default native command did not preserve its ordinary save behavior');
+        $advisory = json_decode(file_get_contents($root . '/configuration-advisory.json'), true, 16, JSON_THROW_ON_ERROR);
+        testCheck(($advisory['valid'] ?? false) === true, 'Default native command no longer initializes and validates its advisory');
+        testCheck(file_get_contents($root . '/installation.json') === $identity, 'Actual CLI configuration save changed installation identity');
+        testCheck(($credentialDigest === null && !is_file($credentialFile))
+            || ($credentialDigest !== null && hash_file('sha256', $credentialFile) === $credentialDigest), 'Actual CLI configuration save changed encrypted credentials');
+        testCheck(count(glob($root . '/requests/*')) === $requestsBefore && count(glob($root . '/runs/*')) === $runsBefore,
+                    'Actual CLI configuration save started backup work');
+        $results['actual_python_native_configuration_save_completes_without_nested_lock'] = true;
+        $results['default_native_configuration_save_retains_init_and_advisory'] = true;
         }
 
         if (testPhase('baseline')) {
@@ -376,12 +499,82 @@ try {
             }
             testCheck(!str_contains(strtolower($found->getAttribute('x-on:click')), 'navigate'), 'Download link has an Alpine SPA handler');
             testCheck($found->getAttribute('target') !== '_blank', 'Download unnecessarily opens a new tab');
+            $action->record(['__key' => 'test-owned', 'key' => 'test-owned', 'kind' => 'run', 'run_id' => 'test-owned',
+                             'run' => ['status' => 'delete-interrupted', 'download' => 'ready']]);
+            testCheck($action->isVisible(), 'Usable local Download is hidden by an unrelated S3-only deletion failure');
+            $retrieve = $page->instance()->getTable()->getAction('prepareDownload');
+            testCheck($retrieve instanceof Filament\Actions\Action, 'Native S3 retrieval action is missing');
+            $retrieve->record(['__key' => 'test-remote-only', 'key' => 'test-remote-only', 'kind' => 'run',
+                              'run_id' => 'test-remote-only', 'run' => ['status' => 'ready', 'download' => 'retrieve']]);
+            testCheck($retrieve->isVisible() && str_contains($retrieve->toHtml(), 'Retrieve from S3'),
+                        'Remote-only verified history has no visible S3 retrieval action');
             testCheck(Filament\Support\Facades\FilamentView::hasSpaMode($class::getUrl()), 'Download disabled ordinary admin SPA navigation');
         } finally {
             app()->instance('request', $originalRequest);
             app('url')->setRequest($originalRequest);
         }
         $results['native_download_anchor_avoids_spa'] = true;
+        }
+
+        if (testPhase('delete_gate')) {
+        $currentPhase = 'delete_gate';
+        // Minimized real Filament action: cached preview proofs separate storage
+        // decisions from the live mounted form and its unvalidated Action::$data.
+        $page = Livewire\Livewire::test($class);
+        $instance = $page->instance();
+        $action = $instance->getTable()->getAction('delete');
+        testCheck($action instanceof Filament\Actions\Action, 'Native Delete action is missing');
+        $runId = 'test-delete-gate';
+        $action->record(['__key' => $runId, 'key' => $runId, 'kind' => 'run', 'run_id' => $runId, 'created_at' => time(),
+            'run' => ['mode' => 'database-online', 'status' => 'ready', 'local' => true, 'remote' => 'changed']]);
+        $action->nestingIndex(0);
+        $instance->mountedActions = [['name' => 'delete', 'arguments' => [], 'context' => ['table' => true, 'recordKey' => $runId],
+            'data' => ['location' => 'local']]];
+        $schema = $action->getSchema(Filament\Schemas\Schema::make($instance)->statePath('mountedActions.0.data'));
+        testCheck($schema instanceof Filament\Schemas\Schema, 'Delete confirmation has no native schema');
+        $action->schemaContainer($schema);
+        $cachedSchemas = new ReflectionProperty($instance, 'cachedSchemas');
+        $cachedSchemas->setValue($instance, array_replace($cachedSchemas->getValue($instance), ['mountedActionSchema0' => $schema]));
+        $cachedActions = new ReflectionProperty($instance, 'cachedMountedActions');
+        $cachedActions->setValue($instance, [$action]);
+        $previews = new ReflectionProperty($instance, 'deletePreviews');
+        $allowed = ['refusal' => null, 'local_copy' => true, 'remote_copy' => null, 'survivors' => ['test-survivor']];
+        $refused = array_replace($allowed, ['refusal' => 'delete-remote-scope-changed']);
+        $previews->setValue($instance, [$runId . ':local' => $allowed, $runId . ':all' => $refused, $runId . ':s3' => $refused]);
+        $requestsBefore = count(glob($root . '/requests/*'));
+        $action->data(['location' => 'local']);
+        testCheck($action->getModalSubmitAction() instanceof Filament\Actions\Action,
+                    'Control case with matching validated action data does not expose Submit');
+        foreach ([[], ['location' => 'all']] as $staleActionData) {
+            $action->data($staleActionData);
+            $instance->mountedActions[0]['data']['location'] = 'local';
+            testCheck(str_contains($schema->toHtml(), 'Deletes the archive'), 'Local form selection did not produce its allowed preview');
+            $submit = $action->getModalSubmitAction();
+            testCheck($submit instanceof Filament\Actions\Action && str_contains($submit->toHtml(), 'Delete selected copies'),
+                'Allowed local-only preview hides Submit because unvalidated Action data still defaults to all');
+            $instance->mountedActions[0]['data']['location'] = 'all';
+            testCheck($action->getModalSubmitAction() === null, 'Refused all-copy selection exposes Submit');
+            $instance->mountedActions[0]['data']['location'] = 's3';
+            testCheck($action->getModalSubmitAction() === null, 'Refused S3 selection exposes Submit');
+        }
+        $instance->mountedActions[0]['data']['location'] = 'local';
+        $previews->setValue($instance, [$runId . ':local' => array_replace($allowed, ['refusal' => 'delete-last-backup'])]);
+        testCheck($action->getModalSubmitAction() === null, 'Last local copy exposes Submit');
+        testCheck(count(glob($root . '/requests/*')) === $requestsBefore, 'Rendering the deletion gate queued work');
+        $results['delete_confirmation_gate_uses_live_selected_location_before_validation'] = true;
+        }
+
+        if (testPhase('field_help')) {
+        $currentPhase = 'field_help';
+        $page = Livewire\Livewire::test($class);
+        testCheck(preg_match("/mountAction\\('cronLockHelp', \\{\\}, JSON\\.parse\\('([^']*)'\\)\\)/", $page->html(), $match) === 1,
+                    'Cron lock help action is absent from the rendered field');
+        $context = json_decode(json_decode('"' . $match[1] . '"'), true, 8, JSON_THROW_ON_ERROR);
+        $page->update(calls: [['method' => 'mountAction', 'params' => ['cronLockHelp', [], $context]]], updates: []);
+        testCheck(count($page->get('mountedActions') ?? []) === 1, 'Cron lock help dialog did not mount');
+        $modal = $page->effects['partials']['action-modals'] ?? $page->html();
+        testCheck(str_contains($modal, 'Use the lock paths') && str_contains($modal, 'Close'), 'Mounted cron lock help dialog lacks description or Close');
+        $results['native_field_help_dialog_renders_in_livewire_partial'] = true;
         }
 
         if (testPhase('modals')) {
