@@ -371,9 +371,12 @@ def systemd_locks(app, paths, tools):
             raise BackupError("job-locks-unverified")
         units = set()
         for timer in timers:
+            if isinstance(timer, dict) and "activates" in timer and timer["activates"] is None:
+                # Null means no target, so this timer cannot launch an app writer.
+                continue
             unit = timer.get("activates") if isinstance(timer, dict) else None
             if not isinstance(unit, str) or len(unit) > 255 or not re.fullmatch(unit_pattern, unit):
-                raise BackupError("job-locks-unverified")
+                raise BackupError("job-locks-unverified", detail={"activates": repr(unit)[:80]})
             units.add(unit)
         if not units:
             continue

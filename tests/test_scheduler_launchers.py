@@ -64,6 +64,47 @@ class LauncherTests(unittest.TestCase):
         with patch("paymenter_backups.maintenance.run", side_effect=self.response), self.assertRaisesRegex(BackupError, "job-locks-unverified"):
             systemd_locks(self.app, [self.lock], {"systemctl": "/usr/bin/true"})
 
+    def test_invalid_timer_target_detail_is_bounded_and_uses_repr(self):
+        for value in ("", [], ["scheduler.service"], False, 1, {}, "--option.service", "x" * 300, "bad\nname.service"):
+            with self.subTest(value=value):
+                with patch("paymenter_backups.maintenance.run", return_value=json.dumps([
+                        {"unit": "orphan.timer", "activates": value}]).encode()), \
+                        self.assertRaises(BackupError) as caught:
+                    systemd_locks(self.app, [self.lock], {"systemctl": "/usr/bin/true"})
+                self.assertEqual(caught.exception.code, "job-locks-unverified")
+                self.assertEqual(caught.exception.detail["activates"], repr(value)[:80])
+
+    def test_missing_timer_target_is_diagnosed_and_refused(self):
+        with patch("paymenter_backups.maintenance.run", return_value=b'[{"unit":"orphan.timer"}]'), \
+                self.assertRaises(BackupError) as caught:
+            systemd_locks(self.app, [self.lock], {"systemctl": "/usr/bin/true"})
+        self.assertEqual(caught.exception.code, "job-locks-unverified")
+        self.assertEqual(caught.exception.detail["activates"], "None")
+
+    def test_masked_timer_without_trigger_is_accepted_on_systemd_255(self):
+        # A masked timer with no Triggers has a null ACTIVATES cell.
+        timers = b'[{"next":null,"left":null,"last":0,"passed":0,"unit":"fwupd-refresh.timer","activates":null}]'
+        with patch("paymenter_backups.maintenance.run", return_value=timers) as read:
+            self.assertEqual(systemd_locks(self.app, [self.lock], {"systemctl": "/usr/bin/true"}), set())
+        self.assertTrue(read.called)
+        self.assertTrue(all("list-timers" in call.args[0] for call in read.call_args_list))
+
+    def test_null_timer_target_does_not_skip_real_timer_lock_verification(self):
+        def response(command, timeout):
+            if "list-timers" in command:
+                self.invocations.append(command)
+                return json.dumps([
+                    {"unit": "masked.timer", "activates": None},
+                    {"unit": "paymenter-scheduler.timer", "activates": self.unit},
+                ]).encode()
+            return self.response(command, timeout)
+        with patch("paymenter_backups.maintenance.run", side_effect=response):
+            self.assertEqual(systemd_locks(self.app, [self.lock], {"systemctl": "/usr/bin/true"}), {self.lock})
+        shows = [command for command in self.invocations if "show" in command]
+        self.assertTrue(shows)
+        for command in shows:
+            self.assertEqual(command[command.index("--") + 1:], [self.unit])
+
     def test_older_systemd_plain_timer_table_is_supported(self):
         def response(command, timeout):
             if "list-timers" in command:
