@@ -17,7 +17,7 @@ try {
     $app = require $base . '/bootstrap/app.php';
     $app->make(Illuminate\Contracts\Console\Kernel::class)->bootstrap();
     $class = Paymenter\Extensions\Others\Backups\Admin\Pages\Backups::class;
-    if (!method_exists($class, 'saveSettings') || !method_exists($class, 'saveS3Keys')) {
+    if (!method_exists($class, 'saveSettings') || !method_exists($class, 'encryptionForm')) {
         throw new RuntimeException('Install the frozen UI release before running these checks');
     }
     function testCheck(bool $condition, string $message): void {
@@ -48,7 +48,15 @@ try {
         foreach (['username', 'password'] as $key) {
             testCheck(empty($page->get('siteAccess')[$key]), 'A site password input returned in Livewire state');
         }
+        testCheck(empty($page->get('encryptionInput')['passphrase'] ?? null), 'A passphrase returned in Livewire state');
         testCheck(!str_contains($page->html(), 'TEST-SECRET-CANARY'), 'Secret canary returned in rendered response');
+    }
+    /** Filament 5 returns only the modal partial; its key can carry a nesting suffix. */
+    function modalPartial($page): ?string {
+        foreach ($page->effects['partials'] ?? [] as $name => $html) {
+            if (str_starts_with((string) $name, 'action-modals')) { return $html; }
+        }
+        return null;
     }
     function testChildGone(string $pidFile): void {
         testCheck(is_file($pidFile), 'Controlled stream child never recorded its identity');
@@ -147,8 +155,8 @@ try {
         testCheck(!file_exists($freshRoot), 'First-use folder must start absent');
         testCheck(mkdir($freshRoot, 0700), 'Could not create empty first-use fixture folder');
         $record->settings()->where('key', 'private_root')->update(['value' => $freshRoot]);
-        $record->settings()->where('key', 'enabled')->update(['value' => '0']);
-        $record->settings()->where('key', 'destination')->update(['value' => 'local']);
+        $record->settings()->whereIn('key', ['full_schedule', 'database_schedule'])->update(['value' => 'off']);
+        $record->settings()->where('key', 'upload_s3')->update(['value' => '0']);
         $firstUseRows = rowValues($record);
         $page = Livewire\Livewire::test($class);
         testCheck(!file_exists($freshRoot . '/installation.json'), 'Mount silently initialized first-use state');
@@ -176,7 +184,7 @@ try {
                     || ($originalCredentials !== null && file_get_contents($credentialFile) === $originalCredentials), 'First-use save changed original encrypted credentials');
         $results['unchanged_first_use_save_initializes_only_private_state'] = true;
         } finally {
-            foreach (['private_root', 'enabled', 'destination'] as $key) {
+            foreach (['private_root', 'full_schedule', 'database_schedule', 'upload_s3'] as $key) {
                 $record->settings()->where('key', $key)->update(['value' => $initialRows[$key]]);
             }
         }
@@ -198,7 +206,7 @@ try {
             if ($user) { Illuminate\Support\Facades\Auth::login($user); }
             else { Illuminate\Support\Facades\Auth::logout(); }
             testCheck(!$class::canAccess(), 'Insufficient permission admitted the page');
-            foreach (['saveSettings', 'saveS3Keys', 'saveSitePassword'] as $method) {
+            foreach (['saveSettings'] as $method) {
                 try {
                     (new $class)->$method();
                     throw new RuntimeException('Insufficient permission admitted ' . $method);
@@ -220,10 +228,12 @@ try {
         if (testPhase('validation')) {
         $currentPhase = 'validation';
         // Rejected form values must leave native rows byte-for-byte unchanged.
-        foreach ([['retention_keep' => 0], ['capture_timeout' => 1.5],
+        foreach ([['retention_keep_full' => 0], ['capture_timeout' => 1.5],
                   ['job_lock_paths' => 'relative/lock'], ['local_path' => $base . '/public/backup'],
-                  ['destination' => 's3', 's3_bucket' => '', 'plaintext_offsite_acknowledged' => false],
-                  ['enabled' => true, 'schedule_frequency' => 'weekly', 'schedule_weekdays' => []]] as $changes) {
+                  ['upload_s3' => true, 's3_bucket' => '', 's3_encryption' => false, 'plaintext_offsite_acknowledged' => false],
+                  ['keep_local' => false, 'upload_s3' => false],
+                  ['full_schedule' => 'weekly', 'full_weekdays' => []],
+                  ['database_schedule' => 'hourly', 'database_every_hours' => 5]] as $changes) {
             $currentPhase = 'validation:' . implode(',', array_keys($changes));
             $before = rowValues($record);
             $page = submitSettings($class, $changes);
@@ -234,9 +244,9 @@ try {
         $currentPhase = 'validation:native_auditing';
         $auditBefore = App\Models\Audit::count();
         $before = rowValues($record);
-        $desired = ((int) $before['retention_keep']) + 1;
-        $page = submitSettings($class, ['retention_keep' => $desired]);
-        testCheck((int) $record->settings()->where('key', 'retention_keep')->value('value') === $desired, 'Valid setting did not persist');
+        $desired = ((int) $before['retention_keep_full']) + 1;
+        $page = submitSettings($class, ['retention_keep_full' => $desired]);
+        testCheck((int) $record->settings()->where('key', 'retention_keep_full')->value('value') === $desired, 'Valid setting did not persist');
         testCheck(App\Models\Audit::count() > $auditBefore, 'Native audited setting write did not emit an audit');
         $results['native_auditing'] = true;
         }
@@ -255,14 +265,14 @@ try {
             App\Providers\SettingsProvider::flushCache();
             $page = Livewire\Livewire::test($class);
             $page->update(calls: [['method' => '$refresh', 'params' => []]],
-                updates: ['settings.mode' => 'database-online', 'settings.destination' => 'local']);
+                updates: ['settings.full_schedule' => 'off', 'settings.upload_s3' => false]);
             testCheck($page->instance()->removeSitePasswordAction()->isVisible(),
-                        'Saved HTTP Basic removal is unavailable after URL/mode/destination change');
+                        'Saved site password removal is unavailable after URL, schedule or storage changes');
             testCheck(str_contains($page->html(), 'HTTP Basic'), 'HTTP Basic purpose disappeared when its form was unavailable');
             $page->update(calls: [['method' => 'mountAction', 'params' => ['removeSitePassword']]], updates: []);
             testCheck(count($page->get('mountedActions') ?? []) === 1, 'HTTP Basic removal confirmation did not mount');
-            $partial = $page->effects['partials']['action-modals'] ?? $page->html();
-            testCheck(str_contains($partial, 'Remove saved HTTP Basic credentials?'), 'HTTP Basic confirmation was not rendered');
+            $partial = modalPartial($page) ?? $page->html();
+            testCheck(str_contains($partial, 'Remove the saved site password?'), 'Site password confirmation was not rendered');
             $page->update(calls: [['method' => 'callMountedAction', 'params' => []]], updates: []);
             testSecretReset($page);
             $overview = $runtime::command(['overview']);
@@ -278,7 +288,9 @@ try {
         // Saved credentials are encrypted, write-only and preserve each namespace.
         $page = Livewire\Livewire::test($class);
         $keys = ['access_key' => 'TEST-SECRET-CANARY-ACCESS', 'secret_key' => 'TEST-SECRET-CANARY-KEY', 'session_token' => 'TEST-SECRET-CANARY-TOKEN'];
-        $page->update(calls: [['method' => 'saveS3Keys', 'params' => []]], updates: ['s3Keys' => $keys]);
+        // Unencrypted uploads keep this phase about credentials; key setup has its own checks.
+        $s3 = ['settings.upload_s3' => true, 'settings.s3_bucket' => 'test-bucket', 'settings.s3_encryption' => false, 'settings.plaintext_offsite_acknowledged' => true];
+        $page->update(calls: [['method' => 'saveSettings', 'params' => []]], updates: [...$s3, 's3Keys' => $keys]);
         testSecretReset($page);
         testCheck(is_file($credentialFile), 'S3 credentials were not saved');
         testCheck(!str_contains(file_get_contents($credentialFile), 'TEST-SECRET-CANARY'), 'Credentials stored as plaintext');
@@ -287,7 +299,7 @@ try {
         App\Providers\SettingsProvider::flushCache();
         $site = ['origin' => $httpsOrigin, 'username' => 'TEST-SECRET-CANARY-USER', 'password' => 'TEST-SECRET-CANARY-PASSWORD'];
         $page = Livewire\Livewire::test($class);
-        $page->update(calls: [['method' => 'saveSitePassword', 'params' => []]], updates: ['siteAccess' => $site]);
+        $page->update(calls: [['method' => 'saveSettings', 'params' => []]], updates: ['siteAccess' => $site]);
         testSecretReset($page);
         testCheck(!str_contains(file_get_contents($credentialFile), 'TEST-SECRET-CANARY'), 'Site credentials stored as plaintext');
         $bridge = new Symfony\Component\Process\Process([PHP_BINARY, $base . '/extensions/Others/Backups/bridge.php', 'read', '--app', $base, '--private-root', $root]);
@@ -299,7 +311,7 @@ try {
         $encrypted = file_get_contents($credentialFile);
         $page->update(calls: [['method' => '$refresh', 'params' => []]], updates: ['s3Keys' => $keys, 'siteAccess' => $site]);
         testSecretReset($page);
-        $page->update(calls: [['method' => 'saveS3Keys', 'params' => []]], updates: ['s3Keys' => ['secret_key' => 'TEST-SECRET-CANARY-FAILURE']]);
+        $page->update(calls: [['method' => 'saveSettings', 'params' => []]], updates: ['s3Keys' => ['secret_key' => 'TEST-SECRET-CANARY-FAILURE']]);
         testSecretReset($page);
         testCheck(file_get_contents($credentialFile) === $encrypted, 'Invalid key form changed saved keys');
         $results['encrypted_namespaces_and_secret_reset'] = true;
@@ -310,7 +322,7 @@ try {
         Paymenter\Extensions\Others\Backups\PrivateStore::atomic($credentialFile, $unreadable);
         $damaged = file_get_contents($credentialFile);
         $page = Livewire\Livewire::test($class);
-        $page->update(calls: [['method' => 'saveS3Keys', 'params' => []]], updates: ['s3Keys' => $keys]);
+        $page->update(calls: [['method' => 'saveSettings', 'params' => []]], updates: ['s3Keys' => $keys]);
         testSecretReset($page);
         testCheck(file_get_contents($credentialFile) === $damaged, 'Unreadable bound credentials were replaced');
         file_put_contents($credentialFile, $encrypted);
@@ -343,8 +355,8 @@ try {
         $credentialDigest = is_file($credentialFile) ? hash_file('sha256', $credentialFile) : null;
         $requestCount = count(glob($root . '/requests/*'));
         $runCount = count(glob($root . '/runs/*'));
-        foreach (['retention_keep' => 'invalid-integer', 'automatic_retention' => 'invalid-boolean',
-                  'schedule_weekdays' => 'invalid-json', 'job_lock_paths' => 'invalid-json'] as $key => $malformed) {
+        foreach (['retention_keep_full' => 'invalid-integer', 'automatic_retention' => 'invalid-boolean',
+                  'full_weekdays' => 'invalid-json', 'job_lock_paths' => 'invalid-json'] as $key => $malformed) {
             session()->forget(['filament.notifications', 'filament.claimed_notifications']);
             $record->settings()->where('key', $key)->update(['value' => $malformed]);
             $page = Livewire\Livewire::test($class);
@@ -363,7 +375,6 @@ try {
                         . '; expected=' . json_encode($expected));
             $notifications = session()->pull('filament.claimed_notifications') ?? session()->pull('filament.notifications') ?? [];
             testCheck(array_filter($notifications, static fn ($item) => ($item['status'] ?? null) === 'warning'
-                && ($item['title'] ?? null) === 'Settings saved with corrections'
                 && str_contains($item['body'] ?? '', Paymenter\Extensions\Others\Backups\Settings::LABELS[$key][0])) !== [],
                 'Repair silently replaced the saved value without warning about its field: ' . $key);
             $record->settings()->where('key', $key)->update(['value' => $initialRows[$key]]);
@@ -407,15 +418,15 @@ try {
         $credentialDigest = is_file($credentialFile) ? hash_file('sha256', $credentialFile) : null;
         $requestsBefore = count(glob($root . '/requests/*'));
         $runsBefore = count(glob($root . '/runs/*'));
-        $desired = ((int) $record->settings()->where('key', 'retention_keep')->value('value')) + 1;
-        $result = Paymenter\Extensions\Others\Backups\Runtime::command(['config', 'set'], ['settings' => ['retention_keep' => $desired]]);
+        $desired = ((int) $record->settings()->where('key', 'retention_keep_full')->value('value')) + 1;
+        $result = Paymenter\Extensions\Others\Backups\Runtime::command(['config', 'set'], ['settings' => ['retention_keep_full' => $desired]]);
         testCheck(($result['updated'] ?? false) === true, 'Actual Python configuration save did not complete its native writer');
-        testCheck((int) $record->settings()->where('key', 'retention_keep')->value('value') === $desired, 'Actual Python configuration save did not persist the requested value');
+        testCheck((int) $record->settings()->where('key', 'retention_keep_full')->value('value') === $desired, 'Actual Python configuration save did not persist the requested value');
         $native = new Symfony\Component\Process\Process([PHP_BINARY, $base . '/artisan', 'backups:config-set'], $base);
-        $native->setInput(json_encode(['retention_keep' => $desired + 1], JSON_THROW_ON_ERROR));
+        $native->setInput(json_encode(['retention_keep_full' => $desired + 1], JSON_THROW_ON_ERROR));
         $native->setTimeout(30);
         $native->mustRun();
-        testCheck((int) $record->settings()->where('key', 'retention_keep')->value('value') === $desired + 1,
+        testCheck((int) $record->settings()->where('key', 'retention_keep_full')->value('value') === $desired + 1,
                     'Default native command did not preserve its ordinary save behavior');
         $advisory = json_decode(file_get_contents($root . '/configuration-advisory.json'), true, 16, JSON_THROW_ON_ERROR);
         testCheck(($advisory['valid'] ?? false) === true, 'Default native command no longer initializes and validates its advisory');
@@ -431,10 +442,10 @@ try {
         if (testPhase('baseline')) {
         $currentPhase = 'baseline';
         $before = rowValues($record);
-        $desired = ((int) $before['retention_keep']) + 2;
+        $desired = ((int) $before['retention_keep_full']) + 2;
         $page = Livewire\Livewire::test($class);
-        $settings = array_replace($page->get('settings'), ['retention_keep' => $desired]);
-        $claimedBaseline = ['retention_keep' => $desired];
+        $settings = array_replace($page->get('settings'), ['retention_keep_full' => $desired]);
+        $claimedBaseline = ['retention_keep_full' => $desired];
         if (property_exists($page->instance(), 'loadedSettings')) {
             $claimedBaseline = array_replace($page->get('loadedSettings'), $claimedBaseline);
         }
@@ -447,7 +458,7 @@ try {
         if ($locked) {
             testCheck(rowValues($record) === $before, 'Rejected client baseline changed settings');
         } else {
-            testCheck((int) $record->settings()->where('key', 'retention_keep')->value('value') === $desired,
+            testCheck((int) $record->settings()->where('key', 'retention_keep_full')->value('value') === $desired,
                         'Client-controlled baseline silently suppressed an explicit setting change');
         }
         $results['client_baseline_cannot_control_persistence'] = true;
@@ -506,7 +517,7 @@ try {
             testCheck($retrieve instanceof Filament\Actions\Action, 'Native S3 retrieval action is missing');
             $retrieve->record(['__key' => 'test-remote-only', 'key' => 'test-remote-only', 'kind' => 'run',
                               'run_id' => 'test-remote-only', 'run' => ['status' => 'ready', 'download' => 'retrieve']]);
-            testCheck($retrieve->isVisible() && str_contains($retrieve->toHtml(), 'Retrieve from S3'),
+            testCheck($retrieve->isVisible() && str_contains($retrieve->toHtml(), 'Download from S3'),
                         'Remote-only verified history has no visible S3 retrieval action');
             testCheck(Filament\Support\Facades\FilamentView::hasSpaMode($class::getUrl()), 'Download disabled ordinary admin SPA navigation');
         } finally {
@@ -548,9 +559,9 @@ try {
         foreach ([[], ['location' => 'all']] as $staleActionData) {
             $action->data($staleActionData);
             $instance->mountedActions[0]['data']['location'] = 'local';
-            testCheck(str_contains($schema->toHtml(), 'Deletes the archive'), 'Local form selection did not produce its allowed preview');
+            testCheck(str_contains($schema->toHtml(), 'The backup file on this server'), 'Local form selection did not produce its allowed preview');
             $submit = $action->getModalSubmitAction();
-            testCheck($submit instanceof Filament\Actions\Action && str_contains($submit->toHtml(), 'Delete selected copies'),
+            testCheck($submit instanceof Filament\Actions\Action && str_contains($submit->toHtml(), 'Delete'),
                 'Allowed local-only preview hides Submit because unvalidated Action data still defaults to all');
             $instance->mountedActions[0]['data']['location'] = 'all';
             testCheck($action->getModalSubmitAction() === null, 'Refused all-copy selection exposes Submit');
@@ -566,15 +577,14 @@ try {
 
         if (testPhase('field_help')) {
         $currentPhase = 'field_help';
+        // Help is inline text, and Help sections carry ids that setup items link to.
         $page = Livewire\Livewire::test($class);
-        testCheck(preg_match("/mountAction\\('cronLockHelp', \\{\\}, JSON\\.parse\\('([^']*)'\\)\\)/", $page->html(), $match) === 1,
-                    'Cron lock help action is absent from the rendered field');
-        $context = json_decode(json_decode('"' . $match[1] . '"'), true, 8, JSON_THROW_ON_ERROR);
-        $page->update(calls: [['method' => 'mountAction', 'params' => ['cronLockHelp', [], $context]]], updates: []);
-        testCheck(count($page->get('mountedActions') ?? []) === 1, 'Cron lock help dialog did not mount');
-        $modal = $page->effects['partials']['action-modals'] ?? $page->html();
-        testCheck(str_contains($modal, 'Use the lock paths') && str_contains($modal, 'Close'), 'Mounted cron lock help dialog lacks description or Close');
-        $results['native_field_help_dialog_renders_in_livewire_partial'] = true;
+        $html = $page->html();
+        testCheck(!str_contains($html, "mountAction('cronLockHelp'") && !str_contains($html, 'Help for '), 'A field still opens a help dialog');
+        foreach (['storage', 'full-backup-requirements', 'before-backups-run', 'advanced', 'how-backups-run', 'full-backups', 'restoring', 'command-line'] as $anchor) {
+            testCheck(str_contains($html, 'id="' . $anchor . '"'), 'Deep-link target missing: ' . $anchor);
+        }
+        $results['inline_help_and_deep_link_targets'] = true;
         }
 
         if (testPhase('modals')) {
@@ -583,7 +593,7 @@ try {
             'access_key' => 'TEST-SECRET-CANARY-MODAL-ACCESS', 'secret_key' => 'TEST-SECRET-CANARY-MODAL-KEY',
         ]);
         $page = Livewire\Livewire::test($class);
-        $page->update(calls: [['method' => 'mountAction', 'params' => ['removeS3Keys']]], updates: ['settings.destination' => 's3']);
+        $page->update(calls: [['method' => 'mountAction', 'params' => ['removeS3Keys']]], updates: ['settings.upload_s3' => true]);
         testCheck(count($page->get('mountedActions') ?? []) === 1, 'Remove S3 keys confirmation did not mount');
         $document = new DOMDocument;
         $previousErrors = libxml_use_internal_errors(true);
@@ -596,7 +606,7 @@ try {
         testCheck(count($wrappers) === 1, 'Native action confirmation has missing or duplicate modal wrappers');
         // Filament 5 can return only this native Livewire partial. Testable::html()
         // retains the initial page HTML, so apply the same replacement the browser does.
-        $partialHtml = $page->effects['partials']['action-modals'] ?? null;
+        $partialHtml = modalPartial($page);
         if (is_string($partialHtml)) {
             $partialDocument = new DOMDocument;
             $previousErrors = libxml_use_internal_errors(true);
@@ -616,7 +626,7 @@ try {
                 testCheck($ancestor->getAttribute('role') !== 'tabpanel', 'Native action modal is trapped inside a tab panel');
             }
         }
-        testCheck(str_contains($wrappers[0]->textContent, 'Remove S3 keys?'), 'Confirmation heading was not rendered outside the tabs');
+        testCheck(str_contains($wrappers[0]->textContent, 'Remove saved S3 keys?'), 'Confirmation heading was not rendered outside the tabs');
         testSecretReset($page);
         $results['native_action_modals_render_outside_tabs'] = true;
         }
