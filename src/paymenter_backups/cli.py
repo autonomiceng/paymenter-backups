@@ -9,7 +9,7 @@ import time
 from . import __version__
 from .artifacts import journal as artifact_journal, stream
 from .common import BackupError, State, atomic_json
-from .config import DEFAULTS, bridge, load, normalize, redact, validate
+from .config import DEFAULTS, bridge, load, load_policy, normalize, redact, validate
 from .engine import capture, export, plan, verify
 from .maintenance import recover, schedule_admission
 from .presentation import overview
@@ -44,6 +44,8 @@ def parser():
     for name, verbs in (("config", ("show", "set", "validate", "check")), ("schedule", ("show", "set", "enable", "disable"))):
         sub = commands.add_parser(name)
         sub.add_argument("verb", choices=verbs)
+        if name == "schedule":
+            sub.add_argument("--kind", choices=("full", "database"))
     commands.add_parser("plan")
     sub = commands.add_parser("run")
     sub.add_argument("--execute", action="store_true")
@@ -89,6 +91,8 @@ def parser():
     sub = commands.add_parser("request-worker", help=argparse.SUPPRESS)
     sub.add_argument("request_id")
     sub.add_argument("--execute", action="store_true")
+    from .key_cli import add_parsers
+    add_parsers(commands)
     return result
 
 
@@ -103,9 +107,11 @@ def set_config(args, state, changes):
     permitted = set(DEFAULTS) | {"private_root", "python", "php", "dump", "mysql", "tar", "gzip"}
     if set(settings) - permitted:
         raise BackupError("config-invalid")
-    envelope = bridge(args)
+    envelope = bridge(args, "read-settings")
+    require_fresh_plaintext_ack(envelope.get("settings", {}), settings)
     envelope["settings"] = {**DEFAULTS, **envelope.get("settings", {}), **settings}
     normalize(envelope["settings"])
+    override_tools(envelope, settings, getattr(args, "php", envelope.get("tools", {}).get("php", "/usr/bin/php")))
     validate(envelope)
     if probe_credentials is not None and probe_credentials != {"clear": True}:
         from .maintenance import probe_authorization
@@ -115,15 +121,20 @@ def set_config(args, state, changes):
     with state.lock("config.lock"), state.lock("tick.lock", timeout=10):
         # Re-read after acquiring the scheduler lock. A previously read envelope
         # must never reset a schedule epoch saved by another administrator.
-        envelope = bridge(args)
+        envelope = bridge(args, "read-settings")
+        require_fresh_plaintext_ack(envelope.get("settings", {}), settings)
         envelope["settings"] = {**DEFAULTS, **envelope.get("settings", {}), **settings}
         normalize(envelope["settings"])
+        override_tools(envelope, settings, getattr(args, "php", envelope.get("tools", {}).get("php", "/usr/bin/php")))
         validate(envelope)
         state.apply_policy(envelope["settings"])
         schedule_admission(state, envelope)
         if probe_credentials is not None and probe_credentials != {"clear": True}:
             probe_authorization(probe_credentials, envelope["framework"].get("app_url", ""))
         if settings:
+            from .requests import freeze_legacy_requests
+            original = bridge(args, "read-settings").get("settings", {})
+            freeze_legacy_requests(state, original.get("mode", "full-quiesced"))
             values = {key: json.dumps(value) if isinstance(value, list) else value for key, value in settings.items()}
             try:
                 result = subprocess.run([args.php, str(state.app / "artisan"), "backups:config-set", "--defer-init"],
@@ -133,11 +144,14 @@ def set_config(args, state, changes):
                     raise BackupError("config-write-failed")
             except (OSError, subprocess.TimeoutExpired):
                 raise BackupError("config-write-failed") from None
-        if credentials is not None:
-            bridge(args, "credentials-write", credentials)
-        if probe_credentials is not None:
-            bridge(args, "maintenance-probe-credentials-write", probe_credentials)
-        persisted = load(args)
+        if credentials is not None and credentials != {"clear": True} and probe_credentials != {"clear": True}:
+            bridge(args, "credentials-merge", {"s3": credentials, "site": probe_credentials})
+        else:
+            if credentials is not None:
+                bridge(args, "credentials-write", credentials)
+            if probe_credentials is not None:
+                bridge(args, "maintenance-probe-credentials-write", probe_credentials)
+        persisted = load(args, credential_free=True)
         state.apply_policy(persisted["settings"], write=True)
         if settings:
             from .requests import _sync_schedule
@@ -152,7 +166,7 @@ def dispatch(args):
     args.bridge = args.bridge or str(pathlib.Path(args.app) / "extensions/Others/Backups/bridge.php")
     command = args.command
     initialize = command == "init" or command == "config" and args.verb == "set" or command == "schedule" and args.verb != "show" or command == "run" and args.execute
-    preliminary = bridge(args) if initialize else None
+    preliminary = bridge(args, "read-settings") if initialize else None
     if preliminary:
         preliminary["settings"] = {**DEFAULTS, **preliminary.get("settings", {})}
         normalize(preliminary["settings"])
@@ -161,10 +175,13 @@ def dispatch(args):
         validate(preliminary)
     state = State(args.app, args.private_root, initialize=initialize,
                   extra_docroots=preliminary["settings"]["extra_docroots"] if preliminary else None)
+    from .key_cli import COMMANDS as KEY_COMMANDS, dispatch as key_dispatch
+    if command in KEY_COMMANDS:
+        return key_dispatch(args, state, bridge, stdin_json)
     if command == "init":
         state.apply_policy(preliminary["settings"], write=True)
         from .requests import sync_schedule
-        sync_schedule(state, preliminary["settings"], settings_loader=lambda: load(args)["settings"])
+        sync_schedule(state, preliminary["settings"], settings_loader=lambda: load(args, credential_free=True)["settings"])
         return {"initialized": True, "installation_uuid": state.uuid}
     if command == "overview":
         envelope, error = None, None
@@ -181,6 +198,7 @@ def dispatch(args):
                     state.apply_policy(envelope["settings"])
                 except BackupError as failure:
                     error = failure.code
+                    envelope["validation_error"] = {"field": failure.field, "detail": failure.detail}
         return overview(state, envelope, error)
     if command == "artifact-stream":
         return stream_artifact(state, args)
@@ -201,6 +219,7 @@ def dispatch(args):
                 return verify(state, args.run_id, args.show, record=True, envelope=envelope)
         return verify(state, args.run_id, args.show, envelope=envelope)
     if command == "export":
+        state.apply_policy(load_policy(args, bridge, state.uuid))
         return export(state, args.run_id, args.output)
     if command == "recover":
         if args.verb == "acknowledge" and not args.run_id:
@@ -228,12 +247,42 @@ def dispatch(args):
         schedule_admission(state, envelope)
         return {"valid": True}
     if command == "schedule":
-        if args.verb == "show":
-            settings = load(args)["settings"]
-            return {key: value for key, value in settings.items() if key.startswith("schedule_") or key == "enabled"}
-        changes = stdin_json() if args.verb == "set" else {"enabled": args.verb == "enable"}
-        if set(changes) - {key for key in DEFAULTS if key.startswith("schedule_")} - {"enabled"}:
-            raise BackupError("schedule-field-invalid")
+        settings = load(args, credential_free=True)["settings"]
+        if settings["settings_version"] == 1:
+            selected = "full" if settings["mode"] == "full-quiesced" else "database"
+            if args.kind and args.kind != selected:
+                raise BackupError("schedule-kind-required")
+            if args.verb == "show":
+                return {key: value for key, value in settings.items() if key.startswith("schedule_") or key == "enabled"}
+            changes = stdin_json() if args.verb == "set" else {"enabled": args.verb == "enable"}
+            if set(changes) - {key for key in DEFAULTS if key.startswith("schedule_")} - {"enabled"}:
+                raise BackupError("schedule-field-invalid")
+        else:
+            from .requests import next_slot
+            if args.verb == "show":
+                return {"settings_version": 2, "timezone": settings["schedule_timezone"],
+                        "schedules": {kind: {key.removeprefix(kind + "_"): value for key, value in settings.items() if key.startswith(kind + "_") and key in (kind + "_schedule", kind + "_time", kind + "_weekdays", "database_every_hours", "database_minute")}
+                                      | {"next_at": next_slot(settings, kind=kind)} for kind in ((args.kind,) if args.kind else ("full", "database"))}}
+            kind = args.kind
+            if kind is None and args.verb != "disable":
+                enabled = [kind for kind in ("full", "database") if settings[kind + "_schedule"] != "off"]
+                if len(enabled) != 1:
+                    raise BackupError("schedule-kind-required")
+                kind = enabled[0]
+            if args.verb == "disable":
+                changes = {key + "_schedule": "off" for key in ((kind,) if kind else ("full", "database"))}
+            elif args.verb == "enable":
+                changes = {kind + "_schedule": settings[kind + "_schedule"] if settings[kind + "_schedule"] != "off" else ("daily" if kind == "full" else "hourly")}
+            else:
+                values = stdin_json()
+                mapping = {"frequency": kind + "_schedule", "time": kind + "_time", "weekdays": kind + "_weekdays",
+                           "timezone": "schedule_timezone"}
+                if kind == "database":
+                    mapping.update(every_hours="database_every_hours", minute="database_minute")
+                allowed = set(mapping.values())
+                changes = {mapping.get(key, key): value for key, value in values.items()}
+                if set(changes) - allowed:
+                    raise BackupError("schedule-field-invalid")
         return set_config(args, state, {"settings": changes})
     if command == "tick":
         if not args.execute:
@@ -256,11 +305,11 @@ def dispatch(args):
         journal = capture(state, envelope)
         result = {"run_id": journal["run_id"], "local_complete": True, "archive_path": journal["archive_path"]}
         if envelope["settings"]["destination"] == "s3":
-            result.update(deliver(state, envelope, journal["run_id"]))
+            result.update(deliver(state, envelope, journal["run_id"], envelope_loader=lambda: load(args)))
         apply_automatic_retention(state, envelope, result)
         return result
     if command == "deliver":
-        result = deliver(state, envelope, args.run_id)
+        result = deliver(state, envelope, args.run_id, envelope_loader=lambda: load(args))
         apply_automatic_retention(state, envelope, result)
         return result
     if command == "retention":
@@ -273,17 +322,37 @@ def dispatch(args):
         return retrieve(state, envelope, args.run_id) if args.execute else retrieve_plan(state, envelope, args.run_id)
     if command == "destination-test":
         with state.lock():
-            return destination_test(state, envelope)
+            return destination_test(state, envelope, envelope_loader=lambda: load(args), locked=True)
     if command == "request-worker":
         if not args.execute:
             raise BackupError("execute-required")
-        return worker(state, envelope, args.request_id)
+        return worker(state, envelope, args.request_id, envelope_loader=lambda: load(args))
     if command == "tick":
         # sys.argv[0] is a release wrapper, preserving its isolated runtime paths.
         prefix = [envelope["tools"].get("python", sys.executable), "-I", str(pathlib.Path(sys.argv[0]).resolve()),
                   "--app", args.app, "--private-root", args.private_root, "--bridge", args.bridge, "--php", args.php]
         return tick(state, envelope, prefix, envelope_loader=lambda: load(args))
     raise BackupError("command-invalid")
+
+
+def override_tools(envelope, changes, php):
+    for name in ('python', 'php', 'dump', 'mysql', 'tar', 'gzip', 'gpg'):
+        if name in changes:
+            envelope.setdefault('tools', {})[name] = changes[name] or (php if name == 'php' else '')
+
+
+def require_fresh_plaintext_ack(previous, changes):
+    # Check only encryption/storage scalars, so repairing an unrelated invalid
+    # legacy JSON row does not require successfully normalizing the old row.
+    off = changes.get('s3_encryption') in (False, 0, '0', 'false', '')
+    if not off:
+        return
+    if previous.get('settings_version', 1) in (1, '1'):
+        encrypted = not (previous.get('destination') == 's3' and previous.get('plaintext_offsite_acknowledged') in (True, 1, '1', 'true'))
+    else:
+        encrypted = previous.get('s3_encryption', True) not in (False, 0, '0', 'false', '')
+    if encrypted and changes.get('plaintext_offsite_acknowledged') not in (True, 1, '1', 'true'):
+        raise BackupError('plaintext-offsite-acknowledgement-required', 'plaintext_offsite_acknowledged')
 
 
 def check_config(args, state, changes):
@@ -294,12 +363,11 @@ def check_config(args, state, changes):
     permitted = set(DEFAULTS) | {"private_root", "python", "php", "dump", "mysql", "tar", "gzip"}
     if set(settings) - permitted:
         raise BackupError("config-invalid")
-    envelope = bridge(args)
+    envelope = bridge(args, "read-settings")
+    require_fresh_plaintext_ack(envelope.get("settings", {}), settings)
     envelope["settings"] = {**DEFAULTS, **envelope.get("settings", {}), **settings}
     normalize(envelope["settings"])
-    for name in ("python", "php", "dump", "mysql", "tar", "gzip"):
-        if name in settings:
-            envelope.setdefault("tools", {})[name] = settings[name]
+    override_tools(envelope, settings, getattr(args, "php", envelope.get("tools", {}).get("php", "/usr/bin/php")))
     validate(envelope)
     state.apply_policy(envelope["settings"])
     if envelope["settings"]["local_path"]:
@@ -356,7 +424,12 @@ def main(argv=None):
         print(json.dumps(redact(result), sort_keys=True, indent=2))
         return 0
     except BackupError as error:
-        print(json.dumps({"error": error.code}), file=sys.stderr)
+        result = {"error": error.code}
+        if error.field is not None:
+            result["field"] = error.field
+        if error.detail:
+            result["detail"] = error.detail
+        print(json.dumps(result), file=sys.stderr)
         return 1
     except KeyboardInterrupt:
         print(json.dumps({"error": "operation-interrupted"}), file=sys.stderr)

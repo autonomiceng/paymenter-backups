@@ -11,8 +11,10 @@ import uuid
 
 
 class BackupError(Exception):
-    def __init__(self, code):
+    def __init__(self, code, field=None, detail=None):
         self.code = code
+        self.field = field
+        self.detail = detail or {}
         super().__init__(code)
 
 
@@ -141,6 +143,14 @@ class State:
                 continue
             if directory.is_symlink() or directory.stat().st_uid != os.getuid() or directory.stat().st_mode & 0o077:
                 raise BackupError("private-state-permissions")
+        if initialize:
+            for name in ("scheduler.lock", "queue.lock"):
+                # Only our suggested launcher locks are created; discovered locks
+                # elsewhere remain the launcher's responsibility.
+                with self.lock(name) as descriptor:
+                    info = os.fstat(descriptor)
+                    if stat.S_IMODE(info.st_mode) != 0o600 or info.st_nlink != 1:
+                        raise BackupError("private-state-permissions")
 
     def guard_location(self, path, code="destination-inside-docroot"):
         canonical = pathlib.Path(path).resolve()

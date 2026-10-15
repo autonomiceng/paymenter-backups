@@ -1,5 +1,6 @@
 """Capture checkpoint, restore service, then package immutable payloads."""
 import contextlib
+import fcntl
 import hashlib
 import gzip
 import json
@@ -77,7 +78,7 @@ def output_limit(state, settings, output_root=None):
 
 def destination(state, envelope):
     value = envelope["settings"].get("local_path")
-    path = pathlib.Path(value).absolute() if value else state.default_destination()
+    path = pathlib.Path(value).absolute() if value else (state.root / "backups" if envelope["settings"].get("settings_version", 1) == 2 else state.default_destination())
     if path.is_symlink():
         raise BackupError("destination-unsafe")
     path = path.resolve()
@@ -91,16 +92,19 @@ def destination(state, envelope):
     return path
 
 
-def plan(state, envelope):
+def plan(state, envelope, discovery_inventory=None, probe_locks=True, encryption_key_status=None):
     settings = envelope["settings"]
     errors = []
+    items = []
+    def add(code, field=None, detail=None):
+        errors.append(code)
+        items.append({"code": code, "field": field, "detail": detail or {}})
     for name in ("php", "dump", "mysql", "tar", "gzip"):
         binary = envelope.get("tools", {}).get(name)
         if not binary or not pathlib.Path(binary).is_file() or not os.access(binary, os.X_OK):
-            errors.append("tool-unavailable")
-            break
+            add("tool-unavailable", name, {"tool": name, "path": binary})
     if not state.initialized:
-        errors.append("installation-not-initialized")
+        add("installation-not-initialized")
     if settings["mode"] == "full-quiesced":
         try:
             from .maintenance import probe_authorization, web_origin
@@ -108,24 +112,80 @@ def plan(state, envelope):
             if envelope.get("maintenance_probe_credentials"):
                 probe_authorization(envelope["maintenance_probe_credentials"], envelope.get("framework", {}).get("app_url", ""))
         except BackupError as error:
-            errors.append(error.code)
+            add(error.code)
         try:
             billing_admission(state, envelope)
             schedule_admission(state, envelope)
         except BackupError as error:
-            errors.append(error.code)
-        if not settings["job_lock_paths"]:
-            errors.append("job-locks-unverified")
-        for key in ("cooperative_writers_acknowledged", "external_state_acknowledged"):
-            if not settings[key]:
-                errors.append(key.replace("_", "-"))
+            add(error.code)
+        try:
+            external_symlinks(state.app)
+        except BackupError as error:
+            add(error.code)
+        from .readiness import stores
+        detected = stores(envelope, legacy_policy=settings.get("settings_version", 1) == 1)
+        if detected[0]['supported'] is not True:
+            add('maintenance-driver-unsupported', detail={'driver': detected[0]['driver']})
+        unsupported = [item for item in detected[1:] if item['supported'] is not True]
+        if unsupported:
+            add('external-durable-state-unsupported', detail={'stores': unsupported})
+        if settings.get('settings_version', 1) == 2:
+            from .discovery import admission, cached
+            inventory = discovery_inventory if discovery_inventory is not None else cached(state)
+            refusals, _ = admission(envelope, inventory)
+            for item in refusals:
+                add(item['code'], item['field'], item['detail'])
+            from .process import continuous_workers
+            if continuous_workers(state.app):
+                add('continuous-worker-present')
+            if probe_locks:
+                for job in inventory['items']:
+                    if job['coordination'] != 'coordinated':
+                        continue
+                    descriptor = None
+                    try:
+                        descriptor = os.open(job['lock'], os.O_RDWR | os.O_NOFOLLOW | os.O_CLOEXEC)
+                        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    except BlockingIOError:
+                        add('job-lock-busy', detail={'job': job['id']})
+                    except OSError:
+                        pass  # The lock-safety admission item already identifies it.
+                    finally:
+                        if descriptor is not None:
+                            os.close(descriptor)
+            if not settings['full_host_assumptions_acknowledged']:
+                add('full-host-assumptions-acknowledgement-required', 'full_host_assumptions_acknowledged')
+        else:
+            if not settings['job_lock_paths']:
+                add('job-locks-unverified')
+            for key in ('cooperative_writers_acknowledged', 'external_state_acknowledged'):
+                if not settings[key]:
+                    add(key.replace('_', '-'), key)
+    if probe_locks and state.initialized:
+        try:
+            space(state, settings)
+        except BackupError as error:
+            add(error.code)
+        try:
+            with state.lock(create=False):
+                pass
+        except BackupError as error:
+            add(error.code)
     if not settings["no_concurrent_ddl_acknowledged"]:
-        errors.append("no-concurrent-ddl-acknowledgement-required")
+        add("no-concurrent-ddl-acknowledgement-required", "no_concurrent_ddl_acknowledged")
     if any(not item.get("service_recovered") and not item.get("recovery_acknowledged") for item in state.journals()):
-        errors.append("recovery-required")
+        add("recovery-required")
+    # Delivery setup belongs in the page readiness report, while local capture
+    # remains admissible and preserves its source if delivery cannot proceed.
+    if settings.get("upload_s3", settings["destination"] == "s3"):
+        from . import encryption
+        delivery_code = encryption.readiness(envelope, key_status=encryption_key_status)
+        if delivery_code:
+            field = "gpg" if delivery_code.startswith("archive-encryption-tool-") else "s3_encryption"
+            items.append({"code": delivery_code, "field": field, "detail": {}})
     return {"mode": settings["mode"], "destination": settings["destination"],
             "installation_uuid": state.uuid, "app": str(state.app), "private_root": str(state.root),
-            "capture_timeout": settings["capture_timeout"], "admission_errors": errors,
+            "capture_timeout": settings["capture_timeout"], "admission_errors": errors, "readiness_items": items,
             "guarantee": "database-and-full-app-checkpoint" if settings["mode"] == "full-quiesced" else "transactional-database-only",
             "external_provider_state": "excluded", "execute_required": True}
 
@@ -145,6 +205,16 @@ def defaults_file(path, database):
         os.fsync(stream.fileno())
 
 
+def run_tool(name, command, timeout, **kwargs):
+    """Identify a failed capture program without returning command arguments."""
+    try:
+        return run(command, timeout, **kwargs)
+    except BackupError as error:
+        if error.code.startswith('child-'):
+            raise BackupError(error.code, name, {'tool': name}) from None
+        raise
+
+
 def inventory(envelope, defaults, timeout, register):
     database = envelope["database"]
     if database.get("driver") not in ("mysql", "mariadb") or not database.get("name"):
@@ -156,7 +226,7 @@ SELECT 'events', COUNT(*) FROM information_schema.EVENTS WHERE EVENT_SCHEMA=DATA
 SELECT 'triggers', COUNT(*) FROM information_schema.TRIGGERS WHERE TRIGGER_SCHEMA=DATABASE();
 SHOW GRANTS FOR CURRENT_USER;"""
     try:
-        result = run([envelope["tools"]["mysql"], "--defaults-file=" + str(defaults), "--batch", "--skip-column-names", "--", database["name"]],
+        result = run_tool("mysql", [envelope["tools"]["mysql"], "--defaults-file=" + str(defaults), "--batch", "--skip-column-names", "--", database["name"]],
                      timeout, input_bytes=query.encode(), register=register).decode()
         rows = result.splitlines()
         counts = {}
@@ -166,9 +236,9 @@ SHOW GRANTS FOR CURRENT_USER;"""
         if set(counts) != {"tables", "routines", "events", "triggers"} or not rows[4:]:
             raise ValueError()
     except (BackupError, KeyError, UnicodeError, ValueError):
-        raise BackupError("database-inventory-failed") from None
+        raise BackupError("database-inventory-failed", "mysql", {"tool": "mysql"}) from None
     if any(counts.values()):
-        raise BackupError("unsupported-db-objects")
+        raise BackupError("unsupported-db-objects", detail={"kinds": [key for key, count in counts.items() if count]})
     grants = [re.split(r"\s+IDENTIFIED\b", row, maxsplit=1, flags=re.IGNORECASE)[0] + " IDENTIFIED [redacted]"
               if re.search(r"\s+IDENTIFIED\b", row, re.IGNORECASE) else row for row in rows[4:]]
     return {"state": "visible-zero", "counts": counts, "current_user_grants": grants,
@@ -239,7 +309,11 @@ def cleanup_failed_work(state):
 def capture(state, envelope, scheduled=False, request_id=None):
     settings = envelope["settings"]
     with state.lock():
-        proposed = plan(state, envelope)
+        fresh_discovery = None
+        if settings.get("settings_version", 1) == 2 and settings["mode"] == "full-quiesced":
+            from .discovery import discover
+            fresh_discovery = discover(state, envelope)
+        proposed = plan(state, envelope, fresh_discovery, probe_locks=False)
         if proposed["admission_errors"]:
             raise BackupError(proposed["admission_errors"][0])
         state.apply_policy(settings, write=True)
@@ -253,16 +327,7 @@ def capture(state, envelope, scheduled=False, request_id=None):
             retention(state, envelope, execute=True, locked=True, local_only=True)
             space(state, settings)
         output = destination(state, envelope)
-        if envelope["framework"].get("maintenance_driver") != "file" and settings["mode"] == "full-quiesced":
-            raise BackupError("maintenance-driver-unsupported")
         full = settings["mode"] == "full-quiesced"
-        if full and any(envelope["framework"].get(key) not in allowed for key, allowed in (
-            ("queue_driver", ("database", "sync", "null")),
-            ("session_driver", ("file", "database")),
-            ("cache_driver", ("file", "database", "array")),
-            ("filesystem_driver", ("local", "public")),
-        )):
-            raise BackupError("external-durable-state-unsupported")
         initial = {relative: identity(state.app / relative) for relative in MARKERS if (state.app / relative).exists()}
         if full and initial:
             if scheduled:
@@ -308,7 +373,7 @@ def capture(state, envelope, scheduled=False, request_id=None):
                     state.save(journal)
                     if not initial:
                         # Journal the intent first. Crash before ownership recording stays closed.
-                        run([envelope["tools"]["php"], str(state.app / "artisan"), "down", "--render=errors::503", "--status=503"],
+                        run_tool("php", [envelope["tools"]["php"], str(state.app / "artisan"), "down", "--render=errors::503", "--status=503"],
                             min(15, remaining()), register=register)
                         journal["owned_markers"] = {relative: identity(state.app / relative) for relative in MARKERS}
                         state.save(journal)
@@ -327,7 +392,9 @@ def capture(state, envelope, scheduled=False, request_id=None):
                            "--single-transaction", "--quick", "--hex-blob", "--skip-comments",
                            "--skip-dump-date", "--", envelope["database"]["name"]]
                 sql = payload / "database.sql"
-                run(command, remaining(), output=sql, register=register, budget_check=lambda: space(state, settings), file_limit=output_limit(state, settings, output))
+                journal["database_snapshot_lower_bound"] = time.time()
+                state.save(journal)
+                run_tool("dump", command, remaining(), output=sql, register=register, budget_check=lambda: space(state, settings), file_limit=output_limit(state, settings, output))
                 if not sql.stat().st_size:
                     raise BackupError("dump-empty")
                 sql_hash = digest(sql, remaining)
@@ -337,8 +404,14 @@ def capture(state, envelope, scheduled=False, request_id=None):
                     tar_command = [envelope["tools"]["tar"], "--acls", "--xattrs", "--numeric-owner", "-cf", str(payload / "app.tar")]
                     tar_command += ["--exclude=./" + relative for relative in excludes]
                     tar_command += ["-C", str(state.app), "."]
-                    run(tar_command, remaining(), register=register, budget_check=lambda: space(state, settings), file_limit=output_limit(state, settings, output))
-                    if hash_stream(command, remaining(), register) != sql_hash:
+                    run_tool("tar", tar_command, remaining(), register=register, budget_check=lambda: space(state, settings), file_limit=output_limit(state, settings, output))
+                    try:
+                        stability_hash = hash_stream(command, remaining(), register)
+                    except BackupError as error:
+                        if error.code.startswith("child-"):
+                            raise BackupError(error.code, "dump", {"tool": "dump"}) from None
+                        raise
+                    if stability_hash != sql_hash:
                         raise BackupError("database-changed-during-capture")
                     journal["phase"] = "releasing"
                     state.save(journal)
@@ -356,7 +429,7 @@ def capture(state, envelope, scheduled=False, request_id=None):
             journal["phase"] = "compressing"
             state.save(journal)
             temporary = output / ("." + run_id + ".tar.gz.partial")
-            run([envelope["tools"]["tar"], "--use-compress-program=" + shlex.quote(envelope["tools"].get("gzip", "/usr/bin/gzip")), "-cf", str(temporary), "-C", str(payload), "."],
+            run_tool("tar", [envelope["tools"]["tar"], "--use-compress-program=" + shlex.quote(envelope["tools"].get("gzip", "/usr/bin/gzip")), "-cf", str(temporary), "-C", str(payload), "."],
                 settings["capture_timeout"] * 2, register=register, budget_check=lambda: space(state, settings), file_limit=output_limit(state, settings, output))
             with open(temporary, "rb") as stream:
                 os.fsync(stream.fileno())
@@ -374,7 +447,11 @@ def capture(state, envelope, scheduled=False, request_id=None):
                 journal["verification"] = {"verified_at": time.time(), "source": "capture",
                                            "sha256": manifest["archive"]["sha256"],
                                            "identity": artifacts.identity(artifact.info)}
+            if full and journal.get("service_recovered"):
+                journal["database_coverage"] = {"verified_at": journal["verification"]["verified_at"], "snapshot_lower_bound": journal["database_snapshot_lower_bound"]}
             state.save(journal)
+            from .requests import reconcile_coverage
+            reconcile_coverage(state)
             shutil.rmtree(payload)
             return journal
         except BaseException as error:

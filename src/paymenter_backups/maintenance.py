@@ -213,31 +213,39 @@ def billing_admission(state, envelope, now=None):
 @contextlib.contextmanager
 def coordination(state, envelope):
     paths = envelope["settings"]["job_lock_paths"]
+    v2 = envelope["settings"].get("settings_version", 1) == 2
+    if v2:
+        from .discovery import admission, discover
+        errors, paths = admission(envelope, discover(state, envelope))
+        if errors:
+            first = errors[0]
+            raise BackupError(first["code"], first["field"], first["detail"])
     descriptors = []
     try:
         if not paths:
             raise BackupError("job-locks-unverified")
-        try:
-            crontab = run([envelope["tools"].get("crontab", "/usr/bin/crontab"), "-l"], 5).decode()
-        except FileNotFoundError:
-            crontab = ""
-        except BackupError as error:
-            if error.code != "child-failed":
-                raise
-            crontab = ""
-        jobs = [line for line in crontab.splitlines() if line.strip() and not line.lstrip().startswith("#") and any(word in line for word in ("schedule:run", "queue:work"))]
-        verified = set()
-        for line in jobs:
-            verified.add(cron_lock(line, state.app, paths))
-        verified.update(systemd_locks(state.app, paths, envelope.get("tools", {})))
-        if verified != set(paths):
-            raise BackupError("job-locks-unverified")
+        if not v2:
+            try:
+                crontab = run([envelope["tools"].get("crontab", "/usr/bin/crontab"), "-l"], 5).decode()
+            except FileNotFoundError:
+                crontab = ""
+            except BackupError as error:
+                if error.code != "child-failed":
+                    raise
+                crontab = ""
+            jobs = [line for line in crontab.splitlines() if line.strip() and not line.lstrip().startswith("#") and any(word in line for word in ("schedule:run", "queue:work"))]
+            verified = set()
+            for line in jobs:
+                verified.add(_legacy_cron_lock(line, state.app, paths))
+            verified.update(systemd_locks(state.app, paths, envelope.get("tools", {})))
+            if verified != set(paths):
+                raise BackupError("job-locks-unverified")
         deadline = time.monotonic() + envelope["settings"]["lock_timeout"]
         for path in sorted(set(paths)):
             descriptor = os.open(path, os.O_RDWR | os.O_NOFOLLOW)
             descriptors.append(descriptor)
             info = os.fstat(descriptor)
-            if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid():
+            if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or (v2 and (stat.S_IMODE(info.st_mode) != 0o600 or info.st_nlink != 1)):
                 raise BackupError("job-locks-unverified")
             while True:
                 try:
@@ -247,8 +255,13 @@ def coordination(state, envelope):
                     if time.monotonic() >= deadline:
                         raise BackupError("job-lock-busy")
                     time.sleep(0.05)
+        for path, descriptor in zip(sorted(set(paths)), descriptors):
+            current = os.stat(path, follow_symlinks=False)
+            held = os.fstat(descriptor)
+            if (current.st_dev, current.st_ino) != (held.st_dev, held.st_ino):
+                raise BackupError("job-lock-unsafe" if v2 else "job-locks-unverified")
         if app_workers(state.app):
-            raise BackupError("job-locks-unverified")
+            raise BackupError("job-workers-running" if v2 else "job-locks-unverified")
         yield
     except OSError:
         raise BackupError("job-locks-unverified") from None
@@ -258,6 +271,18 @@ def coordination(state, envelope):
 
 
 def cron_lock(line, app, paths):
+    """Support explicit path-based flock invocations; ambiguous shell refuses."""
+    from .discovery import parse
+    try:
+        item = parse(line, app)
+        if item['lock'] not in paths or item['coordination'] != 'coordinated':
+            raise BackupError('job-locks-unverified')
+        return item['lock']
+    except BackupError:
+        raise BackupError('job-locks-unverified') from None
+
+
+def _legacy_cron_lock(line, app, paths):
     """Support explicit path-based flock invocations; ambiguous shell refuses."""
     try:
         tokens = shlex.split(line, comments=True)
@@ -388,7 +413,7 @@ def systemd_locks(app, paths, tools):
                 if working == str(app):
                     tokens = ["cd", str(app), "&&"] + tokens
                 line = "* * * * * " + " ".join(shlex.quote(token) for token in tokens)
-                verified.add(cron_lock(line, app, paths))
+                verified.add(_legacy_cron_lock(line, app, paths))
         except (KeyError, ValueError, UnicodeError, BackupError):
             raise BackupError("job-locks-unverified") from None
     return verified
@@ -465,7 +490,11 @@ def schedule_admission(state, envelope):
     """Validate future backup slots against observed native billing instants."""
     from .requests import due_slots
     settings = envelope["settings"]
-    if settings["mode"] != "full-quiesced" or not settings["enabled"]:
+    if settings.get("settings_version", 1) == 2:
+        from .config import schedule_settings
+        settings = schedule_settings(settings, "full")
+        envelope = dict(envelope, settings=settings)
+    if (settings.get("settings_version", 1) == 1 and settings["mode"] != "full-quiesced") or not settings["enabled"]:
         return
     now = time.time()
     try:
