@@ -7,8 +7,8 @@ for this extension. Keep Paymenter core and native database definitions stock.
 Build on a separate development machine:
 
 ```sh
-python3 tools/build_release.py --output dist/Backups-0.1.2.zip
-(cd dist && sha256sum -c Backups-0.1.2.zip.sha256)
+python3 tools/build_release.py --output dist/Backups-0.2.0.zip
+(cd dist && sha256sum -c Backups-0.2.0.zip.sha256)
 ```
 
 The deterministic archive has one top-level `Backups/` directory, compatible
@@ -40,14 +40,23 @@ checks executable paths only; private-root/document-root and credential-file
 ownership, modes and binding checks remain unchanged. No hosting-policy change
 is required. No path in this guide is deployment specific.
 
-Non-secret settings are native extension fields. Daily and weekly schedules use
-HH:MM, an IANA timezone and JSON weekday numbers (Monday 0 through Sunday 6).
-Defaults are scheduling disabled, full-quiesced, local storage, 02:00 UTC, a
-10 GiB private byte budget and seven retained verified copies. Automatic retention applies after successful
+After enabling the extension, open **System > Backups**. The Backups tab lists
+what is still needed; the Settings tab edits everything in one form. Set the
+private folder and program paths under Advanced before the first save if the
+defaults do not fit the host. The first save creates the private folder and
+installation ID. Afterwards the private folder can only be moved from the
+terminal. The page checks each save with the engine before writing, including
+schedule and billing overlap, S3 endpoint and backup folder location.
+
+Non-secret settings are native extension fields, so the native Extensions
+editor also works as a fallback with the same field rules. There, weekdays and
+path lists are JSON (Monday 0 through Sunday 6); cross-field checks run after
+saving and record an advisory result. Defaults are automatic backups off,
+full backups, local storage, 02:00 UTC, a 10 GiB private byte budget and seven
+retained verified copies. Automatic retention applies after successful
 publication and preserves undelivered/unresolved copies. Enabling the
-extension does not itself enable automatic backups. Native edits preserve the
-credential file; the update hook records an advisory validation result because
-multi-field admission checks run at capture time.
+extension does not itself enable automatic backups. Settings saves never touch
+the credential file.
 
 Full-quiesced requires explicit no-concurrent-DDL, cooperative-writer and
 external-state acknowledgements, existing owner-controlled scheduler/worker

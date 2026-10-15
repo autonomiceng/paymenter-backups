@@ -112,6 +112,86 @@ def http_server(app, php, http_port, work):
         log.close()
 
 
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *args):
+        return None
+
+
+def promote_and_run(cli, private, action):
+    """Launch exactly the one pending request of this action, as the tick would."""
+    pending = [json.loads(path.read_text()) for path in (private / 'requests').glob('*.json')]
+    pending = [item for item in pending if item['status'] == 'pending' and item['action'] == action]
+    if len(pending) != 1:
+        raise RuntimeError('expected one pending ' + action + ' request')
+    item = dict(pending[0], status='launching', attempts=pending[0]['attempts'] + 1)
+    target = private / 'requests' / (item['request_id'] + '.json')
+    temporary = target.with_name('.' + target.name + '.fixture')
+    temporary.write_text(json.dumps(item))
+    temporary.chmod(0o600)
+    temporary.replace(target)
+    result = json.loads(execute(cli + ['request-worker', item['request_id'], '--execute'], timeout=300))
+    if result['status'] != 'complete':
+        raise RuntimeError(action + ' request did not complete: ' + str(result))
+    return result
+
+
+def admin_history(args, app, checker, cli, private, run, native_url, work):
+    """Admin history, download, verification and per-backup delete against real archives."""
+    archive = pathlib.Path(run['archive_path'])
+    expected = hashlib.sha256(archive.read_bytes()).hexdigest()
+    ui = [args.php, checker, app, 'ui-history']
+    execute(ui + ['render', 'Verified', 'Full backup', 'Download', 'This server'])
+    body = work / 'admin-download.bin'
+    streamed = json.loads(execute(ui + ['download', run['run_id'], body]))
+    if streamed['download'] != 'streamed' or streamed['length'] != archive.stat().st_size or hashlib.sha256(body.read_bytes()).hexdigest() != expected:
+        raise RuntimeError('admin download differs from verified archive')
+    if 'attachment' not in streamed['disposition'] or 'no-store' not in streamed['cache']:
+        raise RuntimeError('admin download headers unsafe')
+    audit = [json.loads(line) for line in (private / 'audit.jsonl').read_text().splitlines()]
+    if audit[-1]['outcome'] != 'complete' or audit[-1]['run_id'] != run['run_id'] or not audit[-1]['actor']:
+        raise RuntimeError('admin download not audited')
+    # Real HTTP without a session never reaches the archive.
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect)
+    try:
+        opener.open(native_url + '/admin/backups/download/' + run['run_id'], timeout=10)
+        raise RuntimeError('unauthenticated download answered')
+    except urllib.error.HTTPError as error:
+        if error.code != 302 or '/login' not in error.headers.get('Location', ''):
+            raise RuntimeError('unauthenticated download not redirected to login: ' + str(error.code))
+    # A changed file needs a new full verification before it is served again.
+    stat = archive.stat()
+    os.utime(archive, ns=(stat.st_atime_ns, stat.st_mtime_ns + 1000))
+    refused = json.loads(execute(ui + ['download', run['run_id'], work / 'refused-download.bin']))
+    if refused['download'] != 'refused' or (work / 'refused-download.bin').exists():
+        raise RuntimeError('stale verification served bytes')
+    execute(ui + ['render', 'Check needed'])
+    execute(ui + ['verifyFirst', run['run_id']])
+    promote_and_run(cli, private, 'verify')
+    again = work / 'admin-download-again.bin'
+    json.loads(execute(ui + ['download', run['run_id'], again]))
+    if hashlib.sha256(again.read_bytes()).hexdigest() != expected:
+        raise RuntimeError('reverified download differs')
+    execute(ui + ['delete-refused', run['run_id'], 'only usable backup'])
+    # A second, database-only backup can be deleted; the full backup survives.
+    online = json.loads(execute(cli + ['run', '--execute', '--mode', 'database-online'], timeout=300))
+    # Two verified backups and a limit of one: retention is offered, queued, then cancelled.
+    keep = json.loads(execute(cli + ['config', 'show']))['settings']['retention_keep']
+    execute(cli + ['config', 'set'], input=json.dumps({'settings': {'retention_keep': 1}}).encode())
+    execute(ui + ['retention', 'two verified, keep one'])
+    execute(cli + ['config', 'set'], input=json.dumps({'settings': {'retention_keep': keep}}).encode())
+    execute(ui + ['delete', online['run_id']])
+    promote_and_run(cli, private, 'delete')
+    journal = json.loads((private / 'runs' / online['run_id'] / 'journal.json').read_text())
+    if not journal.get('retained_deleted') or journal['deletion']['reason'] != 'manual' or pathlib.Path(online['archive_path']).exists():
+        raise RuntimeError('admin delete did not remove the selected backup')
+    if hashlib.sha256(archive.read_bytes()).hexdigest() != expected:
+        raise RuntimeError('admin delete changed the surviving backup')
+    execute(ui + ['render', 'Verified'])
+    return {'download_matches_archive': True, 'download_audited': True, 'unauthenticated_redirected': True,
+            'stale_verification_refused': True, 'queued_verify_restores_download': True,
+            'last_backup_delete_refused': True, 'retention_offered_with_real_backups': True, 'queued_delete_removed_selected_only': True}
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--release', required=True)
@@ -332,7 +412,10 @@ def main():
             current_plan = json.loads(execute(cli + ['plan']))
             if 'billing-window-protected' not in current_plan['admission_errors']:
                 raise RuntimeError('current billing minute admits full hold')
-            execute([args.php, checker, app, 'billing', '23:59'])
+            # Keep the disposable app's real native billing time away from
+            # this drill. The current-minute refusal above stays exercised.
+            fixture_billing_time = time.strftime('%H:%M', time.gmtime(time.time() + 12 * 3600))
+            execute([args.php, checker, app, 'billing', fixture_billing_time])
             execute([args.php, 'artisan', 'backups:guard'], cwd=app)
             if hashes(app) != original:
                 raise RuntimeError('native application source/Composer changed')
@@ -364,12 +447,13 @@ def main():
                     if error.code != 419:
                         raise RuntimeError('unexpected native CSRF response: ' + str(error.code))
                 execute(capture_cli + ['run', '--execute'], env=execution_env, timeout=300)
-            runs = list((private / 'runs').glob('*/journal.json'))
-            journals = [json.loads(path.read_text()) for path in runs]
-            successful = [journal for journal in journals if journal.get('local_complete')]
-            if len(successful) != 1:
-                raise RuntimeError('full native checkpoint incomplete: ' + str(journals))
-            run = successful[0]
+                runs = list((private / 'runs').glob('*/journal.json'))
+                journals = [json.loads(path.read_text()) for path in runs]
+                successful = [journal for journal in journals if journal.get('local_complete')]
+                if len(successful) != 1:
+                    raise RuntimeError('full native checkpoint incomplete: ' + str(journals))
+                run = successful[0]
+                results['admin_history'] = admin_history(args, app, checker, cli, private, run, native_url, work)
             forbidden_export = work / 'additional-site-public' / 'forbidden-recovery-kit'
             denied_export = subprocess.run(cli + ['export', run['run_id'], '--output', str(forbidden_export)], stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=child_environment())
             if denied_export.returncode == 0 or forbidden_export.exists():

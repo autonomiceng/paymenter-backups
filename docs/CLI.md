@@ -22,6 +22,7 @@ command emits JSON; failures emit only a safe error code to stderr and exit 1.
 | --- | --- |
 | `config show` | Cold read, redacted runtime configuration |
 | `config validate` | Cold read and configuration validation |
+| `config check` | JSON stdin `{"settings":{…}}`; validates proposed settings, writes nothing |
 | `config set` | JSON stdin; native nonsecret writes through audited Eloquent |
 | `init` | Explicitly provision private installation identity and policy |
 | `schedule show` | Current daily/weekly schedule |
@@ -32,18 +33,21 @@ command emits JSON; failures emit only a safe error code to stderr and exit 1.
 | `run --execute` | Foreground capture using configured mode, then delivery |
 | `run --execute --mode database-online` | Transactional SQL snapshot only |
 | `list`, `status` | Offline durable runs, recovery state and requests |
+| `overview [--offline]` | Whitelisted backups, tasks and readiness; no paths, manifests or results |
 | `verify ID [--show]` | Offline whole archive, gzip trailer and payload verification |
+| `verify ID --record` | Same check under the run lock; records the identity that enables admin download |
 | `deliver ID` | Idempotent S3 delivery; repairs missing/corrupt remote markers |
 | `retention plan`, `retention apply` | Preview or explicitly delete verified owned artifacts |
+| `delete ID`, `delete ID --execute` | Preview, or delete one backup's owned local and S3 copies |
 | `destination-test` | Owned local/S3 probe, readback, cleanup |
-| `requests create --action ACTION` | Durable admin-style request; JSON stdin arguments |
+| `requests create --action ACTION` | Durable admin-style request; JSON stdin arguments, including `delete` |
 | `requests list`, `requests cancel ID` | Inspect or cancel pending/deferred requests |
 | `recover` | Offline recovery preview |
 | `recover --execute`, `recover --auto` | Guarded offline recovery |
 | `recover acknowledge --run ID` | Record operator resolution, preserve every app file |
 | `export ID --output /private/new-kit` | Copy verified archive and recovery instructions |
 
-`status`, `list`, `verify`, `recover`, requests and export work without PHP,
+`status`, `list`, `overview --offline`, `verify`, `recover`, requests and export work without PHP,
 Laravel, database or provider startup. Configuration reads and plans use the
 cold PHP/PDO bridge. Native config writes require a bootable application.
 Native MySQL/MariaDB host/socket connections and `DB_URL` are honored. Native
@@ -68,6 +72,32 @@ printf '%s\n' '{"run_id":"RUN-ID"}' |
   bin/paymenter-backups --app /srv/paymenter requests create --action verify
 ```
 
+Request arguments are `run_id` for `verify`, `deliver` and `delete`, `execute`
+(`true` is required for `retention` deletion and for `delete`), `mode`
+(`full-quiesced` or `database-online`, `run` only) and `actor`, a numeric
+administrator ID recorded for audit. Repeating an identical waiting manual
+request returns the waiting request. A `delete` request is refused while
+another request for that backup is active.
+
+`delete ID` prints which local files and S3 objects the deletion removes and
+the first refusal, if any: the only remaining backup, the newest copy in the
+configured S3 prefix, a remote copy outside the configured bucket and prefix,
+or another active task for that backup. Execution holds the run lock, fully
+verifies another backup on every attempt, records `delete_intent` before
+removing anything and resumes from it after a failure. It never changes
+retention settings. Example:
+
+```sh
+bin/paymenter-backups --app /srv/paymenter delete RUN-ID
+bin/paymenter-backups --app /srv/paymenter delete RUN-ID --execute
+```
+
+`overview` is the administrator page's status source and a compact terminal
+summary. Each run shows a status code (`ready`, `damaged`, `running`, `failed`,
+`attention`, `interrupted`, `deleting`, `delete-interrupted` or `deleted`),
+size, copy locations and whether a recorded verification still matches the
+archive (`download: ready`) or a new check is needed (`verify`).
+
 Credential stdin envelope: `{"credentials":{"access_key":"…","secret_key":"…",
 "session_token":"…"}}`; `session_token` is optional. It never enters native
 setting rows or public output. Credentials are encrypted through the native
@@ -89,7 +119,7 @@ Username/password must be nonempty UTF-8 strings up to 8192 bytes; username
 colons and control characters in either field refuse. Reconfigure the credentials
 when changing application origin. Clear only this namespace with
 `{"maintenance_probe_credentials":{"clear":true}}`; unreadable stores also
-refuse clearing. `config show` redacts the complete namespace including username.
+refuse clearing. `{"credentials":{"clear":true}}` removes only the S3 keys. `config show` redacts the complete namespace including username.
 The probe uses system TLS trust, no inherited proxy/CA/keylog environment, no
 cookies and no redirects. Basic auth only passes the outer guard. Full mode
 still requires exact native 503/template bytes; 401/200/404/redirect refuse.
