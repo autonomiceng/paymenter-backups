@@ -196,9 +196,26 @@ def read_manifest(state, item, location):
     data = read_owned(location, location[2].name)
     try:
         manifest = json.loads(data)
+        validate_manifest(state, item, manifest)
+    except (ValueError, KeyError, TypeError):
+        raise BackupError("artifact-manifest-invalid") from None
+    if isinstance(item.get("manifest"), dict) and item["manifest"] != manifest:
+        raise BackupError("artifact-manifest-mismatch")
+    return manifest
+
+
+def validate_manifest(state, item, manifest):
+    try:
         archive = manifest["archive"]
         valid = (isinstance(archive["sha256"], str) and HEX_DIGEST.fullmatch(archive["sha256"]) is not None
                  and type(archive["size"]) is int and archive["size"] > 0)
+        payloads = manifest["payloads"]
+        valid = valid and isinstance(payloads, dict) and bool(payloads)
+        valid = valid and all(isinstance(name, str) and name in ("database.sql", "app.tar")
+                              and isinstance(value, dict) and isinstance(value.get("sha256"), str)
+                              and HEX_DIGEST.fullmatch(value["sha256"]) is not None
+                              and type(value.get("size")) is int and value["size"] >= 0
+                              for name, value in payloads.items())
     except (ValueError, KeyError, TypeError):
         raise BackupError("artifact-manifest-invalid") from None
     if not valid:
@@ -208,8 +225,13 @@ def read_manifest(state, item, location):
     return manifest
 
 
+def deleting(item):
+    return bool(item.get("delete_intent") and not item["delete_intent"].get("completed"))
+
+
 def deleted(item):
-    return bool(item.get("retained_deleted") or item.get("delete_intent") or item.get("retention_delete_intent"))
+    return bool(item.get("retained_deleted") or (deleting(item) and item["delete_intent"].get("location", "all") in ("local", "all"))
+                or (item.get("retention_delete_intent") and item.get("copy_state_version") != 2))
 
 
 class Artifact:

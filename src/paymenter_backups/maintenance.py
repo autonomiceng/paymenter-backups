@@ -10,6 +10,7 @@ import fcntl
 import json
 import os
 import pathlib
+import pwd
 import stat
 import shlex
 import ssl
@@ -49,14 +50,14 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
-def probe_origin(url, origin_only=False):
-    """Canonical HTTPS origin; reject ambiguous authority and URL credentials."""
+def web_origin(url, origin_only=False, allow_http=False):
+    """Canonical web origin shared by admission, the probe and presentation."""
     try:
         if not isinstance(url, str) or not url or any(ord(char) <= 32 or ord(char) == 127 for char in url) or "\\" in url:
             raise ValueError()
         url.encode("utf-8")
         parsed = urllib.parse.urlsplit(url)
-        if parsed.scheme != "https" or not parsed.hostname or parsed.username is not None or parsed.password is not None or "?" in url or "#" in url or not re.fullmatch(r"(?:\[[0-9a-fA-F:.]+\]|[a-zA-Z0-9.-]+)(?::[0-9]{1,5})?", parsed.netloc):
+        if parsed.scheme not in (("http", "https") if allow_http else ("https",)) or not parsed.hostname or parsed.username is not None or parsed.password is not None or "?" in url or "#" in url or not re.fullmatch(r"(?:\[[0-9a-fA-F:.]+\]|[a-zA-Z0-9.-]+)(?::[0-9]{1,5})?", parsed.netloc):
             raise ValueError()
         if origin_only and parsed.path not in ("", "/"):
             raise ValueError()
@@ -71,9 +72,15 @@ def probe_origin(url, origin_only=False):
         port = parsed.port
         if port is not None and not 1 <= port <= 65535:
             raise ValueError()
-        return "https://" + host + (":" + str(port) if port not in (None, 443) else "")
+        default_port = 443 if parsed.scheme == "https" else 80
+        return parsed.scheme + "://" + host + (":" + str(port) if port not in (None, default_port) else "")
     except (ValueError, TypeError, UnicodeError):
-        raise BackupError("maintenance-probe-credentials-invalid") from None
+        raise BackupError("maintenance-probe-origin-invalid") from None
+
+
+def probe_origin(url, origin_only=False):
+    """Credentials are bound to a canonical HTTPS origin only."""
+    return web_origin(url, origin_only=origin_only)
 
 
 def probe_authorization(credentials, app_url):
@@ -89,7 +96,10 @@ def probe_authorization(credentials, app_url):
             raise BackupError("maintenance-probe-credentials-invalid")
     if ":" in credentials["username"]:
         raise BackupError("maintenance-probe-credentials-invalid")
-    if probe_origin(credentials["origin"], origin_only=True) != probe_origin(app_url):
+    current_origin = web_origin(app_url, allow_http=True)
+    if current_origin.startswith("http://"):
+        raise BackupError("maintenance-probe-http-saved")
+    if probe_origin(credentials["origin"], origin_only=True) != current_origin:
         raise BackupError("maintenance-probe-origin-mismatch")
     value = (credentials["username"] + ":" + credentials["password"]).encode("utf-8")
     return "Basic " + base64.b64encode(value).decode("ascii")
@@ -140,17 +150,7 @@ def probe_request(envelope):
     if credentials:
         headers["Authorization"] = probe_authorization(credentials, app_url)
     try:
-        # Anonymous HTTP supports ordinary native/local installations. Reuse
-        # strict URL validation while credentials require HTTPS unchanged.
-        if not isinstance(app_url, str) or not app_url.startswith(("https://", "http://")):
-            raise ValueError()
-        origin = probe_origin("https://" + app_url.split("://", 1)[1])
-        if app_url.startswith("http://"):
-            origin = "http://" + origin.removeprefix("https://")
-            # HTTPS canonicalization omits443; anonymous HTTP must retain an
-            # explicit443 because its default port is80.
-            if urllib.parse.urlsplit(app_url).port == 443:
-                origin += ":443"
+        origin = web_origin(app_url, allow_http=True)
         path = urllib.parse.urlsplit(app_url).path
     except (BackupError, ValueError, TypeError):
         raise BackupError("maintenance-probe-failed") from None
@@ -217,12 +217,20 @@ def coordination(state, envelope):
     try:
         if not paths:
             raise BackupError("job-locks-unverified")
-        crontab = run([envelope["tools"].get("crontab", "/usr/bin/crontab"), "-l"], 5).decode()
+        try:
+            crontab = run([envelope["tools"].get("crontab", "/usr/bin/crontab"), "-l"], 5).decode()
+        except FileNotFoundError:
+            crontab = ""
+        except BackupError as error:
+            if error.code != "child-failed":
+                raise
+            crontab = ""
         jobs = [line for line in crontab.splitlines() if line.strip() and not line.lstrip().startswith("#") and any(word in line for word in ("schedule:run", "queue:work"))]
         verified = set()
         for line in jobs:
             verified.add(cron_lock(line, state.app, paths))
-        if not jobs or verified != set(paths):
+        verified.update(systemd_locks(state.app, paths, envelope.get("tools", {})))
+        if verified != set(paths):
             raise BackupError("job-locks-unverified")
         deadline = time.monotonic() + envelope["settings"]["lock_timeout"]
         for path in sorted(set(paths)):
@@ -284,6 +292,106 @@ def cron_lock(line, app, paths):
         return lock
     except (ValueError, StopIteration, IndexError):
         raise BackupError("job-locks-unverified") from None
+
+
+def systemd_locks(app, paths, tools):
+    """Read existing timer/service metadata. Never install, enable or start jobs."""
+    systemctl = tools.get("systemctl", "/usr/bin/systemctl")
+    if not pathlib.Path(systemctl).is_file():
+        return set()
+    managers = [([systemctl, "--system"], False)]
+    runtime = pathlib.Path("/run/user") / str(os.getuid())
+    if (runtime.is_dir() and not runtime.is_symlink() and runtime.stat().st_uid == os.getuid()
+            and not runtime.stat().st_mode & 0o077):
+        managers.append((["/usr/bin/env", "XDG_RUNTIME_DIR=" + str(runtime), systemctl, "--user"], True))
+    verified = set()
+    deadline = time.monotonic() + 5
+    unit_pattern = r"(?:[A-Za-z0-9_]|\\x[0-9A-Fa-f]{2})(?:[A-Za-z0-9_.@:-]|\\x[0-9A-Fa-f]{2}){0,199}\.service"
+
+    def read(command):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise BackupError("job-locks-unverified")
+        return run(command, remaining)
+
+    for command, user_manager in managers:
+        try:
+            timers = json.loads(read(command + ["list-timers", "--all", "--output=json", "--no-pager"]))
+        except (ValueError, UnicodeError, BackupError) as error:
+            if isinstance(error, BackupError) and error.code != "child-failed":
+                raise BackupError("job-locks-unverified") from None
+            try:
+                # Older systemd versions ignore or reject JSON output. Their
+                # no-legend plain table has ACTIVATES as its final column.
+                table = read(command + ["list-timers", "--all", "--no-legend", "--plain", "--full", "--no-pager"]).decode()
+                timers = []
+                for line in table.splitlines():
+                    if not line.strip():
+                        continue
+                    columns = line.split()
+                    if len(columns) < 2 or not columns[-2].endswith(".timer"):
+                        raise ValueError()
+                    timers.append({"activates": columns[-1]})
+            except BackupError as failure:
+                if failure.code == "child-failed":
+                    continue  # This manager is unavailable on a cron-only host.
+                raise BackupError("job-locks-unverified") from None
+            except (ValueError, UnicodeError):
+                raise BackupError("job-locks-unverified") from None
+        if not isinstance(timers, list) or len(timers) > 100:
+            raise BackupError("job-locks-unverified")
+        units = set()
+        for timer in timers:
+            unit = timer.get("activates") if isinstance(timer, dict) else None
+            if not isinstance(unit, str) or len(unit) > 255 or not re.fullmatch(unit_pattern, unit):
+                raise BackupError("job-locks-unverified")
+            units.add(unit)
+        if not units:
+            continue
+        try:
+            # One bounded read per manager avoids a subprocess per timer. Id
+            # identifies every block; -- keeps unit names separate from options.
+            raw = read(command + ["show", "--no-pager", "--property=Id,ExecStart,User,WorkingDirectory,DynamicUser,LoadState", "--", *sorted(units)]).decode()
+            blocks = re.split(r"\n\s*\n", raw.strip())
+            properties = {}
+            for block in blocks:
+                props = dict(line.split("=", 1) for line in block.splitlines() if "=" in line)
+                unit = props.get("Id")
+                if unit not in units or unit in properties:
+                    raise ValueError()
+                properties[unit] = props
+            if set(properties) != units:
+                raise ValueError()
+            for props in properties.values():
+                if time.monotonic() >= deadline:
+                    raise BackupError("job-locks-unverified")
+                if props.get("LoadState") != "loaded":
+                    continue
+                execution = props.get("ExecStart", "")
+                working = props.get("WorkingDirectory", "")
+                relevant = working == str(app) or re.search(re.escape(str(app)) + r"(?:/|[\s;'\"]|$)", execution)
+                if not relevant or not any(word in execution for word in ("schedule:run", "queue:work")):
+                    continue
+                owner = props.get("User", "")
+                try:
+                    uid = os.getuid() if user_manager and not owner else (int(owner) if owner.isdecimal() else pwd.getpwnam(owner or "root").pw_uid)
+                except KeyError:
+                    continue  # An unresolved dynamic account is not this Unix user.
+                if uid != os.getuid():
+                    continue
+                if props.get("DynamicUser") == "yes":
+                    raise ValueError()
+                invocations = re.findall(r"argv\[\]=(.*?)\s*;\s*ignore_errors=", execution)
+                if len(invocations) != 1:
+                    raise ValueError()
+                tokens = shlex.split(invocations[0])
+                if working == str(app):
+                    tokens = ["cd", str(app), "&&"] + tokens
+                line = "* * * * * " + " ".join(shlex.quote(token) for token in tokens)
+                verified.add(cron_lock(line, app, paths))
+        except (KeyError, ValueError, UnicodeError, BackupError):
+            raise BackupError("job-locks-unverified") from None
+    return verified
 
 
 def cleanup(state, journal):

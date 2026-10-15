@@ -7,7 +7,7 @@ import sys
 import time
 
 from . import __version__
-from .artifacts import stream
+from .artifacts import journal as artifact_journal, stream
 from .common import BackupError, State, atomic_json
 from .config import DEFAULTS, bridge, load, normalize, redact, validate
 from .engine import capture, export, plan, verify
@@ -15,7 +15,7 @@ from .maintenance import recover, schedule_admission
 from .presentation import overview
 from .requests import cancel, create, list_requests, tick, worker
 from .process import safe_environment
-from .storage import clean_environment, delete_plan, delete_run, deliver, destination_test, retention
+from .storage import clean_environment, delete_plan, delete_run, deliver, destination_test, retention, retrieve, retrieve_plan
 
 
 def stdin_json():
@@ -60,6 +60,10 @@ def parser():
     sub = commands.add_parser("delete", help="Preview, or with --execute delete, one backup's owned copies")
     sub.add_argument("run_id")
     sub.add_argument("--execute", action="store_true")
+    sub.add_argument("--location", choices=("local", "s3", "all"), default="all")
+    sub = commands.add_parser("retrieve", help="Prepare an S3 backup for local download; --execute publishes the verified copy")
+    sub.add_argument("run_id")
+    sub.add_argument("--execute", action="store_true")
     sub = commands.add_parser("deliver")
     sub.add_argument("run_id")
     sub = commands.add_parser("retention")
@@ -68,7 +72,7 @@ def parser():
     sub = commands.add_parser("requests")
     sub.add_argument("verb", choices=("list", "cancel", "create"))
     sub.add_argument("request_id", nargs="?")
-    sub.add_argument("--action", choices=("run", "verify", "deliver", "retention", "destination-test", "delete"), default="run")
+    sub.add_argument("--action", choices=("run", "verify", "deliver", "retrieve", "retention", "destination-test", "delete"), default="run")
     sub = commands.add_parser("recover")
     sub.add_argument("verb", nargs="?", choices=("acknowledge",))
     sub.add_argument("--auto", action="store_true")
@@ -108,11 +112,21 @@ def set_config(args, state, changes):
         probe_authorization(probe_credentials, envelope["framework"].get("app_url", ""))
     state.apply_policy(envelope["settings"])
     schedule_admission(state, envelope)
-    with state.lock("config.lock"):
+    with state.lock("config.lock"), state.lock("tick.lock", timeout=10):
+        # Re-read after acquiring the scheduler lock. A previously read envelope
+        # must never reset a schedule epoch saved by another administrator.
+        envelope = bridge(args)
+        envelope["settings"] = {**DEFAULTS, **envelope.get("settings", {}), **settings}
+        normalize(envelope["settings"])
+        validate(envelope)
+        state.apply_policy(envelope["settings"])
+        schedule_admission(state, envelope)
+        if probe_credentials is not None and probe_credentials != {"clear": True}:
+            probe_authorization(probe_credentials, envelope["framework"].get("app_url", ""))
         if settings:
             values = {key: json.dumps(value) if isinstance(value, list) else value for key, value in settings.items()}
             try:
-                result = subprocess.run([args.php, str(state.app / "artisan"), "backups:config-set"],
+                result = subprocess.run([args.php, str(state.app / "artisan"), "backups:config-set", "--defer-init"],
                     input=json.dumps(values).encode(), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                     close_fds=True, timeout=30, env=safe_environment())
                 if result.returncode:
@@ -123,7 +137,11 @@ def set_config(args, state, changes):
             bridge(args, "credentials-write", credentials)
         if probe_credentials is not None:
             bridge(args, "maintenance-probe-credentials-write", probe_credentials)
-        state.apply_policy(envelope["settings"], write=True)
+        persisted = load(args)
+        state.apply_policy(persisted["settings"], write=True)
+        if settings:
+            from .requests import _sync_schedule
+            _sync_schedule(state, persisted["settings"], time.time())
     return {"updated": True, "credentials_updated": credentials is not None, "maintenance_probe_credentials_updated": probe_credentials is not None}
 
 
@@ -145,6 +163,8 @@ def dispatch(args):
                   extra_docroots=preliminary["settings"]["extra_docroots"] if preliminary else None)
     if command == "init":
         state.apply_policy(preliminary["settings"], write=True)
+        from .requests import sync_schedule
+        sync_schedule(state, preliminary["settings"], settings_loader=lambda: load(args)["settings"])
         return {"initialized": True, "installation_uuid": state.uuid}
     if command == "overview":
         envelope, error = None, None
@@ -172,12 +192,14 @@ def dispatch(args):
                 "unresolved": [item["run_id"] for item in journals if not item.get("service_recovered") and not item.get("recovery_acknowledged")],
                 "maintenance": (state.app / "storage/framework/down").exists(), "requests": list_requests(state)}
     if command == "verify":
+        item = artifact_journal(state, args.run_id)
+        envelope = load(args) if not item.get("local_complete") and item.get("remote_delivered") else None
         if args.record:
             if not state.initialized:
                 raise BackupError("installation-not-initialized")
             with state.lock():
-                return verify(state, args.run_id, args.show, record=True)
-        return verify(state, args.run_id, args.show)
+                return verify(state, args.run_id, args.show, record=True, envelope=envelope)
+        return verify(state, args.run_id, args.show, envelope=envelope)
     if command == "export":
         return export(state, args.run_id, args.output)
     if command == "recover":
@@ -245,8 +267,10 @@ def dispatch(args):
         return retention(state, envelope, args.verb == "apply")
     if command == "delete":
         if not args.execute:
-            return delete_plan(state, envelope, args.run_id)
-        return delete_run(state, envelope, args.run_id)
+            return delete_plan(state, envelope, args.run_id, location=args.location)
+        return delete_run(state, envelope, args.run_id, location=args.location)
+    if command == "retrieve":
+        return retrieve(state, envelope, args.run_id) if args.execute else retrieve_plan(state, envelope, args.run_id)
     if command == "destination-test":
         with state.lock():
             return destination_test(state, envelope)
@@ -258,7 +282,7 @@ def dispatch(args):
         # sys.argv[0] is a release wrapper, preserving its isolated runtime paths.
         prefix = [envelope["tools"].get("python", sys.executable), "-I", str(pathlib.Path(sys.argv[0]).resolve()),
                   "--app", args.app, "--private-root", args.private_root, "--bridge", args.bridge, "--php", args.php]
-        return tick(state, envelope, prefix)
+        return tick(state, envelope, prefix, envelope_loader=lambda: load(args))
     raise BackupError("command-invalid")
 
 

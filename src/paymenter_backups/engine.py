@@ -9,6 +9,7 @@ import pathlib
 import shutil
 import shlex
 import signal
+import stat
 import tarfile
 import time
 import uuid
@@ -30,11 +31,30 @@ def usage(path):
     return total
 
 
+def storage_usage(state, settings, output_root=None):
+    """Count all journaled private artifact directories across setting changes."""
+    directories = [state.root]
+    if settings.get("local_path"):
+        directories.append(pathlib.Path(settings["local_path"]).resolve())
+    if output_root:
+        directories.append(pathlib.Path(output_root).resolve())
+    for item in state.journals():
+        if not item.get("archive_path"):
+            continue
+        try:
+            directories.append(artifacts.locations(state, item)[0])
+        except BackupError:
+            continue
+    roots = []
+    for directory in sorted(set(directories), key=lambda value: len(value.parts)):
+        if not any(directory == root or root in directory.parents for root in roots):
+            roots.append(directory)
+    return sum(usage(directory) for directory in roots if directory.exists())
+
+
 def space(state, settings):
-    used = usage(state.root)
+    used = storage_usage(state, settings)
     local = pathlib.Path(settings["local_path"]).resolve() if settings.get("local_path") else state.root
-    if local != state.root and state.root not in local.parents and local.exists():
-        used += usage(local)
     if used >= settings["local_byte_budget"]:
         raise BackupError("local-byte-budget-exceeded")
     if shutil.disk_usage(state.root).free < settings["minimum_free_bytes"]:
@@ -44,9 +64,7 @@ def space(state, settings):
 
 
 def output_limit(state, settings, output_root=None):
-    used = usage(state.root)
-    if output_root and output_root != state.root and state.root not in output_root.parents:
-        used += usage(output_root)
+    used = storage_usage(state, settings, output_root)
     reserve = settings["minimum_free_bytes"]
     available = min(settings["local_byte_budget"] - used,
                     shutil.disk_usage(state.root).free - reserve)
@@ -59,7 +77,7 @@ def output_limit(state, settings, output_root=None):
 
 def destination(state, envelope):
     value = envelope["settings"].get("local_path")
-    path = pathlib.Path(value).absolute() if value else state.root / "artifacts"
+    path = pathlib.Path(value).absolute() if value else state.default_destination()
     if path.is_symlink():
         raise BackupError("destination-unsafe")
     path = path.resolve()
@@ -84,6 +102,13 @@ def plan(state, envelope):
     if not state.initialized:
         errors.append("installation-not-initialized")
     if settings["mode"] == "full-quiesced":
+        try:
+            from .maintenance import probe_authorization, web_origin
+            web_origin(envelope.get("framework", {}).get("app_url", ""), allow_http=True)
+            if envelope.get("maintenance_probe_credentials"):
+                probe_authorization(envelope["maintenance_probe_credentials"], envelope.get("framework", {}).get("app_url", ""))
+        except BackupError as error:
+            errors.append(error.code)
         try:
             billing_admission(state, envelope)
             schedule_admission(state, envelope)
@@ -168,6 +193,49 @@ def interrupted(signum, _):
     raise BackupError("capture-interrupted")
 
 
+def cleanup_failed_work(state):
+    """Reclaim recorded capture work after service recovery and worker death."""
+    for item in state.journals():
+        if (item.get("local_complete") or item.get("capture_complete") or item.get("remote_delivered") or item.get("retained_deleted")
+                or item.get("phase") == "complete" or (item.get("failed_work_removed_at") and not item.get("cleanup_error"))
+                or not (item.get("service_recovered") or item.get("recovery_acknowledged"))):
+            continue
+        recorded = item.get("process")
+        if recorded and process_identity(recorded.get("pid")) == recorded:
+            continue
+        directory = state.run_path(item["run_id"])
+        payload = directory / "payload"
+        try:
+            if payload.exists() or payload.is_symlink():
+                info = payload.lstat()
+                if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077:
+                    raise BackupError("failed-work-cleanup-failed")
+                shutil.rmtree(payload)
+            value = item.get("output_directory")
+            if value:
+                output = pathlib.Path(value)
+                if not output.is_absolute() or output.resolve() != output or output == state.app or state.app in output.parents:
+                    raise BackupError("failed-work-cleanup-failed")
+                state.guard_location(output, "failed-work-cleanup-failed")
+                info = output.lstat()
+                if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077:
+                    raise BackupError("failed-work-cleanup-failed")
+                name = "." + item["run_id"] + ".tar.gz.partial"
+                partial = output / name
+                if partial.exists() or partial.is_symlink():
+                    checked = partial.lstat()
+                    if not artifacts.owned_file(checked):
+                        raise BackupError("failed-work-cleanup-failed")
+                    location = artifacts.Location(output, partial, partial, (info.st_dev, info.st_ino))
+                    artifacts.remove_owned(location, [name], {name: artifacts.identity(checked)})
+            item.pop("cleanup_error", None)
+            item["failed_work_removed_at"] = time.time()
+            state.save(item)
+        except (OSError, BackupError):
+            item["cleanup_error"] = "failed-work-cleanup-failed"
+            state.save(item)
+
+
 def capture(state, envelope, scheduled=False, request_id=None):
     settings = envelope["settings"]
     with state.lock():
@@ -175,7 +243,15 @@ def capture(state, envelope, scheduled=False, request_id=None):
         if proposed["admission_errors"]:
             raise BackupError(proposed["admission_errors"][0])
         state.apply_policy(settings, write=True)
-        space(state, settings)
+        cleanup_failed_work(state)
+        try:
+            space(state, settings)
+        except BackupError as error:
+            if error.code != "local-byte-budget-exceeded" or not settings.get("automatic_retention"):
+                raise
+            from .storage import retention
+            retention(state, envelope, execute=True, locked=True, local_only=True)
+            space(state, settings)
         output = destination(state, envelope)
         if envelope["framework"].get("maintenance_driver") != "file" and settings["mode"] == "full-quiesced":
             raise BackupError("maintenance-driver-unsupported")
@@ -205,6 +281,7 @@ def capture(state, envelope, scheduled=False, request_id=None):
                    "process": process_identity(os.getpid()), "boot_id": boot_id(),
                    "service_recovered": not full, "local_complete": False,
                    "remote_delivered": False, "request_id": request_id}
+        journal["output_directory"] = str(output)
         state.save(journal)
         def register(group):
             journal["groups"].append(group)
@@ -217,6 +294,7 @@ def capture(state, envelope, scheduled=False, request_id=None):
             return duration
         old_signals = {sig: signal.signal(sig, interrupted) for sig in (signal.SIGTERM, signal.SIGINT)}
         defaults = directory / "client.cnf"
+        temporary = None
         try:
             defaults_file(defaults, envelope["database"])
             context = coordination(state, envelope) if full else contextlib.nullcontext()
@@ -288,6 +366,7 @@ def capture(state, envelope, scheduled=False, request_id=None):
             os.replace(temporary, complete)
             atomic_json(output / (run_id + ".manifest.json"), manifest)
             journal.update({"phase": "complete", "local_complete": True,
+                            "capture_complete": True, "manifest": manifest,
                             "archive_path": str(complete), "manifest_path": str(output / (run_id + ".manifest.json"))})
             # The bytes were fully checked above while this run lock was held.
             # Record the published descriptor identity so download can rely on it.
@@ -307,6 +386,16 @@ def capture(state, envelope, scheduled=False, request_id=None):
                     cleanup(state, journal)
                 except (BackupError, OSError) as recovery_error:
                     journal["recovery_error"] = recovery_error.code if isinstance(recovery_error, BackupError) else "recovery-failed"
+            try:
+                if payload.exists() and not payload.is_symlink():
+                    shutil.rmtree(payload)
+                if temporary is not None and temporary.exists():
+                    info = temporary.lstat()
+                    if artifacts.owned_file(info):
+                        location = artifacts.Location(output, temporary, temporary, (output.stat().st_dev, output.stat().st_ino))
+                        artifacts.remove_owned(location, [temporary.name], {temporary.name: artifacts.identity(info)})
+            except (OSError, BackupError):
+                journal["cleanup_error"] = "failed-work-cleanup-failed"
             state.save(journal)
             if isinstance(error, BackupError):
                 raise
@@ -317,38 +406,57 @@ def capture(state, envelope, scheduled=False, request_id=None):
 
 
 def check_archive(path, manifest):
-    """Check gzip trailer, layout and payload digests; path may be an opener."""
+    """One sequential gzip/tar pass checks payloads and drains the gzip trailer."""
     opener = path if callable(path) else (lambda: open(path, "rb"))
     expected = manifest["payloads"]
     seen = set()
+    limit = sum(value["size"] for value in expected.values()) + 2 * 1024**2
+
+    class BoundedPayloadReader:
+        def __init__(self, source):
+            self.source = source
+            self.size = 0
+
+        def read(self, size=-1):
+            value = self.source.read(size)
+            self.size += len(value)
+            if self.size > limit:
+                raise BackupError("archive-layout-invalid")
+            return value
+
     try:
-        # Tar EOF precedes gzip footer; consume all compressed bytes to validate
-        # CRC/length and detect truncated or corrupted trailer data.
-        with opener() as raw, gzip.GzipFile(fileobj=raw, mode="rb") as stream:
-            for _ in iter(lambda: stream.read(1024 * 1024), b""):
-                pass
-        with opener() as raw, tarfile.open(fileobj=raw, mode="r:gz") as archive:
-            for member in archive:
-                name = member.name.removeprefix("./")
-                if member.isdir() and name in ("", "."):
-                    continue
-                if name == "manifest.json" and member.isfile():
-                    embedded = json.load(archive.extractfile(member))
-                    if embedded != {key: value for key, value in manifest.items() if key != "archive"}:
-                        raise BackupError("archive-manifest-mismatch")
+        with opener() as raw, gzip.GzipFile(fileobj=raw, mode="rb") as compressed:
+            payload = BoundedPayloadReader(compressed)
+            with tarfile.open(fileobj=payload, mode="r|") as archive:
+                for member in archive:
+                    name = member.name.removeprefix("./")
+                    if member.isdir() and name in ("", "."):
+                        continue
+                    if name == "manifest.json" and member.isfile() and name not in seen:
+                        if member.size > artifacts.MANIFEST_LIMIT:
+                            raise BackupError("archive-manifest-mismatch")
+                        embedded = json.load(archive.extractfile(member))
+                        if embedded != {key: value for key, value in manifest.items() if key != "archive"}:
+                            raise BackupError("archive-manifest-mismatch")
+                        seen.add(name)
+                        continue
+                    if name not in expected or not member.isfile() or name in seen:
+                        raise BackupError("archive-layout-invalid")
+                    if member.size != expected[name]["size"]:
+                        raise BackupError("archive-payload-mismatch")
+                    hasher = hashlib.sha256()
+                    size = 0
+                    with archive.extractfile(member) as stream:
+                        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                            hasher.update(chunk)
+                            size += len(chunk)
+                    if hasher.hexdigest() != expected[name]["sha256"] or size != expected[name]["size"]:
+                        raise BackupError("archive-payload-mismatch")
                     seen.add(name)
-                    continue
-                if name not in expected or not member.isfile() or name in seen:
-                    raise BackupError("archive-layout-invalid")
-                hasher = hashlib.sha256()
-                size = 0
-                with archive.extractfile(member) as stream:
-                    for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-                        hasher.update(chunk)
-                        size += len(chunk)
-                if hasher.hexdigest() != expected[name]["sha256"] or size != expected[name]["size"]:
-                    raise BackupError("archive-payload-mismatch")
-                seen.add(name)
+            # Tar's EOF may precede the gzip footer. Drain through the same
+            # bounded decompressor, preserving CRC/truncation proof in one GET.
+            for _ in iter(lambda: payload.read(1024 * 1024), b""):
+                pass
         if seen != set(expected) | {"manifest.json"}:
             raise BackupError("archive-layout-invalid")
     except (OSError, EOFError, ValueError, tarfile.TarError):
@@ -356,8 +464,15 @@ def check_archive(path, manifest):
     return True
 
 
-def verify(state, run_id, show=False, record=False):
+def verify(state, run_id, show=False, record=False, envelope=None):
     """Fully check one owned archive. record=True requires the caller's run lock."""
+    journal = artifacts.journal(state, run_id)
+    if not journal.get("local_complete") and journal.get("remote_delivered") and not artifacts.deleted(journal):
+        if envelope is None:
+            raise BackupError("remote-configuration-required")
+        from .storage import checked_remote
+        with checked_remote(state, envelope, journal, record=record) as (_path, manifest):
+            return manifest if show else {"run_id": run_id, "verified": True, "location": "s3", "sha256": manifest["archive"]["sha256"]}
     try:
         with artifacts.open_archive(state, run_id) as artifact:
             manifest = artifact.manifest
