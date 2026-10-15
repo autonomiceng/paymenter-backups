@@ -139,7 +139,7 @@ class S3ProtocolTests(unittest.TestCase):
         self.addCleanup(fixture.doCleanups)
         fixture.settings["mode"] = "database-online"
         journal = capture(fixture.state, fixture.envelope)
-        fixture.settings.update(destination="s3", s3_bucket="fixture", s3_prefix="owned")
+        fixture.settings.update(destination="s3", s3_bucket="fixture", s3_prefix="owned", s3_encryption=False, plaintext_offsite_acknowledged=True)
         return fixture, journal
 
     def test_delivery_manifest_last_and_idempotency_repairs_missing_manifest(self):
@@ -270,7 +270,10 @@ class S3ProtocolTests(unittest.TestCase):
     def test_destination_probe_scoped_and_cleanup(self):
         class State:
             uuid = "fixture-installation"
-        envelope = {"settings": dict(DEFAULTS, destination="s3", s3_bucket="fixture", s3_prefix="owned")}
+            def lock(self):
+                import contextlib
+                return contextlib.nullcontext()
+        envelope = {"settings": dict(DEFAULTS, destination="s3", s3_bucket="fixture", s3_prefix="owned", s3_encryption=False, plaintext_offsite_acknowledged=True)}
         self.objects["/fixture/unrelated/customer.txt"] = b"preserve"
         with patch("paymenter_backups.storage.client", return_value=self.s3):
             self.assertTrue(destination_test(State(), envelope)["verified"])
