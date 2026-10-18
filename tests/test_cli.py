@@ -15,6 +15,13 @@ from paymenter_backups.cli import dispatch, parser
 from paymenter_backups.process import group_members
 
 
+def process_cmdline(pid):
+    try:
+        return pathlib.Path(f"/proc/{pid}/cmdline").read_text(errors="replace")
+    except (FileNotFoundError, ProcessLookupError):
+        return ""
+
+
 class CLITests(unittest.TestCase):
     def setUp(self):
         self.fixture = test_engine.Fixture("test_online_excludes_app_and_maintenance")
@@ -57,7 +64,7 @@ class CLITests(unittest.TestCase):
         journal = None
         while time.time() < deadline:
             journals = fixture.state.journals()
-            if journals and journals[0].get("owned_markers") and journals[0]["phase"] == "capturing" and any("slowdump" in pathlib.Path(f"/proc/{group['pid']}/cmdline").read_text(errors="replace") for group in journals[0]["groups"] if pathlib.Path(f"/proc/{group['pid']}/cmdline").exists()):
+            if journals and journals[0].get("owned_markers") and journals[0]["phase"] == "capturing" and any("slowdump" in process_cmdline(group["pid"]) for group in journals[0]["groups"]):
                 journal = journals[0]
                 break
             time.sleep(.02)
