@@ -69,6 +69,17 @@ class PointerTests(PrivateFixture):
                     storage.publish_pointer(self.state, self.store, self.item('older'))
                 self.assertEqual(json.loads(self.store.objects[pointer])['run_id'], 'older')
 
+    def test_undelivered_flag_without_removal_evidence_keeps_newer_pointer(self):
+        self.backup('older', created_at=1, deliver=True)
+        self.backup('newer', created_at=2, deliver=True)
+        pointer = ('fixture', storage.prefix(self.state, self.envelope) + 'lastmanifest.json')
+        before = self.store.objects[pointer]
+        self.state.save(dict(self.item('newer'), remote_delivered=False))
+        with self.state.lock():
+            storage.publish_pointer(self.state, self.store, self.item('older'))
+        self.assertEqual(self.store.objects[pointer], before)
+        self.assertEqual(json.loads(before)['run_id'], 'newer')
+
 
 class DamagedRetentionTests(PrivateFixture):
     def check_damage(self, damage, execute, version=2):
