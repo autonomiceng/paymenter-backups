@@ -476,14 +476,26 @@ def main():
                     raise RuntimeError('native v2 CLI schedule write did not persist for ' + kind)
             results['legacy_v1_configuration'] = legacy_configuration_fixture(work, app, args.php, checker)
             execute(cli + ['plan'])
-            execute([args.php, checker, app, 'billing', time.strftime('%H:%M', time.gmtime())])
-            current_guard = json.loads(execute([args.php, 'artisan', 'backups:guard'], cwd=app))
-            minute_start = int(time.time()) // 60 * 60
-            if minute_start not in current_guard['instants']:
-                raise RuntimeError('billing guard omits current minute')
-            current_plan = json.loads(execute(cli + ['plan']))
-            if 'billing-window-protected' not in current_plan['admission_errors']:
-                raise RuntimeError('current billing minute admits full hold')
+            # Use one UTC minute throughout; retry if slow commands cross it.
+            for _ in range(3):
+                billing_now = time.time()
+                seconds_left = 60 - billing_now % 60
+                if seconds_left < 15:
+                    time.sleep(seconds_left)
+                    billing_now = time.time()
+                minute_start = int(billing_now) // 60 * 60
+                execute([args.php, checker, app, 'billing', time.strftime('%H:%M', time.gmtime(minute_start))])
+                current_guard = json.loads(execute([args.php, 'artisan', 'backups:guard'], cwd=app))
+                current_plan = json.loads(execute(cli + ['plan']))
+                if time.time() >= minute_start + 60:
+                    continue
+                if minute_start not in current_guard['instants']:
+                    raise RuntimeError('billing guard omits current minute')
+                if 'billing-window-protected' not in current_plan['admission_errors']:
+                    raise RuntimeError('current billing minute admits full hold')
+                break
+            else:
+                raise RuntimeError('billing minute check repeatedly crossed minute boundary')
             # Keep the disposable app's real native billing time away from
             # this drill. The current-minute refusal above stays exercised.
             fixture_billing_time = time.strftime('%H:%M', time.gmtime(time.time() + 12 * 3600))
