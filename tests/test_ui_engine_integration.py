@@ -22,7 +22,11 @@ namespace Filament\Pages {
     }
 }
 namespace Filament\Tables\Contracts { interface HasTable {} }
-namespace Filament\Tables\Concerns { trait InteractsWithTable {} }
+namespace Filament\Tables\Concerns {
+    trait InteractsWithTable {
+        public function table(\Filament\Tables\Table $table): \Filament\Tables\Table { return $table; }
+    }
+}
 namespace Filament\Actions {
     class Action {
         public array $callbacks = [];
