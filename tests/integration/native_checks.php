@@ -62,8 +62,12 @@ if ($mode === 'upload') {
     $digest = fn () => is_file($root . "/credentials.json") ? hash_file("sha256", $root . "/credentials.json") : null;
     $secretFields = fn ($livewire) => array_filter([...array_values($livewire->get('s3Keys') ?? []), ...array_values($livewire->get('siteAccess') ?? []), $livewire->get('encryptionInput.passphrase')], fn ($value) => $value !== null && $value !== '');
 
-    $save = function (array $updates) use ($page) {
+    $save = function (array $updates) use ($page, $record) {
         $livewire = Livewire\Livewire::test($page);
+        $fullSchedule = $updates['settings.full_schedule'] ?? $record->settings()->where('key', 'full_schedule')->value('value') ?? 'off';
+        if ($fullSchedule !== 'off') {
+            check(Illuminate\Support\Facades\Artisan::call('backups:guard') === 0, 'billing guard refresh failed');
+        }
         $livewire->update(calls: [['method' => 'saveSettings', 'params' => []]], updates: $updates);
         return $livewire;
     };
@@ -122,7 +126,6 @@ if ($mode === 'upload') {
     $neither = $save(['settings.keep_local' => false, 'settings.upload_s3' => false]);
     check($neither->instance()->getErrorBag()->has('settings.keep_local') && $nativeRows() === $before, 'storage with no place accepted');
     // Engine-only refusal: a full backup over Paymenter's observed billing minute.
-    check(Illuminate\Support\Facades\Artisan::call('backups:guard') === 0, 'billing guard refresh failed');
     $overlap = $save(['settings.full_schedule' => 'daily', 'settings.full_time' => '23:59']);
     check($overlap->instance()->getErrorBag()->has('settings.full_time') && $nativeRows() === $before, 'engine schedule refusal not mapped before persistence');
     $notices();

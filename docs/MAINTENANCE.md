@@ -45,6 +45,11 @@ secret handling, encrypted transfer, recovery verification, preserved `APP_KEY`,
 Passport keys, migrations, and login. It closes its isolated processes afterwards.
 Allow enough disk for both applications, backup payloads, and private state.
 `--skip-restore` is a development shortcut and does not complete release checks.
+The fixture refreshes the native billing guard immediately before configuration
+and schedule writes and full capture. To check independence from earlier slow steps,
+repeat the full command with `--slow-step-delay 181`: it pauses before the schedule
+drill, reports the earlier guard's age, then refreshes before each write. The
+production guard's default 180-second maximum age is unchanged.
 
 For browser testing, start a disposable fixture:
 

@@ -39,6 +39,14 @@ def execute(command, cwd=None, input=None, env=None, timeout=180):
     return result.stdout
 
 
+def guarded_write(cli, arguments, **kwargs):
+    """Refresh observed native billing state immediately before a fixture write."""
+    app = cli[cli.index('--app') + 1]
+    php = cli[cli.index('--php') + 1]
+    execute([php, 'artisan', 'backups:guard'], cwd=app)
+    return execute(cli + arguments, **kwargs)
+
+
 def port():
     with socket.socket() as sock:
         sock.bind(('127.0.0.1', 0))
@@ -180,9 +188,9 @@ def admin_history(args, app, checker, cli, private, run, native_url, work):
     survivor_digest = hashlib.sha256(survivor_archive.read_bytes()).hexdigest()
     current = json.loads(execute(cli + ['config', 'show']))['settings']
     keep = {key: current[key] for key in ('retention_keep_full', 'retention_keep_database')}
-    execute(cli + ['config', 'set'], input=json.dumps({'settings': {'retention_keep_full': 1, 'retention_keep_database': 1}}).encode())
+    guarded_write(cli, ['config', 'set'], input=json.dumps({'settings': {'retention_keep_full': 1, 'retention_keep_database': 1}}).encode())
     execute(ui + ['retention', 'two verified database copies, keep one'])
-    execute(cli + ['config', 'set'], input=json.dumps({'settings': keep}).encode())
+    guarded_write(cli, ['config', 'set'], input=json.dumps({'settings': keep}).encode())
     execute(ui + ['delete', online['run_id']])
     promote_and_run(cli, private, 'delete')
     journal = json.loads((private / 'runs' / online['run_id'] / 'journal.json').read_text())
@@ -203,9 +211,9 @@ def legacy_configuration_check(cli):
     current = json.loads(execute(cli + ['config', 'show']))['settings']
     if current['settings_version'] != 1:
         raise RuntimeError('legacy compatibility requires an isolated v1 installation')
-    execute(cli + ['config', 'set'], input=json.dumps({'settings': {'enabled': False, 'retention_keep': 3}}).encode())
-    execute(cli + ['schedule', 'set'], input=json.dumps({'schedule_frequency': 'weekly', 'schedule_time': '02:30', 'schedule_weekdays': [0, 2], 'schedule_timezone': 'UTC'}).encode())
-    execute(cli + ['schedule', 'disable'])
+    guarded_write(cli, ['config', 'set'], input=json.dumps({'settings': {'enabled': False, 'retention_keep': 3}}).encode())
+    guarded_write(cli, ['schedule', 'set'], input=json.dumps({'schedule_frequency': 'weekly', 'schedule_time': '02:30', 'schedule_weekdays': [0, 2], 'schedule_timezone': 'UTC'}).encode())
+    guarded_write(cli, ['schedule', 'disable'])
     written = json.loads(execute(cli + ['schedule', 'show']))
     legacy = json.loads(execute(cli + ['config', 'show']))['settings']
     if legacy['settings_version'] != 1 or legacy['retention_keep'] != 3 or written['enabled'] or written['schedule_weekdays'] != [0, 2] or written['schedule_time'] != '02:30':
@@ -251,7 +259,11 @@ def main():
     parser.add_argument('--gpg-writer', default='/usr/bin/gpg')
     parser.add_argument('--gpg-reader', default='/usr/bin/gpg')
     parser.add_argument('--skip-restore', action='store_true', help='Adapter development only; does not complete release checks')
+    parser.add_argument('--slow-step-delay', type=int, default=0, metavar='SECONDS',
+                        help='Pause before the schedule drill to exercise expiry of the earlier billing guard')
     args = parser.parse_args()
+    if args.slow_step_delay < 0:
+        parser.error('--slow-step-delay must be nonnegative')
     workbase = ROOT / '.native-work'
     workbase.mkdir(exist_ok=True)
     work = pathlib.Path(tempfile.mkdtemp(prefix='native-integration-', dir=workbase))
@@ -370,7 +382,7 @@ def main():
             execute([args.php, checker, app, 'app-url', probe_url])
             probe_creds = {'origin': 'https://fixture.example.invalid:443', 'username': 'CLI-PROBE-CREDENTIAL-CANARY', 'password': 'CLI-PASSWORD-CREDENTIAL-CANARY'}
             try:
-                public = execute(cli + ['config', 'set'], input=json.dumps({'maintenance_probe_credentials': probe_creds}).encode())
+                public = guarded_write(cli, ['config', 'set'], input=json.dumps({'maintenance_probe_credentials': probe_creds}).encode())
                 if b'CREDENTIAL-CANARY' in public:
                     raise RuntimeError('CLI credential mutation leaked input')
                 # Native previous-key read, then namespace write, must migrate
@@ -381,7 +393,7 @@ def main():
                 rotated_key = 'base64:' + base64.b64encode(os.urandom(32)).decode()
                 (app / '.env').write_text(original_env.replace('APP_KEY=' + app_key + '\n', 'APP_KEY=' + rotated_key + '\n') + 'APP_PREVIOUS_KEYS=' + app_key + '\n')
                 try:
-                    execute(cli + ['config', 'set'], input=json.dumps({'maintenance_probe_credentials': probe_creds}).encode())
+                    guarded_write(cli, ['config', 'set'], input=json.dumps({'maintenance_probe_credentials': probe_creds}).encode())
                     rotated = json.loads(execute([args.php, bridge, 'read', '--app', app, '--private-root', private]))
                     stored = json.loads((private / 'credentials.json').read_text())
                     expected_key_fp = hmac.new(base64.b64decode(rotated_key[7:]), ('paymenter-backups-key-v1:' + stored['installation_uuid']).encode(), hashlib.sha256).hexdigest()
@@ -420,12 +432,12 @@ def main():
                 public = execute(cli + ['config', 'show'])
                 if b'CREDENTIAL-CANARY' in public:
                     raise RuntimeError('CLI credential display leaked input')
-                execute(cli + ['config', 'set'], input=json.dumps({'maintenance_probe_credentials': {'clear': True}}).encode())
+                guarded_write(cli, ['config', 'set'], input=json.dumps({'maintenance_probe_credentials': {'clear': True}}).encode())
                 cleared = json.loads(execute([args.php, bridge, 'read', '--app', app, '--private-root', private]))
                 if cleared['credentials'] != concurrent_s3 or cleared['maintenance_probe_credentials']:
                     raise RuntimeError('CLI clear lost S3 credentials')
                 # Check legacy S3 reads and whole-payload writes with a probe namespace.
-                execute(cli + ['config', 'set'], input=json.dumps({'maintenance_probe_credentials': probe_creds}).encode())
+                guarded_write(cli, ['config', 'set'], input=json.dumps({'maintenance_probe_credentials': probe_creds}).encode())
                 legacy_dir = work / 'legacy-s3-credentials-bridge'
                 legacy_dir.mkdir(mode=0o700)
                 shutil.copy2(ROOT / 'tests/integration/fixtures/legacy-s3-credentials-bridge.php', legacy_dir / 'bridge.php')
@@ -447,7 +459,7 @@ def main():
                 execute([args.php, checker, app, 'app-url', native_url])
             execute(cli + ['config', 'show'])
             execute(cli + ['schedule', 'show'])
-            execute(cli + ['config', 'set'], input=json.dumps({'settings': {'retention_keep_full': 5, 'retention_keep_database': 25}}).encode())
+            guarded_write(cli, ['config', 'set'], input=json.dumps({'settings': {'retention_keep_full': 5, 'retention_keep_database': 25}}).encode())
             # This is the installed CLI's real config.lock/tick.lock path. The
             # audited Artisan write must not recursively run init under tick.lock.
             persisted_config = json.loads(execute(cli + ['config', 'show']))['settings']
@@ -459,6 +471,7 @@ def main():
             # Direct Artisan use keeps its normal init/update behavior.
             advisory_path = private / 'configuration-advisory.json'
             advisory_before = advisory_path.stat()
+            execute([args.php, 'artisan', 'backups:guard'], cwd=app)
             execute([args.php, 'artisan', 'backups:config-set'], cwd=app, input=json.dumps({'retention_keep_full': '5', 'retention_keep_database': '25'}).encode())
             advisory_after = advisory_path.stat()
             if (advisory_before.st_ino, advisory_before.st_mtime_ns) == (advisory_after.st_ino, advisory_after.st_mtime_ns):
@@ -467,10 +480,16 @@ def main():
             if not advisory.get('valid'):
                 raise RuntimeError('direct Artisan config-set no longer initializes and validates')
             results['direct_artisan_config_set_initializes'] = True
+            if args.slow_step_delay:
+                print('Fixture slow step: delaying schedule writes for ' + str(args.slow_step_delay) + ' seconds', file=sys.stderr, flush=True)
+                time.sleep(args.slow_step_delay)
+                earlier_guard = json.loads((private / 'billing-guard.json').read_text())
+                print('Fixture slow step: earlier billing guard age is ' + str(round(time.time() - earlier_guard['generated_at'], 1)) +
+                      ' seconds (maximum ' + str(persisted_config['billing_guard_max_age']) + ')', file=sys.stderr, flush=True)
             for kind in ('full', 'database'):
-                execute(cli + ['schedule', 'set', '--kind', kind], input=json.dumps({'frequency': 'weekly', 'time': '02:30', 'weekdays': [0, 2], 'timezone': 'UTC'}).encode())
-                execute(cli + ['schedule', 'enable', '--kind', kind])
-                execute(cli + ['schedule', 'disable', '--kind', kind])
+                guarded_write(cli, ['schedule', 'set', '--kind', kind], input=json.dumps({'frequency': 'weekly', 'time': '02:30', 'weekdays': [0, 2], 'timezone': 'UTC'}).encode())
+                guarded_write(cli, ['schedule', 'enable', '--kind', kind])
+                guarded_write(cli, ['schedule', 'disable', '--kind', kind])
                 written = json.loads(execute(cli + ['schedule', 'show', '--kind', kind]))['schedules'][kind]
                 if written['schedule'] != 'off' or written['weekdays'] != [0, 2] or written['time'] != '02:30':
                     raise RuntimeError('native v2 CLI schedule write did not persist for ' + kind)
@@ -516,8 +535,8 @@ def main():
             systemctl = fakebin / 'systemctl'
             systemctl.write_text('#!/bin/sh\nprintf \'[]\\n\'\n')
             systemctl.chmod(0o700)
-            execute([args.php, 'artisan', 'backups:config-set'], cwd=app, input=json.dumps({'job_lock_paths': json.dumps([str(lock)])}).encode())
             execute([args.php, 'artisan', 'backups:guard'], cwd=app)
+            execute([args.php, 'artisan', 'backups:config-set'], cwd=app, input=json.dumps({'job_lock_paths': json.dumps([str(lock)])}).encode())
             # Adapter envelope instrumentation is confined to this fixture. The
             # production bridge has no configurable crontab override.
             fixture_bridge = work / 'fixture-bridge.php'
@@ -541,7 +560,7 @@ def main():
                         output.write(os.urandom(1024**2))
                 large_payload.chmod(0o600)
                 large_payload_sha256 = hashlib.sha256(large_payload.read_bytes()).hexdigest()
-                execute(capture_cli + ['run', '--execute', '--mode', 'full-quiesced'], env=execution_env, timeout=300)
+                guarded_write(capture_cli, ['run', '--execute', '--mode', 'full-quiesced'], env=execution_env, timeout=300)
                 runs = list((private / 'runs').glob('*/journal.json'))
                 journals = [json.loads(path.read_text()) for path in runs]
                 successful = [journal for journal in journals if journal.get('local_complete')]
