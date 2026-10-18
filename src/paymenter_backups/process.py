@@ -94,6 +94,20 @@ def terminate(group, grace=2):
         pass
 
 
+def terminate_child(proc, group):
+    if group['starttime'] != 'unknown':
+        return terminate(group)
+    if proc.returncode is not None or group['pid'] != proc.pid or group['pgid'] != proc.pid:
+        raise BackupError('process-state-uncertain')
+    # This setsid child has not been reaped, so its PID/PGID cannot be reused.
+    # Do not poll/wait before signaling: even a zombie must retain that pin.
+    # Without /proc identity, kill the owned group before reaping its leader.
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+
+
 def run(command, timeout, output=None, input_bytes=None, register=None, budget_check=None, file_limit=None):
     parent = os.getpid()
     stream = open(output, "wb") if output else subprocess.PIPE
@@ -160,7 +174,7 @@ def run(command, timeout, output=None, input_bytes=None, register=None, budget_c
     finally:
         if proc is not None and proc.poll() is None:
             try:
-                terminate(group)
+                terminate_child(proc, group)
             finally:
                 try:
                     proc.wait(timeout=3)
@@ -260,7 +274,7 @@ def hash_stream(command, timeout, register=None):
         try:
             if proc.poll() is None:
                 try:
-                    terminate(group)
+                    terminate_child(proc, group)
                 finally:
                     try:
                         proc.wait(timeout=3)

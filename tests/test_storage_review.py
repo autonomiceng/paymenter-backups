@@ -41,6 +41,34 @@ class PointerTests(PrivateFixture):
         self.assertEqual(json.loads(before)['run_id'], 'newer')
         self.assertTrue(self.item('older')['remote_delivered'])
 
+    def test_retention_repoints_from_damaged_newer_remote(self):
+        self.backup('older', created_at=1, deliver=True)
+        self.backup('newer', created_at=2, deliver=True)
+        remote = self.item('newer')['remote']
+        self.store.objects[('fixture', remote['manifest_key'])] = b'damaged'
+        pointer = ('fixture', storage.prefix(self.state, self.envelope) + 'lastmanifest.json')
+        self.assertEqual(json.loads(self.store.objects[pointer])['run_id'], 'newer')
+        result = storage.retention(self.state, self.envelope, execute=True)
+        self.assertEqual(self.item('newer')['remote_observation']['status'], 'damaged')
+        self.assertIn({'run_id': 'newer', 'location': 's3', 'code': 'remote-copy-damaged'}, result['skipped'])
+        self.assertEqual(json.loads(self.store.objects[pointer])['run_id'], 'older')
+
+    def test_completed_remote_removal_does_not_block_pointer_repair(self):
+        self.backup('older', created_at=1, deliver=True)
+        self.backup('newer', created_at=2, deliver=True)
+        pointer = ('fixture', storage.prefix(self.state, self.envelope) + 'lastmanifest.json')
+        newer = self.item('newer')
+        stale_pointer = self.store.objects[pointer]
+        for flags in ({'remote_observation': {'status': 'none'}},
+                      {'remote_pruned': {'at': 3, 'reason': 'delete'}},
+                      {'retained_deleted': True}):
+            with self.subTest(flags=flags):
+                self.store.objects[pointer] = stale_pointer
+                self.state.save(dict(newer, remote_delivered=False, **flags))
+                with self.state.lock():
+                    storage.publish_pointer(self.state, self.store, self.item('older'))
+                self.assertEqual(json.loads(self.store.objects[pointer])['run_id'], 'older')
+
 
 class DamagedRetentionTests(PrivateFixture):
     def check_damage(self, damage, execute, version=2):

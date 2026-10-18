@@ -500,6 +500,10 @@ group handling. Recovery never removes markers merely because bytes match.
 Streaming dump hashes use the same fallback group registration and successful
 group-closure check as other capture children. A bounded cleanup wait expiring
 does not replace the original child-timeout error.
+If initial start-time inspection fails, immediate cleanup can still kill the
+new session's group while its owned, unreaped `Popen` child pins the PID/PGID.
+It signals before reaping; this ownership proof never applies to persisted
+groups during independent recovery.
 Remove only owned unchanged down first, then bootstrap, and preserve original
 maintenance or operator replacements. Uncertain ownership/process state stays
 visible and closed.
@@ -561,7 +565,9 @@ newest remote run of each kind and keeps that remote copy. Manual deletion
 intents and independent local deletion intents retain their own lifecycle.
 Pointer publication reads the current remote pointer and compares the named
 run's creation time with the candidate under the run lock. It never replaces a
-newer run with an older one, even if local delivery flags are stale. Missing or
+newer usable run with an older one, even if local delivery flags are stale. A
+recorded missing, damaged, deleting or pruned target permits repair to a present
+copy; `remote_delivered=false` alone does not. Missing or
 invalid ownership evidence refuses publication. Every pointer write is read
 back and checked by whole-object SHA256 and size before reporting success.
 
@@ -598,7 +604,7 @@ intent rather than being treated as newly damaged archives.
 Kept S3 copies use cheap presence checks; full archive proofs are reserved for
 deletion targets, required survivors and local-removal delivery checks, cached
 within the held-lock attempt. Lifecycle disappearance repairs the latest-copy
-pointer using an available present copy; a confirmed-missing or deleting run
+pointer using an available present copy; a confirmed-missing, damaged or removed run
 does not block that repair. This pointer is untrusted discovery
 metadata; it never substitutes for full survivor, retrieval or deletion proof.
 Retention reports skipped copies

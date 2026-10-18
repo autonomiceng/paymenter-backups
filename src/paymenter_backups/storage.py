@@ -681,8 +681,9 @@ def publish_pointer(state, s3, item):
             if (previous_remote.get('scope') != remote['scope']
                     or current['manifest_key'] != previous_remote.get('manifest_key')):
                 raise ValueError()
-            gone = ((previous.get('remote_observation') or {}).get('status') == 'missing'
-                    or previous.get('remote_delete_intent'))
+            gone = ((previous.get('remote_observation') or {}).get('status') in ('missing', 'damaged', 'none')
+                    or previous.get('remote_delete_intent') or previous.get('remote_pruned')
+                    or previous.get('retained_deleted'))
             if previous['created_at'] > item['created_at'] and not gone:
                 return
         except (BackupError, KeyError, TypeError, ValueError, OSError):

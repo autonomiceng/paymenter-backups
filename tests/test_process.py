@@ -17,19 +17,65 @@ from paymenter_backups.process import detach, group_members, hash_stream, proces
 
 class ProcessTests(unittest.TestCase):
     def test_hash_stream_registers_and_terminates_fallback_group(self):
-        groups = []
+        self.check_fallback_cleanup(hash_stream)
+
+    def test_run_terminates_fallback_group(self):
+        self.check_fallback_cleanup(run)
+
+    def check_fallback_cleanup(self, runner):
+        for inspection in ('initial', 'unavailable'):
+            with self.subTest(inspection=inspection):
+                children, groups = [], []
+                popen = subprocess.Popen
+                def spawn(*args, **kwargs):
+                    child = popen(*args, **kwargs)
+                    children.append(child)
+                    return child
+                identity = process_identity
+                first = True
+                def inspect(pid):
+                    nonlocal first
+                    if first or inspection == 'unavailable':
+                        first = False
+                        return None
+                    return identity(pid)
+                try:
+                    with patch.object(process.subprocess, 'Popen', side_effect=spawn), \
+                            patch.object(process, 'process_identity', side_effect=inspect):
+                        with self.assertRaisesRegex(BackupError, 'child-timeout'):
+                            runner([sys.executable, '-c', 'import time;time.sleep(30)'], .1,
+                                   register=groups.append)
+                    self.assertEqual(len(groups), 1)
+                    self.assertEqual(groups[0]['starttime'], 'unknown')
+                    self.assertEqual(groups[0]['pid'], groups[0]['pgid'])
+                    self.assertEqual(children[0].returncode, -signal.SIGKILL)
+                    self.assertFalse(group_members(groups[0]))
+                    self.assertTrue(children[0].stdout.closed)
+                finally:
+                    for child in children:
+                        if child.poll() is None:
+                            os.killpg(child.pid, signal.SIGKILL)
+                        child.wait()
+                        child.stdout.close()
+
+    def test_recorded_fallback_group_cannot_authorize_signaling(self):
+        group = {'pid': 123, 'pgid': 123, 'starttime': 'unknown', 'boot_id': process.boot_id()}
         with patch.object(process, 'process_identity', return_value=None), \
-                patch.object(process, 'terminate') as stop:
-            # Reap the real child even though identity discovery is unavailable.
-            def kill(group):
-                os.killpg(group['pgid'], signal.SIGKILL)
-            stop.side_effect = kill
-            with self.assertRaisesRegex(BackupError, 'child-timeout'):
-                hash_stream([sys.executable, '-c', 'import time;time.sleep(30)'], .1, groups.append)
-        self.assertEqual(len(groups), 1)
-        self.assertEqual(groups[0]['starttime'], 'unknown')
-        self.assertEqual(groups[0]['pid'], groups[0]['pgid'])
-        stop.assert_called_once_with(groups[0])
+                patch.object(process, 'group_members', return_value=[group]), \
+                patch.object(process.os, 'killpg') as kill:
+            with self.assertRaisesRegex(BackupError, 'process-state-uncertain'):
+                terminate(group)
+        kill.assert_not_called()
+
+    def test_reaped_child_cannot_authorize_fallback_signaling(self):
+        with subprocess.Popen([sys.executable, '-c', 'pass'], start_new_session=True) as child:
+            child.wait()
+            group = {'pid': child.pid, 'pgid': child.pid, 'starttime': 'unknown',
+                     'boot_id': process.boot_id()}
+            with patch.object(process.os, 'killpg') as kill:
+                with self.assertRaisesRegex(BackupError, 'process-state-uncertain'):
+                    process.terminate_child(child, group)
+            kill.assert_not_called()
 
     def test_hash_stream_cleanup_wait_preserves_timeout_and_closes_pipe(self):
         children = []
