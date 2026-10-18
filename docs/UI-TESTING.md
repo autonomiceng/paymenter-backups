@@ -117,7 +117,7 @@ bindings, `artifacts` for legacy bindings).
 
 ## Primary source contracts
 
-* [Admin page](../extension/Backups/Admin/Pages/Backups.php),
+* [Admin page](../extension/Backups/Admin/Pages/Backups.php) and [concerns](../extension/Backups/Admin/Pages/Concerns/),
   [messages](../extension/Backups/Messages.php),
   [settings](../extension/Backups/Settings.php),
   [download route](../extension/Backups/Http/DownloadController.php),

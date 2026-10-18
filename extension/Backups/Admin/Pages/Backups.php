@@ -61,6 +61,7 @@ use Paymenter\Extensions\Others\Backups\SettingsWriter;
 class Backups extends Page implements HasTable
 {
     use InteractsWithTable;
+    use Concerns\LoadsOverview;
 
     protected static string|\BackedEnum|null $navigationIcon = 'ri-save-line';
     protected static string|\BackedEnum|null $activeNavigationIcon = 'ri-save-fill';
@@ -233,146 +234,6 @@ class Backups extends Page implements HasTable
     }
 
     // ---------------------------------------------------------------- Engine data
-
-    private function overview(): array
-    {
-        if ($this->overviewCache !== null) { return $this->overviewCache; }
-        try {
-            return $this->overviewCache = Runtime::command(['overview'], null, 20);
-        } catch (\Throwable $error) {
-            $this->overviewError = $error instanceof \RuntimeException ? $error->getMessage() : 'engine-unavailable';
-            return $this->overviewCache = ['initialized' => false, 'runs' => [], 'requests' => [], 'scheduler' => ['last_tick_at' => null],
-                'configuration' => ['available' => false, 'valid' => false, 'error' => $this->overviewError], 'maintenance' => false, 'installation_uuid' => null];
-        }
-    }
-
-    private function configuration(): array { return $this->overview()['configuration'] ?? []; }
-
-    private function checks(): array { return $this->configuration()['checks'] ?? []; }
-
-    /** True when private state exists, even if the engine cannot report it right now. */
-    private function initialized(): bool
-    {
-        if ($this->overview()['initialized'] ?? false) { return true; }
-        try { return @is_file(Runtime::privateRoot() . '/installation.json'); }
-        catch (\Throwable $error) {
-            // Read only presence, to keep an existing data directory immutable
-            // while its public-directory guard is awaiting explicit repair.
-            try {
-                $configured = $this->record()->settings()->where('key', 'private_root')->value('value');
-                return @is_file(PrivateStore::root(realpath(base_path()), $configured ?: null) . '/installation.json');
-            } catch (\Throwable $ignored) { return false; }
-        }
-    }
-
-    private function record(): \App\Models\Extension
-    {
-        return \App\Models\Extension::where('extension', 'Backups')->where('type', 'other')->firstOrFail();
-    }
-
-    private function zone(): string { return config('app.timezone') ?: 'UTC'; }
-
-    private function time(?float $timestamp, bool $withZone = false): string
-    {
-        if ($timestamp === null) { return 'Unknown'; }
-        $date = CarbonImmutable::createFromTimestamp((int) $timestamp)->setTimezone($this->zone());
-        return $date->format('j M Y, H:i') . ($withZone ? ' ' . $this->zone() : '');
-    }
-
-    private function ago(?float $timestamp): string
-    {
-        return $timestamp === null ? '' : CarbonImmutable::createFromTimestamp((int) $timestamp)->diffForHumans();
-    }
-
-    /** "13 Oct 2026, 02:00 UTC (4 hours ago)" */
-    private function when(?float $timestamp): string
-    {
-        return $timestamp === null ? 'Unknown' : $this->time($timestamp, true) . ' (' . $this->ago($timestamp) . ')';
-    }
-
-    private function storage(): array
-    {
-        $configuration = $this->configuration();
-        $destination = $configuration['destination'] ?? [];
-        return ($configuration['storage'] ?? []) + [
-            'keep_local' => true, 'upload_s3' => ($destination['type'] ?? null) === 's3',
-            'local_path' => $destination['local_path'] ?? null, 'default_local_path' => null, 'legacy_default_path' => null,
-            's3_bucket' => $destination['s3_bucket'] ?? null,
-        ];
-    }
-
-    private function uploadsToS3(): bool { return (bool) ($this->storage()['upload_s3'] ?? false); }
-
-    private function savedS3Keys(): bool { return (bool) ($this->configuration()['saved_keys']['s3'] ?? false); }
-
-    private function encryption(): array { return $this->configuration()['encryption'] ?? []; }
-
-    private function keyInfo(): array { return ($this->encryption()['key'] ?? []) + ['state' => 'none', 'short' => null, 'acknowledged' => false, 'pending_short' => null, 'source' => null]; }
-
-    private function keyState(): string { return in_array($this->keyInfo()['state'], ['none', 'pending', 'active'], true) ? $this->keyInfo()['state'] : 'none'; }
-
-    /** Short fingerprint of a key that still needs its saved-outside-this-server confirmation. */
-    private function pendingKeyShort(): ?string
-    {
-        $key = $this->keyInfo();
-        if (filled($key['pending_short'])) { return $key['pending_short']; }
-        return $key['state'] === 'pending' || ($key['state'] === 'active' && !$key['acknowledged']) ? ($key['short'] ?: null) : null;
-    }
-
-    private function settingsVersion(): int
-    {
-        $this->formValues();
-        return (int) ($this->configuration()['settings_version'] ?? $this->storedVersion);
-    }
-
-    private function lastTick(): ?float { return $this->overview()['scheduler']['last_tick_at'] ?? null; }
-
-    private function schedulerFresh(): bool
-    {
-        $last = $this->lastTick();
-        return $last !== null && time() - $last < self::SCHEDULER_STALE_SECONDS;
-    }
-
-    /** Active requests for a backup, from the engine's whitelist. */
-    private function tasksFor(string $runId): array
-    {
-        return array_values(array_filter($this->overview()['requests'], static fn ($request) => $request['run_id'] === $runId));
-    }
-
-    private function hasActiveWork(): bool
-    {
-        foreach ($this->overview()['requests'] as $request) {
-            if (in_array($request['status'], self::ACTIVE, true)) { return true; }
-        }
-        foreach ($this->overview()['runs'] as $run) {
-            if ($run['status'] === 'running') { return true; }
-        }
-        return false;
-    }
-
-    private function activeRequest(string $action, ?string $runId = null): ?array
-    {
-        foreach ($this->overview()['requests'] as $request) {
-            if ($request['action'] === $action && $request['run_id'] === $runId && in_array($request['status'], self::ACTIVE, true)) { return $request; }
-        }
-        return null;
-    }
-
-    private function latestRequest(string $action): ?array
-    {
-        $latest = null;
-        foreach ($this->overview()['requests'] as $request) {
-            if ($request['action'] === $action && ($latest === null || $request['created_at'] > $latest['created_at'])) { $latest = $request; }
-        }
-        return $latest;
-    }
-
-    private function run(?string $runId): ?array
-    {
-        if ($runId === null) { return null; }
-        foreach ($this->overview()['runs'] as $run) { if ($run['run_id'] === $runId) { return $run; } }
-        return null;
-    }
 
     /** One sentence about when queued work starts. Promises a minute only while the cron job checks in and nothing else is running. */
     private function startLine(): string
@@ -1170,7 +1031,6 @@ class Backups extends Page implements HasTable
         if (!is_array($checked)) { return null; }
         return is_string($checked['resolved'] ?? null) && $checked['resolved'] !== '' ? $checked['resolved'] : 'Not found';
     }
-
 
     private function legacyDirectorySentence(): ?string
     {

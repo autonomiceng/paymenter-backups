@@ -78,6 +78,7 @@ require $argv[1] . '/extension/Backups/Messages.php';
 require $argv[1] . '/extension/Backups/ArchiveEncryption.php';
 require $argv[1] . '/extension/Backups/ProbeCredentials.php';
 require $argv[1] . '/extension/Backups/CredentialInput.php';
+foreach (glob($argv[1] . '/extension/Backups/Admin/Pages/Concerns/*.php') as $concern) { require $concern; }
 require $argv[1] . '/extension/Backups/Admin/Pages/Backups.php';
 $input = json_decode(file_get_contents('php://stdin'), true, 64, JSON_THROW_ON_ERROR);
 $class = new ReflectionClass(Paymenter\Extensions\Others\Backups\Admin\Pages\Backups::class);
