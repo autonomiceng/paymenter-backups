@@ -206,5 +206,15 @@ class CLITests(unittest.TestCase):
         self.assertEqual(second["retention"]["delete"], [first["run_id"]])
 
 
+
+class ProcessCmdlineTests(unittest.TestCase):
+    def test_a_process_that_exits_mid_read_reads_as_empty(self):
+        for error in (FileNotFoundError, ProcessLookupError):
+            with self.subTest(error=error.__name__), patch.object(pathlib.Path, "read_text", side_effect=error):
+                self.assertEqual(process_cmdline(os.getpid()), "")
+
+    def test_a_live_process_returns_its_command_line(self):
+        self.assertEqual(process_cmdline(os.getpid()), "\0".join(sys.orig_argv) + "\0")
+
 if __name__ == "__main__":
     unittest.main()
