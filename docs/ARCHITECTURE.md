@@ -792,6 +792,35 @@ SDK. [RECOVERY.md](RECOVERY.md) defines the separate successful GnuPG/MDC step
 and isolated restore procedure. Run restore tests with the exact release ZIP.
 Validate host configuration and providers separately.
 
+## Keeping Paymenter upgradable
+
+Paymenter must take new upstream releases without an extension release. Ship an extension release only when an upgrade
+actually breaks something.
+
+- **Public surfaces only.** Use the extension base classes and their hooks, service providers, our own routes and tables,
+  Eloquent model events and observers, Filament registration, Paymenter events, jobs, config, and the documented theme
+  mechanism.
+- **Never intercept Paymenter globally.** Do not rebind or subclass Paymenter services in the container, remap native
+  routes, add global Livewire, middleware or request hooks (including `TrimStrings::skipWhen` or `TrimStrings::except`),
+  replace database resolvers or query builders, monkeypatch, or edit core or vendor files.
+- **Never gate on the Paymenter version.** No supported-version list at runtime, and no refusal, pause or banner just
+  because the version changed. Disable behavior only on evidence that it is broken.
+- **Guard invariants at the write.** A scoped observer refuses only the specific invalid change, logs it, and tells
+  staff. Native renewals and saves continue for everything else.
+- **Check required hooks, not versions.** If a feature depends on a Paymenter class, event or listener, verify it at
+  boot. If one is missing, pause only that feature and show staff exactly what is missing.
+- **Pin remaining internals in tests.** Where a guarantee still depends on Paymenter internals (template overrides, a
+  core base class, native write paths), extend the sha256 upgrade tripwire. It runs only in tests and CI, names the
+  changed files and the code that depends on them, and is never regenerated automatically. Update a hash only in the
+  same reviewed change that re-checks or fixes the dependent code.
+- **Qualify releases in CI.** New Paymenter releases run the full suites, the tripwire and the override-template diff.
+  A green run needs no extension release.
+- **Exceptions are architecture decisions.** A change that cannot follow these rules states why in its pull request and
+  adds a tripwire before merge.
+
+Known dependency on internals: maintenance handling reads and writes Laravel's maintenance-mode file. Keep it covered
+by the upgrade tripwire and the release-qualification run.
+
 ## Test requirements
 
 Meaningful tests cover real filesystem archive/checksum roundtrip, real process
