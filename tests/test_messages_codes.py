@@ -108,7 +108,7 @@ echo json_encode($result, JSON_THROW_ON_ERROR);
 '''
         result = subprocess.run([PHP, '-r', script, str(ROOT / 'extension/Backups/Messages.php')],
                                 input=json.dumps(sorted(codes)).encode(), capture_output=True, timeout=10)
-        self.assertEqual(result.returncode, 0, result.stderr.decode())
+        self.assertEqual(result.returncode, 0, result.stdout.decode() + result.stderr.decode())
         return json.loads(result.stdout)
 
     def test_every_engine_encryption_readiness_and_php_error_has_specific_copy(self):
@@ -148,6 +148,40 @@ echo json_encode($result, JSON_THROW_ON_ERROR);
         messages = self.messages(('database-pdo-driver-unavailable', 'database-connection-failed'))
         self.assertIn('PDO MySQL', messages['database-pdo-driver-unavailable'][1])
         self.assertIn('could not connect', messages['database-connection-failed'][1])
+
+    def test_save_errors_keep_the_field_and_have_direct_repair_guidance(self):
+        script = r'''
+require $argv[1];
+require $argv[2];
+require $argv[3];
+function filled($value) { return !($value === null || $value === '' || $value === false || $value === []); }
+$result = [
+    'config' => \Paymenter\Extensions\Others\Backups\Messages::error('config-invalid'),
+    'timezone' => \Paymenter\Extensions\Others\Backups\Messages::error('timezone-data-unavailable'),
+    'gzip' => \Paymenter\Extensions\Others\Backups\Messages::readinessItem('gzip-busybox', [])['text'],
+    'details' => \Paymenter\Extensions\Others\Backups\Runtime::errorDetails('{"error":"config-invalid","field":"schedule_time","detail":{"value":"secret"}}'),
+];
+echo json_encode($result, JSON_THROW_ON_ERROR);
+'''
+        result = subprocess.run([PHP, '-r', script, str(ROOT / 'extension/Backups/Messages.php'),
+                                 str(ROOT / 'extension/Backups/Runtime.php'), str(ROOT / 'extension/Backups/Settings.php')],
+                                capture_output=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stdout.decode() + result.stderr.decode())
+        value = json.loads(result.stdout)
+        self.assertNotIn('Open Settings and save', value['config'])
+        self.assertNotIn('Open Settings and save', self.messages(('schedule-field-invalid',))['schedule-field-invalid'][1])
+        self.assertIn('tzdata', value['timezone'])
+        self.assertEqual(value['gzip'], 'gzip on this server is BusyBox; Backups needs GNU gzip')
+        self.assertEqual(value['details'], {'code': 'config-invalid', 'field': 'schedule_time'})
+
+    def test_engine_field_reaches_the_save_form_error(self):
+        result = subprocess.run([PHP, str(ROOT / 'tests/integration/save_refusal_checks.php')],
+                                capture_output=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stderr.decode())
+        value = json.loads(result.stdout)
+        self.assertIn('settings.schedule_time', value['errors'])
+        self.assertNotIn('Open Settings and save', value['errors']['settings.schedule_time'])
+        self.assertNotIn('Open Settings and save', value['notification']['body'])
 
     def test_frozen_upload_refusals_do_not_promise_regeneration_or_reencryption(self):
         messages = self.messages(('delivery-ciphertext-unavailable', 'legacy-plaintext-delivery-blocked',

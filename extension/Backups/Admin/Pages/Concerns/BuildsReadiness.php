@@ -68,7 +68,8 @@ trait BuildsReadiness
         if (!$this->initialized()) {
             $groups['all'][] = $render(['code' => 'installation-not-initialized', 'page' => true]);
         } elseif (($configuration['available'] ?? false) && !($configuration['valid'] ?? false)) {
-            $groups['all'][] = $render(['code' => $configuration['error'] ?: 'config-invalid', 'field' => Messages::field((string) $configuration['error']), 'page' => true]);
+            $groups['all'][] = $render(['code' => $configuration['error'] ?: 'config-invalid',
+                'field' => $configuration['error_field'] ?? Messages::field((string) $configuration['error']), 'page' => true]);
         }
         $byMode = [];
         // Nothing runs without Paymenter's cron job: its items become one item, first, and

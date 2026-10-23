@@ -16,7 +16,7 @@ final class Messages
         'billing-guard-stale' => 'Full backups need Paymenter\'s cron job to have run in the last few minutes, so they can avoid the daily billing run. Check the cron job on the Backups tab.',
         'billing-window-protected' => 'Waiting until Paymenter\'s daily billing run is over.',
         'schedule-overlaps-billing' => 'This time is too close to Paymenter\'s daily billing run. Pick a time outside the window shown under the time.',
-        'schedule-field-invalid' => 'A schedule setting is invalid. Open Settings and save.',
+        'schedule-field-invalid' => 'A schedule setting is invalid. Check the highlighted setting.',
         'schedule-kind-required' => 'Name the schedule: add --kind full or --kind database.',
         'scheduler-missing' => 'No cron job runs Paymenter\'s scheduler. Add the cron job shown on the Backups tab.',
         'job-lock-busy' => 'A Paymenter cron job was still running. The backup will try again next minute.',
@@ -50,7 +50,9 @@ final class Messages
         'request-not-launchable' => 'This task is no longer waiting to start. Refresh the task list before trying again.',
 
         // Configuration
-        'config-invalid' => 'A saved setting is invalid. Open Settings and save.',
+        'config-invalid' => 'A saved setting is invalid. Check the highlighted setting.',
+        'timezone-data-unavailable' => 'The time zone database is unavailable. Install the tzdata package.',
+        'gzip-busybox' => 'gzip on this server is BusyBox; Backups needs GNU gzip',
         'storage-required' => 'Keep backups on this server, upload them to S3, or enable both under Storage.',
         'storage-untested' => 'Test storage with the current settings and recovery key before enabling automatic uploads.',
         'config-write-failed' => 'Paymenter couldn\'t save settings to its database. Check the database connection and try again.',
@@ -291,6 +293,7 @@ final class Messages
     {
         return [
             'schedule-overlaps-billing' => 'full_time', 's3-tls-required' => 's3_endpoint', 's3-endpoint-invalid' => 's3_endpoint',
+            'timezone-data-unavailable' => 'schedule_timezone', 'gzip-busybox' => 'gzip',
             's3-prefix-invalid' => 's3_prefix', 'plaintext-offsite-acknowledgement-required' => 'plaintext_offsite_acknowledged',
             'remote-configuration-required' => 's3_bucket',
             'private-root-invalid' => 'private_root', 'private-root-inside-docroot' => 'private_root',
@@ -472,6 +475,7 @@ final class Messages
      */
     public static function readinessItem(string $code, array $detail, array $context = []): array
     {
+        $field = is_string($context['field'] ?? null) ? $context['field'] : null;
         $suggest = $context['suggestions'] ?? [];
         $user = $context['crontab_user'] ?? null;
         $cronLead = 'Add this line to the crontab of ' . ($user ?: 'the site user') . ' with crontab -e. If a schedule:run line is already there, replace it.';
@@ -575,6 +579,10 @@ final class Messages
                 $name = self::TOOLS[$tool] ?? 'A required binary';
                 $path = is_string($detail['path'] ?? null) && $detail['path'] !== '' ? $detail['path'] : null;
                 return $item($name . ' not found', ($path ? 'Nothing usable at ' . $path . '. ' : '') . 'Fix the path under Binary paths, or leave it empty to detect it.', [], $settings('Go to Binary paths', 'advanced'));
+            case 'gzip-busybox':
+                return $item('Install GNU gzip', self::error($code), [], $settings('Go to Binary paths', 'advanced'));
+            case 'timezone-data-unavailable':
+                return $item('Install time zone data', self::error($code), [], $settings('Go to Settings', 'settings'));
             case 'billing-settings-unreadable':
                 return $item('Set Paymenter\'s billing time', 'Full backups avoid Paymenter\'s daily billing run and need its time. Save "Cron Job Time" in Paymenter\'s settings.');
             case 'recovery-required':
@@ -598,7 +606,6 @@ final class Messages
             case 'schedule-field-invalid':
                 return $item('Check your settings', self::error($code), [], $settings('Go to Settings', 'settings'));
         }
-        $field = is_string($context['field'] ?? null) ? $context['field'] : null;
         return $item(self::known($code) ? 'Needs attention' : 'Backups can\'t start', self::error($code), [], $field ? $settings('Go to Settings', 'settings') : null);
     }
 }

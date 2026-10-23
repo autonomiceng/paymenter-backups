@@ -4,7 +4,9 @@ Use Linux, Python 3.10 or newer and the application's PHP 8.3 or newer. Release
 ZIPs include an isolated, pinned S3 SDK. Do not run pip or Composer in Paymenter
 for this extension. Keep Paymenter core and native database definitions stock.
 
-The server also needs GNU tar, gzip and a supported MariaDB/MySQL dump client.
+The server also needs GNU tar, GNU gzip, time zone data (`tzdata`) and a supported
+MariaDB/MySQL dump client. Minimal images such as Alpine may need the `tzdata`
+package installed.
 Encrypted S3 uploads need the complete GnuPG package, including gpg, gpg-agent
 and gpgconf. GnuPG is a server dependency and is not bundled in the ZIP;
 the server administrator maintains its security updates. The Backups setup

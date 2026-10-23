@@ -99,7 +99,8 @@ trait SavesSettings
                     Notification::make()->title('Settings not saved')->danger()->body('Save the folder list by itself first. Then save your other changes.')->send();
                     return;
                 }
-                $this->refuseSettings($code, in_array($code, self::ENVIRONMENT_ERRORS, true));
+                $field = $error instanceof \Paymenter\Extensions\Others\Backups\EngineCommandException ? $error->field : null;
+                $this->refuseSettings($code, in_array($code, self::ENVIRONMENT_ERRORS, true), $field);
                 return;
             }
             $checked = false;
@@ -120,7 +121,10 @@ trait SavesSettings
             if ($code === 'config-save-outcome-unknown') {
                 Notification::make()->title('Save outcome unknown')->warning()
                     ->body('Refresh and check the saved settings before trying again. Keys you entered were cleared.')->send();
-            } else { $this->refuseSettings($code); }
+            } else {
+                $field = $error instanceof \Paymenter\Extensions\Others\Backups\EngineCommandException ? $error->field : null;
+                $this->refuseSettings($code, false, $field);
+            }
             return;
         } finally {
             unset($s3Keys, $siteAccess);
@@ -195,12 +199,13 @@ trait SavesSettings
         }
     }
 
-    private function refuseSettings(string $code, bool $environment = false): void
+    private function refuseSettings(string $code, bool $environment = false, ?string $field = null): void
     {
+        $field = $field !== null && array_key_exists($field, Settings::LABELS) ? $field : Messages::field($code);
         $message = $code === 'schedule-overlaps-billing' && ($window = $this->billingWindow())
             ? 'This time is too close to Paymenter\'s daily billing at ' . $window['time'] . ' ' . $window['timezone'] . '. Pick a time outside ' . $window['start'] . ' to ' . $window['end'] . '.'
             : Messages::error($code);
-        if ($field = Messages::field($code)) {
+        if ($field) {
             $this->addError('settings.' . $field, $message);
             // Opens a collapsed section and scrolls to the field, as for form validation.
             $this->dispatch('form-validation-error', livewireId: $this->getId());

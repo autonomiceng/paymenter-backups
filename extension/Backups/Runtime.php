@@ -6,6 +6,14 @@ use Symfony\Component\Process\Process;
 
 require_once __DIR__ . '/DatabaseConnectionContext.php';
 
+final class EngineCommandException extends RuntimeException
+{
+    public function __construct(string $error, public readonly ?string $field = null)
+    {
+        parent::__construct($error);
+    }
+}
+
 final class Runtime
 {
     /** Child startup excludes loader, resolver, TLS and application overrides. */
@@ -107,12 +115,21 @@ PYTHON;
             'deliver', 'retention', 'retrieve', 'destination-test', 'request-worker'], true);
     }
 
-    /** Engine stderr carries only {"error": code}; anything else becomes a generic code. */
-    public static function errorCode(string $stderr, string $fallback = 'engine-unavailable'): string
+    /** Keep only a fixed error code and a known setting field from engine stderr. */
+    public static function errorDetails(string $stderr, string $fallback = 'engine-unavailable'): array
     {
         $decoded = json_decode(trim($stderr), true);
         $code = is_array($decoded) ? ($decoded['error'] ?? null) : null;
-        return is_string($code) && preg_match('/^[a-z0-9][a-z0-9-]{0,63}$/D', $code) ? $code : $fallback;
+        if (!is_string($code) || !preg_match('/^[a-z0-9][a-z0-9-]{0,63}$/D', $code)) { $code = $fallback; }
+        $field = is_array($decoded) && is_string($decoded['field'] ?? null) ? $decoded['field'] : null;
+        if ($field === null || !array_key_exists($field, Settings::LABELS)) { $field = null; }
+        return ['code' => $code, 'field' => $field];
+    }
+
+    /** Compatibility helper for stream commands that only consume the fixed code. */
+    public static function errorCode(string $stderr, string $fallback = 'engine-unavailable'): string
+    {
+        return self::errorDetails($stderr, $fallback)['code'];
     }
 
     /** Public engine JSON only; runtime secrets are never returned to a browser. */
@@ -127,7 +144,10 @@ PYTHON;
         $process = new Process(self::engine($arguments, $databaseContext), base_path(), self::safeEnvironment(), $input === null ? null : json_encode($input === [] ? new \stdClass : $input, JSON_THROW_ON_ERROR));
         $process->setTimeout($timeout);
         $process->run();
-        if (!$process->isSuccessful()) { throw new RuntimeException(self::errorCode($process->getErrorOutput())); }
+        if (!$process->isSuccessful()) {
+            $failure = self::errorDetails($process->getErrorOutput());
+            throw new EngineCommandException($failure['code'], $failure['field']);
+        }
         return json_decode($process->getOutput(), true, 64, JSON_THROW_ON_ERROR);
     }
 

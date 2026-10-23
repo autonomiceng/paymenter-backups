@@ -5,6 +5,7 @@ import os
 import re
 import shutil
 import subprocess
+import datetime
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from .common import BackupError
@@ -63,6 +64,22 @@ def billing_fingerprint(billing):
     import hashlib
     value = {"daily_time": billing.get("daily_time"), "timezone": billing.get("timezone")}
     return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
+def configured_timezone(value, field="schedule_timezone"):
+    """Return a schedule zone, keeping UTC independent of installed tzdata."""
+    if not isinstance(value, str) or not value:
+        raise BackupError("config-invalid", field)
+    if value == "UTC":
+        return datetime.timezone.utc
+    try:
+        return ZoneInfo(value)
+    except ZoneInfoNotFoundError:
+        try:
+            ZoneInfo("UTC")
+        except ZoneInfoNotFoundError:
+            raise BackupError("timezone-data-unavailable", field, {"timezone": value}) from None
+        raise BackupError("config-invalid", field) from None
 
 
 def redact(value):
@@ -237,7 +254,7 @@ def normalize(settings, adapt=True):
                     raise ValueError()
                 settings[key] = value
         except (TypeError, ValueError):
-            raise BackupError("config-invalid") from None
+            raise BackupError("config-invalid", key) from None
     if settings["settings_version"] == 1 and adapt:
         settings.update(from_legacy(settings))
     elif settings["settings_version"] == 2:
@@ -287,7 +304,7 @@ def schedule_settings(settings, kind):
 def validate(envelope):
     settings = envelope["settings"]
     if settings["settings_version"] not in (1, 2):
-        raise BackupError("config-invalid")
+        raise BackupError("config-invalid", "settings_version")
     if settings["settings_version"] == 2:
         if not settings["keep_local"] and not settings["upload_s3"]:
             raise BackupError("storage-required", "keep_local")
@@ -300,45 +317,55 @@ def validate(envelope):
             if any(type(day) is not int or day not in range(7) for day in days) or (settings[kind + "_schedule"] == "weekly" and not days):
                 raise BackupError("config-invalid", kind + "_weekdays")
             if settings["s3_retention_policy_" + kind] not in ("local-count", "count", "age", "keep-all"):
-                raise BackupError("config-invalid")
+                raise BackupError("config-invalid", "s3_retention_policy_" + kind)
             for key in ("retention_keep_" + kind, "s3_retention_keep_" + kind, "s3_retention_days_" + kind):
                 if settings[key] <= 0:
                     raise BackupError("config-invalid", key)
         if settings["database_schedule"] == "hourly" and (settings["database_every_hours"] not in (1, 2, 3, 4, 6, 8, 12) or not 0 <= settings["database_minute"] <= 59):
-            raise BackupError("config-invalid", "database_every_hours")
-    if settings["mode"] not in ("full-quiesced", "database-online") or settings["destination"] not in ("local", "s3"):
-        raise BackupError("config-invalid")
+            raise BackupError("config-invalid", "database_every_hours" if settings["database_every_hours"] not in (1, 2, 3, 4, 6, 8, 12) else "database_minute")
+    if settings["mode"] not in ("full-quiesced", "database-online"):
+        raise BackupError("config-invalid", "mode")
+    if settings["destination"] not in ("local", "s3"):
+        raise BackupError("config-invalid", "destination")
     if settings["schedule_frequency"] not in ("daily", "weekly"):
-        raise BackupError("config-invalid")
+        raise BackupError("config-invalid", "schedule_frequency")
     if settings["s3_retention_policy"] not in ("local-count", "count", "age", "keep-all"):
-        raise BackupError("config-invalid")
+        raise BackupError("config-invalid", "s3_retention_policy")
     try:
         hour, minute = settings["schedule_time"].split(":")
-        if len(hour) != 2 or len(minute) != 2 or not 0 <= int(hour) < 24 or not 0 <= int(minute) < 60:
-            raise ValueError()
-        ZoneInfo(settings["schedule_timezone"])
-        if any(type(day) is not int or day not in range(7) for day in settings["schedule_weekdays"]):
-            raise ValueError()
-        if settings["enabled"] and settings["schedule_frequency"] == "weekly" and not settings["schedule_weekdays"]:
-            raise ValueError()
-        for key in ("local_byte_budget", "capture_timeout", "billing_guard_max_age", "request_max_age", "s3_timeout", "s3_retries", "retention_keep", "s3_retention_keep", "s3_retention_days"):
+        valid_time = len(hour) == 2 and len(minute) == 2 and 0 <= int(hour) < 24 and 0 <= int(minute) < 60
+    except (KeyError, TypeError, ValueError):
+        raise BackupError("config-invalid", "schedule_time") from None
+    if not valid_time:
+        raise BackupError("config-invalid", "schedule_time")
+    configured_timezone(settings.get("schedule_timezone"))
+    days = settings.get("schedule_weekdays")
+    if not isinstance(days, list) or any(type(day) is not int or day not in range(7) for day in days):
+        raise BackupError("config-invalid", "schedule_weekdays")
+    if settings["enabled"] and settings["schedule_frequency"] == "weekly" and not days:
+        raise BackupError("config-invalid", "schedule_weekdays")
+    for key in ("local_byte_budget", "capture_timeout", "billing_guard_max_age", "request_max_age", "s3_timeout", "s3_retries", "retention_keep", "s3_retention_keep", "s3_retention_days"):
+        try:
             if isinstance(settings[key], bool) or int(settings[key]) <= 0:
-                raise ValueError()
-        for key in ("minimum_free_bytes", "drain_seconds", "lock_timeout", "billing_margin_seconds"):
+                raise BackupError("config-invalid", key)
+        except (KeyError, TypeError, ValueError, OverflowError):
+            raise BackupError("config-invalid", key) from None
+    for key in ("minimum_free_bytes", "drain_seconds", "lock_timeout", "billing_margin_seconds"):
+        try:
             if isinstance(settings[key], bool) or int(settings[key]) < 0:
-                raise ValueError()
-    except (KeyError, TypeError, ValueError, ZoneInfoNotFoundError):
-        raise BackupError("config-invalid") from None
+                raise BackupError("config-invalid", key)
+        except (KeyError, TypeError, ValueError, OverflowError):
+            raise BackupError("config-invalid", key) from None
     if not isinstance(settings["job_lock_paths"], list) or any(not isinstance(item, str) or not item.startswith("/") or "\0" in item for item in settings["job_lock_paths"]):
-        raise BackupError("config-invalid")
+        raise BackupError("config-invalid", "job_lock_paths")
     if not isinstance(settings["extra_docroots"], list) or any(not isinstance(item, str) or not item.startswith("/") or "\0" in item for item in settings["extra_docroots"]):
-        raise BackupError("config-invalid")
+        raise BackupError("config-invalid", "extra_docroots")
     if not isinstance(settings["local_path"], str) or (settings["local_path"] and not settings["local_path"].startswith("/")):
-        raise BackupError("config-invalid")
+        raise BackupError("config-invalid", "local_path")
     # Same rule as storage.prefix, the native editor and the admin form.
     prefix = settings["s3_prefix"].strip("/")
     if "\\" in prefix or any(part in ("", ".", "..") for part in prefix.split("/")):
-        raise BackupError("s3-prefix-invalid")
+        raise BackupError("s3-prefix-invalid", "s3_prefix")
     if settings["destination"] == "s3":
         if (settings["settings_version"] == 1 or not settings["s3_encryption"]) and not settings["plaintext_offsite_acknowledged"]:
             raise BackupError("plaintext-offsite-acknowledgement-required")

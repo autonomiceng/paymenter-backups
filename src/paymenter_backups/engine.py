@@ -147,7 +147,12 @@ def plan(state, envelope, discovery_inventory=None, probe_locks=True, encryption
         errors.append(code)
         items.append({"code": code, "field": field, "detail": detail or {}})
     for name in ("php", "dump", "mysql", "tar", "gzip"):
-        binary = envelope.get("tools", {}).get(name)
+        report = (envelope.get("tool_checks") or {}).get(name)
+        binary = report.get("resolved") if isinstance(report, dict) and report.get("ok") else envelope.get("tools", {}).get(name)
+        if isinstance(report, dict) and not report.get("ok"):
+            add(report.get("code") or "tool-unavailable", name,
+                {"tool": name, "path": report.get("resolved") or report.get("configured")})
+            continue
         if not binary or not pathlib.Path(binary).is_file() or not os.access(binary, os.X_OK):
             add("tool-unavailable", name, {"tool": name, "path": binary})
     if not state.initialized:

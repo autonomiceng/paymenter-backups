@@ -37,8 +37,9 @@ def inspect(name, configured='', fallback=None, capabilities=True):
         elif name == 'php':
             command = [str(path), '-r', 'echo PHP_SAPI, " ", PHP_VERSION;']
         try:
-            returncode, stdout, _ = probe(command, timeout=3, stdout_limit=8192)
+            returncode, stdout, stderr = probe(command, timeout=3, stdout_limit=8192, stderr_limit=8192)
             output = stdout.decode('utf-8', errors='replace')
+            diagnostic = (output + '\n' + stderr.decode('utf-8', errors='replace')).lower()
             valid = returncode == 0
             if name == 'python':
                 match = re.fullmatch(r'(\d+)\.(\d+)\s*', output)
@@ -51,6 +52,16 @@ def inspect(name, configured='', fallback=None, capabilities=True):
             elif name in ('dump', 'mysql'):
                 valid = valid and any(word in output.lower() for word in ('mariadb', 'mysql'))
             elif name == 'gzip':
+                if 'busybox' in diagnostic:
+                    result['code'] = 'gzip-busybox'
+                    return result
+                if not valid:
+                    _, help_stdout, help_stderr = probe([str(path), '--help'], timeout=3,
+                                                        stdout_limit=8192, stderr_limit=8192)
+                    help_diagnostic = (help_stdout + b'\n' + help_stderr).decode('utf-8', errors='replace').lower()
+                    if 'busybox' in help_diagnostic:
+                        result['code'] = 'gzip-busybox'
+                        return result
                 valid = valid and 'gzip' in output.lower()
             if not valid:
                 result['code'] = 'tool-capability-unsupported'
