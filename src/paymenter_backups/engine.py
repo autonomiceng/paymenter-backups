@@ -387,7 +387,7 @@ def discard_unstarted_capture(state, directory, payload, defaults):
         return False
 
 
-def capture(state, envelope, scheduled=False, request_id=None, envelope_loader=None):
+def capture(state, envelope, scheduled=False, request_id=None, envelope_loader=None, database_context=None):
     with state.lock():
         if envelope_loader is not None:
             requested_mode = envelope['settings']['mode']
@@ -459,7 +459,7 @@ def capture(state, envelope, scheduled=False, request_id=None, envelope_loader=N
                     if not initial:
                         # Journal the intent first. Crash before ownership recording stays closed.
                         run_tool("php", [envelope["tools"]["php"], str(state.app / "artisan"), "down", "--render=errors::503", "--status=503"],
-                            min(15, remaining()), register=register)
+                            min(15, remaining()), register=register, database_context=database_context)
                         journal["owned_markers"] = {relative: identity(state.app / relative) for relative in MARKERS}
                         state.save(journal)
                     strict_payload(state.app)

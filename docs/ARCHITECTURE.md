@@ -148,6 +148,13 @@ refuses `busy` before publication. It rereads and validates the authoritative
 native baseline under those locks. Only changed native rows are written through
 Eloquent; the internal Artisan writer inherits the owning lock descriptors and
 restores the authenticated page actor, with console auditing explicitly enabled.
+The resolved database connection travels to scrubbed children on private stdin.
+The Python runtime passes only Laravel's fixed `DB_*` connection fields to
+Artisan during bootstrap, when extension discovery needs the database before
+the command can read stdin. Other inherited environment values stay scrubbed;
+database credentials are not written to files or command arguments. Full
+capture passes the same allowlist to Artisan's maintenance command. The billing
+guard runs inside Paymenter's ordinary scheduler process, not a scrubbed child.
 The browser cannot supply the baseline or actor. The writer returns persisted
 row receipts and a full native snapshot. Initialization and privacy-policy
 publication remain beneath the same locks, including a first save with no edits.

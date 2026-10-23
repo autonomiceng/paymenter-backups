@@ -111,12 +111,16 @@ def native_settings(args, state, values, descriptors, actor=None, restore=False,
         command.append("--actor=" + str(actor))
     try:
         writer_values = dict(values)
-        if getattr(args, "database_connection", None) is not None:
-            writer_values["_database_connection"] = args.database_connection
+        database_context = getattr(args, "database_connection", None)
+        if database_context is not None:
+            writer_values["_database_connection"] = database_context
         input_bytes = json.dumps(writer_values).encode()
         if len(input_bytes) > 65536:
             raise BackupError("input-too-large")
-        result = run_native_writer(command, input_bytes, descriptors)
+        if database_context is None:
+            result = run_native_writer(command, input_bytes, descriptors)
+        else:
+            result = run_native_writer(command, input_bytes, descriptors, database_context=database_context)
         if result.returncode:
             try:
                 refusal = json.loads(result.stderr)
@@ -494,7 +498,8 @@ def dispatch(args):
             envelope["settings"]["mode"] = args.mode
         if not args.execute:
             return plan(state, envelope)
-        journal = capture(state, envelope, envelope_loader=lambda: load(args))
+        journal = capture(state, envelope, envelope_loader=lambda: load(args),
+                          database_context=args.database_connection)
         result = {"run_id": journal["run_id"], "local_complete": True, "archive_path": journal["archive_path"]}
         envelope = load(args)
         if envelope["settings"]["destination"] == "s3":
@@ -519,7 +524,8 @@ def dispatch(args):
     if command == "request-worker":
         if not args.execute:
             raise BackupError("execute-required")
-        return worker(state, envelope, args.request_id, envelope_loader=lambda: load(args))
+        return worker(state, envelope, args.request_id, envelope_loader=lambda: load(args),
+                      database_context=args.database_connection)
     if command == "tick":
         # sys.argv[0] is a release wrapper, preserving its isolated runtime paths.
         prefix = [envelope["tools"].get("python", sys.executable), "-I", str(pathlib.Path(sys.argv[0]).resolve()),

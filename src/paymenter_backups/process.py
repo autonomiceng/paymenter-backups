@@ -32,10 +32,14 @@ def forget_detached_on_exit():
 atexit.register(forget_detached_on_exit)
 
 
-def safe_environment():
+def safe_environment(database_context=None):
     # Do not inherit TAR_OPTIONS, MYSQL_PWD, GZIP, LD_PRELOAD, provider/CA/proxy
     # overrides, application variable overrides or TLS session key logging.
-    return {"PATH": "/usr/local/bin:/usr/bin:/bin", "LANG": "C.UTF-8", "LC_ALL": "C.UTF-8", "TZ": "UTC"}
+    environment = {"PATH": "/usr/local/bin:/usr/bin:/bin", "LANG": "C.UTF-8", "LC_ALL": "C.UTF-8", "TZ": "UTC"}
+    if database_context is not None:
+        from .config import database_connection_environment
+        environment.update(database_connection_environment(database_context))
+    return environment
 
 
 def boot_id():
@@ -108,7 +112,8 @@ def terminate_child(proc, group):
         pass
 
 
-def run(command, timeout, output=None, input_bytes=None, register=None, budget_check=None, file_limit=None):
+def run(command, timeout, output=None, input_bytes=None, register=None, budget_check=None, file_limit=None,
+        database_context=None):
     parent = os.getpid()
     stream = open(output, "wb") if output else subprocess.PIPE
     proc = None
@@ -116,7 +121,8 @@ def run(command, timeout, output=None, input_bytes=None, register=None, budget_c
     try:
         proc = subprocess.Popen(command, stdin=subprocess.PIPE if input_bytes is not None else subprocess.DEVNULL,
                                 stdout=stream, stderr=subprocess.DEVNULL, close_fds=True,
-                                start_new_session=True, preexec_fn=lambda: child_setup(parent, file_limit), env=safe_environment())
+                                start_new_session=True, preexec_fn=lambda: child_setup(parent, file_limit),
+                                env=safe_environment(database_context))
         group = process_identity(proc.pid)
         if group is None:
             # An immediately exited process is handled by return code below.

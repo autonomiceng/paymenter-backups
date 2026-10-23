@@ -34,6 +34,17 @@ MARIADB_CONTEXT = {
 
 
 class DatabaseContextTests(unittest.TestCase):
+    def test_native_writer_receives_context_before_artisan_boot(self):
+        args = SimpleNamespace(php="/usr/bin/php", database_connection=MARIADB_CONTEXT)
+        state = SimpleNamespace(app=pathlib.Path("/fixture/app"), root=pathlib.Path("/fixture/private"))
+        completed = SimpleNamespace(returncode=0, stdout=b'{"ok":true}', stderr=b"")
+        with patch.object(cli, "run_native_writer", return_value=completed) as writer:
+            cli.native_settings(args, state, {"dump": "/usr/bin/mariadb-dump"}, (11, 12))
+
+        self.assertEqual(writer.call_args.kwargs["database_context"], MARIADB_CONTEXT)
+        self.assertNotIn("fixture-password", " ".join(writer.call_args.args[0]))
+        self.assertEqual(json.loads(writer.call_args.args[1])["_database_connection"], MARIADB_CONTEXT)
+
     def test_config_check_consumes_private_context_before_bridge_read(self):
         with tempfile.TemporaryDirectory(prefix="backups-db-context-") as temporary:
             root = pathlib.Path(temporary)
