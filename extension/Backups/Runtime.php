@@ -4,6 +4,8 @@ namespace Paymenter\Extensions\Others\Backups;
 use RuntimeException;
 use Symfony\Component\Process\Process;
 
+require_once __DIR__ . '/DatabaseConnectionContext.php';
+
 final class Runtime
 {
     /** Child startup excludes loader, resolver, TLS and application overrides. */
@@ -83,11 +85,26 @@ PYTHON;
     }
 
     /** Engine argv; the run ID or other public arguments follow the global flags. */
-    private static function engine(array $arguments): array
+    private static function engine(array $arguments, bool $databaseContext = false): array
     {
         $root = self::privateRoot();
         $binaries = self::binaries();
-        return [$binaries['python'], '-I', __DIR__ . '/runtime/cli.py', '--app', realpath(base_path()), '--private-root', $root, '--bridge', __DIR__ . '/bridge.php', '--php', $binaries['php'], ...$arguments];
+        return [$binaries['python'], '-I', __DIR__ . '/runtime/cli.py', '--app', realpath(base_path()), '--private-root', $root, '--bridge', __DIR__ . '/bridge.php', '--php', $binaries['php'], ...($databaseContext ? ['--database-connection-stdin'] : []), ...$arguments];
+    }
+
+    /** The active request's resolved DB settings, kept off argv and the child environment. */
+    private static function databaseConnectionContext(): array
+    {
+        return DatabaseConnectionContext::capture();
+    }
+
+    /** Commands that load or validate the Paymenter database envelope. */
+    private static function needsDatabaseConnectionContext(array $arguments): bool
+    {
+        $command = $arguments[0] ?? '';
+        if ($command === 'config') { return in_array($arguments[1] ?? '', ['show', 'set', 'check', 'validate'], true); }
+        return in_array($command, ['init', 'tick', 'overview', 'plan', 'run', 'verify', 'export', 'delete',
+            'deliver', 'retention', 'retrieve', 'destination-test', 'request-worker'], true);
     }
 
     /** Engine stderr carries only {"error": code}; anything else becomes a generic code. */
@@ -102,7 +119,12 @@ PYTHON;
     public static function command(array $arguments, ?array $input = null, int $timeout = 10): array
     {
         if (in_array($arguments[0] ?? '', ['encryption-key', 'recovery-key', 'credentials-rewrap'], true)) { throw new RuntimeException('sensitive-command-refused'); }
-        $process = new Process(self::engine($arguments), base_path(), self::safeEnvironment(), $input === null ? null : json_encode($input === [] ? new \stdClass : $input, JSON_THROW_ON_ERROR));
+        $databaseContext = self::needsDatabaseConnectionContext($arguments);
+        if ($databaseContext) {
+            $input ??= [];
+            $input['_database_connection'] = self::databaseConnectionContext();
+        }
+        $process = new Process(self::engine($arguments, $databaseContext), base_path(), self::safeEnvironment(), $input === null ? null : json_encode($input === [] ? new \stdClass : $input, JSON_THROW_ON_ERROR));
         $process->setTimeout($timeout);
         $process->run();
         if (!$process->isSuccessful()) { throw new RuntimeException(self::errorCode($process->getErrorOutput())); }
@@ -200,13 +222,14 @@ PYTHON;
     public static function saveConfiguration(array $settings, ?array $credentials = null): array
     {
         $input = ['settings' => $settings ?: new \stdClass];
+        $input['_database_connection'] = self::databaseConnectionContext();
         if ($credentials !== null) {
             $input['credentials'] = $credentials['s3'] ?? null;
             $input['maintenance_probe_credentials'] = $credentials['site'] ?? null;
         }
         $actor = \Illuminate\Support\Facades\Auth::id();
         if ($actor !== null) { $input['_actor'] = (int) $actor; }
-        $arguments = self::engine(['config', 'set']);
+        $arguments = self::engine(['config', 'set'], true);
         if (array_key_exists('private_root', $settings) && !is_file(self::privateRoot() . '/installation.json')) {
             // A first save may choose its private location before any identity exists.
             $index = array_search('--private-root', $arguments, true);
@@ -230,8 +253,8 @@ PYTHON;
     {
         // Internal native finalizer owns both inherited flocks and native row
         // locks. Read committed rows in the cold child; it writes only secrets.
-        $process = new Process([PHP_BINARY, __DIR__ . '/bridge.php', 'credentials-merge', '--app', realpath(base_path()), '--private-root', $root],
-            base_path(), self::safeEnvironment(), json_encode($input, JSON_THROW_ON_ERROR));
+        $process = new Process([PHP_BINARY, __DIR__ . '/bridge.php', 'credentials-merge', '--database-connection-stdin', '--app', realpath(base_path()), '--private-root', $root],
+            base_path(), self::safeEnvironment(), json_encode(['database_connection' => self::databaseConnectionContext(), 'payload' => $input], JSON_THROW_ON_ERROR));
         $process->setTimeout(30);
         try { $process->run(); }
         catch (\Throwable $error) { throw new RuntimeException('config-save-outcome-unknown'); }
@@ -314,8 +337,8 @@ PYTHON;
         abort_unless(\Illuminate\Support\Facades\Auth::user()?->hasPermission('admin.extensions.update') ?? false, 403);
         $actor = \Illuminate\Support\Facades\Auth::id();
         $input['actor'] = $actor === null ? null : (int) $actor;
-        $process = new Process([self::php(), __DIR__ . '/bridge.php', $verb, '--app', realpath(base_path()), '--private-root', self::privateRoot()],
-            base_path(), self::safeEnvironment(), json_encode($input, JSON_THROW_ON_ERROR));
+        $process = new Process([self::php(), __DIR__ . '/bridge.php', $verb, '--database-connection-stdin', '--app', realpath(base_path()), '--private-root', self::privateRoot()],
+            base_path(), self::safeEnvironment(), json_encode(['database_connection' => self::databaseConnectionContext(), 'payload' => $input], JSON_THROW_ON_ERROR));
         // PBKDF2 and durable credential writes are bounded; this never starts a transfer.
         $process->setTimeout(10);
         $process->run();
@@ -328,7 +351,7 @@ PYTHON;
     public static function credentials(array $input, bool $maintenanceProbe = false): void
     {
         // Secrets never create private storage; Save settings does that first.
-        $process = new Process([self::php(), __DIR__ . '/bridge.php', $maintenanceProbe ? 'maintenance-probe-credentials-write' : 'credentials-write', '--app', realpath(base_path()), '--private-root', self::privateRoot()], base_path(), self::safeEnvironment(), json_encode($input, JSON_THROW_ON_ERROR));
+        $process = new Process([self::php(), __DIR__ . '/bridge.php', $maintenanceProbe ? 'maintenance-probe-credentials-write' : 'credentials-write', '--database-connection-stdin', '--app', realpath(base_path()), '--private-root', self::privateRoot()], base_path(), self::safeEnvironment(), json_encode(['database_connection' => self::databaseConnectionContext(), 'payload' => $input], JSON_THROW_ON_ERROR));
         $process->setTimeout(10);
         $process->run();
         if (!$process->isSuccessful()) {

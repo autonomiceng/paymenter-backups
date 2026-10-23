@@ -32,6 +32,56 @@ if ($mode === 'upload') {
     $role = App\Models\Role::firstOrCreate(['name' => 'integration-admin'], ['permissions' => ['*']]);
     $user = App\Models\User::withoutEvents(fn () => App\Models\User::create(['first_name' => 'Fixture', 'last_name' => 'User', 'email' => 'fixture@example.invalid', 'password' => 'fixture-password', 'role_id' => $role->id, 'tfa_secret' => 'TFA-RESTORE-CANARY']));
     echo json_encode(['id' => $user->id]) . "\n";
+} elseif ($mode === 'env-db-save') {
+    check(config('database.default') === 'mariadb', 'environment-only default driver was not loaded');
+    $db = (new Illuminate\Database\ConfigurationUrlParser)->parseConfiguration(config('database.connections.mariadb'));
+    check(($db['driver'] ?? null) === 'mariadb' && ($db['database'] ?? null) === 'paymenter_fixture'
+        && ($db['host'] ?? null) === '127.0.0.1' && (int) ($db['port'] ?? 0) > 0
+        && empty($db['unix_socket']) && ($db['prefix'] ?? '') === '', 'environment-only MariaDB connection shape differs');
+    $runtime = Paymenter\Extensions\Others\Backups\Runtime::class;
+    check($runtime::command(['init'], null, 30)['initialized'] === true, 'environment-only initialization failed');
+    check($runtime::command(['config', 'validate'], null, 30)['valid'] === true, 'environment-only configuration validation failed');
+    check($runtime::command(['config', 'check'], ['settings' => new stdClass], 30)['valid'] === true,
+        'environment-only config check failed');
+    $options = config('database.connections.mariadb.options', []);
+    config(['database.connections.mariadb.options' => [PDO::MYSQL_ATTR_SSL_CA => '/fixture/unused-ca.pem']]);
+    $tlsCode = null;
+    try {
+        $runtime::command(['config', 'check'], ['settings' => new stdClass], 30);
+    } catch (RuntimeException $error) {
+        $tlsCode = $error->getMessage();
+    } finally {
+        config(['database.connections.mariadb.options' => $options]);
+    }
+    check($tlsCode === 'database-tls-unsupported', 'TLS database option was silently dropped or returned an unexpected error');
+    $record = App\Models\Extension::where('extension', 'Backups')->where('type', 'other')->firstOrFail();
+    $oldDump = $record->settings()->where('key', 'dump')->value('value');
+    $root = $runtime::privateRoot();
+    $context = Paymenter\Extensions\Others\Backups\DatabaseConnectionContext::capture();
+    $readInput = json_encode(['database_connection' => $context, 'payload' => new stdClass], JSON_THROW_ON_ERROR);
+    $childEnvironment = [];
+    foreach (array_keys(array_merge(getenv(), $_SERVER, $_ENV)) as $name) {
+        if (is_string($name)) { $childEnvironment[$name] = false; }
+    }
+    $childEnvironment = array_replace($childEnvironment, ['PATH' => '/usr/local/bin:/usr/bin:/bin', 'LANG' => 'C.UTF-8', 'LC_ALL' => 'C.UTF-8', 'TZ' => 'UTC']);
+    $bridgeRead = new Symfony\Component\Process\Process([PHP_BINARY, $base . '/extensions/Others/Backups/bridge.php', 'read', '--database-connection-stdin', '--app', $base, '--private-root', $root], $base, $childEnvironment, $readInput);
+    $bridgeRead->mustRun();
+    $oldCredentials = json_decode($bridgeRead->getOutput(), true, 32, JSON_THROW_ON_ERROR)['credentials'] ?? [];
+    $credentials = ['s3' => ['access_key' => 'ENV-ONLY-FIXTURE-ACCESS', 'secret_key' => 'ENV-ONLY-FIXTURE-SECRET'], 'site' => null];
+    try {
+        $saved = $runtime::saveConfiguration(['dump' => '/usr/bin/mysqldump'], $credentials);
+        check(($saved['updated'] ?? false) === true && $record->settings()->where('key', 'dump')->value('value') === '/usr/bin/mysqldump',
+            'environment-only native writer did not persist settings');
+    } finally {
+        try {
+            if ($oldCredentials) { $runtime::credentials($oldCredentials); }
+            else { $runtime::credentials(['clear' => true]); }
+        } finally {
+            if ($oldDump === null) { $record->settings()->where('key', 'dump')->delete(); }
+            else { $runtime::saveConfiguration(['dump' => $oldDump]); }
+        }
+    }
+    echo json_encode(['env_only_mariadb_save' => true]) . "\n";
 } elseif ($mode === 'check') {
     // Many Livewire renders of a large page in one process.
     ini_set('memory_limit', '512M');

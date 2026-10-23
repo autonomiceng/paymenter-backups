@@ -136,6 +136,14 @@ echo json_encode($result, JSON_THROW_ON_ERROR);
             self.assertNotIn(code, text)
             self.assertIn('unrecognized error', text)
 
+    def test_database_driver_and_database_name_errors_are_distinct(self):
+        source = (ROOT / 'extension/Backups/Messages.php').read_text()
+        driver = re.search(r"'database-driver-unsupported'\s*=>\s*'([^']*)'", source).group(1)
+        name = re.search(r"'unsupported-database'\s*=>\s*'([^']*)'", source).group(1)
+        self.assertNotEqual(driver, name)
+        self.assertIn('driver', driver.lower())
+        self.assertIn('database name', name.lower())
+
     def test_frozen_upload_refusals_do_not_promise_regeneration_or_reencryption(self):
         messages = self.messages(('delivery-ciphertext-unavailable', 'legacy-plaintext-delivery-blocked',
                                   'credentials-unreadable'))

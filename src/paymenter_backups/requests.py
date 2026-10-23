@@ -192,7 +192,7 @@ def sync_schedule(state, settings, now=None, settings_loader=None):
         return _sync_schedule(state, settings, time.time() if now is None else now)
 
 
-def tick(state, envelope, command_prefix, envelope_loader=None):
+def tick(state, envelope, command_prefix, envelope_loader=None, database_context=None):
     from .maintenance import recover
     # Independently usable recovery is called by the CLI before bridge reads too.
     if (state.app / "storage/framework/down").exists():
@@ -273,7 +273,11 @@ def tick(state, envelope, command_prefix, envelope_loader=None):
                 item = eligible[0]
                 item.update(status="launching", attempts=item["attempts"] + 1, last_attempt_at=now)
                 atomic_json(path(state, item["request_id"]), item)
-                pid = detach(command_prefix + ["request-worker", item["request_id"], "--execute"])
+                worker_command = command_prefix + ["request-worker", item["request_id"], "--execute"]
+                worker_input = None
+                if database_context is not None:
+                    worker_input = json.dumps({"_database_connection": database_context}).encode()
+                pid = detach(worker_command, worker_input)
                 item["worker"] = process_identity(pid)
                 atomic_json(path(state, item["request_id"]), item)
                 launched.append(item["request_id"])

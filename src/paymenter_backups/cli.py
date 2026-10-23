@@ -10,7 +10,7 @@ import uuid
 from . import __version__
 from .artifacts import journal as artifact_journal, stream
 from .common import BackupError, State, atomic_json, read_json, private_file
-from .config import DEFAULTS, bridge, load, load_policy, normalize, redact, validate
+from .config import DEFAULTS, bridge, load, load_policy, normalize, redact, validate, validate_database_context
 from .engine import capture, export, plan, verify
 from .maintenance import recover, schedule_admission
 from .presentation import overview
@@ -41,6 +41,7 @@ def parser():
     result.add_argument("--private-root")
     result.add_argument("--bridge")
     result.add_argument("--php", default="/usr/bin/php")
+    result.add_argument("--database-connection-stdin", action="store_true", help=argparse.SUPPRESS)
     commands = result.add_subparsers(dest="command", required=True)
     for name, verbs in (("config", ("show", "set", "validate", "check")), ("schedule", ("show", "set", "enable", "disable"))):
         sub = commands.add_parser(name)
@@ -109,7 +110,13 @@ def native_settings(args, state, values, descriptors, actor=None, restore=False,
     if actor is not None:
         command.append("--actor=" + str(actor))
     try:
-        result = run_native_writer(command, json.dumps(values).encode(), descriptors)
+        writer_values = dict(values)
+        if getattr(args, "database_connection", None) is not None:
+            writer_values["_database_connection"] = args.database_connection
+        input_bytes = json.dumps(writer_values).encode()
+        if len(input_bytes) > 65536:
+            raise BackupError("input-too-large")
+        result = run_native_writer(command, input_bytes, descriptors)
         if result.returncode:
             try:
                 refusal = json.loads(result.stderr)
@@ -118,8 +125,9 @@ def native_settings(args, state, values, descriptors, actor=None, restore=False,
                 code = None
             safe_refusals = {"config-changed", "credentials-unreadable", "credentials-invalid", "maintenance-probe-credentials-invalid",
                 "maintenance-probe-origin-mismatch", "maintenance-probe-origin-invalid", "installation-missing", "installation-mismatch",
-                "private-file-invalid", "private-root-invalid", "billing-settings-unreadable", "extension-uninstalled"}
-            if finalize and code in safe_refusals:
+                "private-file-invalid", "private-root-invalid", "billing-settings-unreadable", "extension-uninstalled",
+                "database-connection-invalid", "database-driver-unsupported"}
+            if code in safe_refusals and (finalize or code in {"database-connection-invalid", "database-driver-unsupported"}):
                 raise BackupError(code)
             raise BackupError("config-write-failed" if code == "config-coordination-required" else "config-write-outcome-unknown")
         output = json.loads(result.stdout)
@@ -325,6 +333,15 @@ def dispatch(args):
     args.private_root = args.private_root or str(pathlib.Path(args.app).parent / "paymenter-backups-private")
     args.bridge = args.bridge or str(pathlib.Path(args.app) / "extensions/Others/Backups/bridge.php")
     command = args.command
+    args.database_connection = None
+    args.command_input = None
+    if getattr(args, "database_connection_stdin", False):
+        request = stdin_json()
+        context = request.pop("_database_connection", None)
+        if context is None:
+            raise BackupError("database-connection-invalid")
+        args.database_connection = validate_database_context(context)
+        args.command_input = request
     initialize = command == "init" or command == "config" and args.verb == "set" or command == "schedule" and args.verb != "show" or command == "run" and args.execute
     preliminary = bridge(args, "read-settings") if initialize else None
     if preliminary:
@@ -409,14 +426,14 @@ def dispatch(args):
             return cancel(state, args.request_id)
         if not state.initialized:
             raise BackupError("installation-not-initialized")
-        return create(state, args.action, stdin_json())
+        return create(state, args.action, args.command_input if args.command_input is not None else stdin_json())
     if command == "config":
         if args.verb == "show":
             return redact(bridge(args))
         if args.verb == "set":
-            return set_config(args, state, stdin_json())
+            return set_config(args, state, args.command_input if args.command_input is not None else stdin_json())
         if args.verb == "check":
-            return check_config(args, state, stdin_json())
+            return check_config(args, state, args.command_input if args.command_input is not None else stdin_json())
         envelope = load(args)
         state.apply_policy(envelope["settings"])
         schedule_admission(state, envelope)
@@ -507,7 +524,10 @@ def dispatch(args):
         # sys.argv[0] is a release wrapper, preserving its isolated runtime paths.
         prefix = [envelope["tools"].get("python", sys.executable), "-I", str(pathlib.Path(sys.argv[0]).resolve()),
                   "--app", args.app, "--private-root", args.private_root, "--bridge", args.bridge, "--php", args.php]
-        return tick(state, envelope, prefix, envelope_loader=lambda: load(args, coordinated=False))
+        database_context = args.database_connection
+        if database_context is not None:
+            prefix.append("--database-connection-stdin")
+        return tick(state, envelope, prefix, envelope_loader=lambda: load(args, coordinated=False), database_context=database_context)
     raise BackupError("command-invalid")
 
 

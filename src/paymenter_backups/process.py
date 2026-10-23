@@ -322,10 +322,21 @@ def continuous_workers(app):
     return False
 
 
-def detach(command):
+def detach(command, input_bytes=None):
     # Popen actually forks/execs, closes caller flock descriptors and setsid.
-    child = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+    child = subprocess.Popen(command, stdin=subprocess.PIPE if input_bytes is not None else subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                              stderr=subprocess.DEVNULL, close_fds=True, start_new_session=True, env=safe_environment())
+    if input_bytes is not None:
+        try:
+            child.stdin.write(input_bytes)
+            child.stdin.flush()
+        except BrokenPipeError:
+            pass
+        finally:
+            try:
+                child.stdin.close()
+            except BrokenPipeError:
+                pass
     # Retain ownership while this short launcher lives; avoid Popen destructor
     # warnings or premature orphan bookkeeping. OS reparents after launcher exit.
     reap_detached()

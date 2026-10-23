@@ -1,4 +1,5 @@
 import json
+import math
 import pathlib
 import os
 import re
@@ -55,20 +56,72 @@ def redact(value):
     return value
 
 
+def validate_database_context(context):
+    """Check the short-lived Laravel connection snapshot before forwarding it."""
+    fields = {"driver", "host", "port", "unix_socket", "database", "username", "password", "prefix",
+              "options", "charset", "collation", "strict", "engine", "prefix_indexes"}
+    if (not isinstance(context, dict) or set(context) != {"schema_version", "default", "connection"}
+            or type(context["schema_version"]) is not int or context["schema_version"] != 1
+            or not isinstance(context["default"], str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", context["default"])
+            or not isinstance(context["connection"], dict) or set(context["connection"]) != fields):
+        raise BackupError("database-connection-invalid")
+    connection = context["connection"]
+    if connection.get("options") == []:
+        connection["options"] = {}
+    limits = {"driver": 64, "host": 1024, "unix_socket": 4096, "database": 256,
+              "username": 1024, "password": 8192, "prefix": 128, "charset": 64, "collation": 128}
+    for field, limit in limits.items():
+        value = connection[field]
+        if not isinstance(value, str) or len(value.encode()) > limit or "\0" in value:
+            raise BackupError("database-connection-invalid")
+    port = connection["port"]
+    if (not re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]{0,63}", connection["driver"])
+            or ";" in connection["host"] or ";" in connection["unix_socket"] or ";" in connection["database"]
+            or isinstance(port, bool) or not (isinstance(port, int) or isinstance(port, str) and port.isdigit())
+            or not 1 <= int(port) <= 65535 or not isinstance(connection["options"], dict)
+            or len(connection["options"]) > 128 or not isinstance(connection["strict"], bool)
+            or not isinstance(connection["prefix_indexes"], bool)
+            or not (connection["engine"] is None or isinstance(connection["engine"], str)
+                    and len(connection["engine"].encode()) <= 128 and "\0" not in connection["engine"])):
+        raise BackupError("database-connection-invalid")
+    if connection["driver"] not in {"mysql", "mariadb"}:
+        raise BackupError("database-driver-unsupported")
+    for key, value in connection["options"].items():
+        if (not (isinstance(key, (int, str)) and not isinstance(key, bool))
+                or isinstance(key, str) and len(key.encode()) > 128
+                or not (isinstance(value, (bool, int, str, float)) and not isinstance(value, float) or isinstance(value, float) and math.isfinite(value))
+                or isinstance(value, str) and (len(value.encode()) > 4096 or "\0" in value)):
+            raise BackupError("database-connection-invalid")
+    try:
+        if len(json.dumps(context, separators=(",", ":"), ensure_ascii=False, allow_nan=False).encode()) > 32768:
+            raise BackupError("database-connection-invalid")
+    except (TypeError, ValueError, UnicodeError):
+        raise BackupError("database-connection-invalid") from None
+    return context
+
+
 def bridge(args, verb="read", payload=None):
     from .process import safe_environment
     if not args.bridge:
         raise BackupError("bridge-required")
     command = [args.php, args.bridge, verb, "--app", str(args.app), "--private-root", str(args.private_root)]
+    database_context = getattr(args, "database_connection", None)
+    if database_context is not None:
+        database_context = validate_database_context(database_context)
+        command.append("--database-connection-stdin")
+        payload = {"database_connection": database_context, "payload": payload}
+    input_bytes = json.dumps(payload).encode() if payload is not None else None
+    if input_bytes is not None and len(input_bytes) > 65536:
+        raise BackupError("input-too-large")
     try:
-        result = subprocess.run(command, input=json.dumps(payload).encode() if payload is not None else None,
+        result = subprocess.run(command, input=input_bytes,
                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30, close_fds=True, env=safe_environment())
         if result.returncode:
             try:
                 error = json.loads(result.stderr).get("error")
             except (ValueError, AttributeError):
                 error = None
-            if error in {"credentials-unreadable", "database-tls-unsupported", "database-driver-unsupported",
+            if error in {"credentials-unreadable", "database-connection-invalid", "database-tls-unsupported", "database-driver-unsupported", "unsupported-database",
                          "database-prefix-unsupported", "native-secret-row-refused", "billing-settings-unreadable",
                          "installation-mismatch", "private-root-invalid", "private-file-invalid",
                          "private-root-inside-docroot", "private-pipe-required", "application-unavailable",

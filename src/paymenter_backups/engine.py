@@ -264,7 +264,9 @@ def run_tool(name, command, timeout, **kwargs):
 
 def inventory(envelope, defaults, timeout, register):
     database = envelope["database"]
-    if database.get("driver") not in ("mysql", "mariadb") or not database.get("name"):
+    if database.get("driver") not in ("mysql", "mariadb"):
+        raise BackupError("database-driver-unsupported")
+    if not database.get("name"):
         raise BackupError("unsupported-database")
     # Database name never interpolates into SQL: DATABASE() reflects CLI selection.
     query = """SELECT 'tables', COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA=DATABASE() AND (TABLE_TYPE!='BASE TABLE' OR ENGINE!='InnoDB');

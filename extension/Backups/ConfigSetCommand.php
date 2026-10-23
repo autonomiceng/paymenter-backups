@@ -3,6 +3,8 @@ namespace Paymenter\Extensions\Others\Backups;
 
 use Illuminate\Console\Command;
 
+require_once __DIR__ . '/DatabaseConnectionContext.php';
+
 final class ConfigSetCommand extends Command
 {
     protected $signature = 'backups:config-set {--defer-init : Internal audited writer for an inherited coordinator} {--restore : Internal compare-and-restore receipt} {--finalize : Internal credential publication under native row locks} {--config-lock-fd=} {--tick-lock-fd=} {--coordination-root=} {--actor=}';
@@ -16,6 +18,12 @@ final class ConfigSetCommand extends Command
             if (strlen($bytes) > 65536) { throw new \RuntimeException('config-invalid'); }
             $input = json_decode($bytes, true, 16, JSON_THROW_ON_ERROR);
             if (!is_array($input)) { throw new \RuntimeException('config-invalid'); }
+            if (array_key_exists('_database_connection', $input)) {
+                if (!$this->option('defer-init')) { throw new \RuntimeException('config-invalid'); }
+                $databaseContext = $input['_database_connection'];
+                unset($input['_database_connection']);
+                DatabaseConnectionContext::apply($databaseContext);
+            }
             if (!$this->option('restore') && !$this->option('finalize')) {
                 $fields = array_column(Settings::fields(), null, 'name');
                 if (array_diff(array_keys($input), array_keys($fields))) { throw new \RuntimeException('config-invalid'); }
@@ -74,7 +82,8 @@ final class ConfigSetCommand extends Command
             $code = in_array($error->getMessage(), ['busy', 'config-coordination-required', 'config-save-incomplete', 'config-changed',
                 'config-save-outcome-unknown', 'credentials-unreadable', 'credentials-invalid', 'maintenance-probe-credentials-invalid',
                 'maintenance-probe-origin-invalid', 'maintenance-probe-origin-mismatch', 'installation-missing', 'installation-mismatch',
-                'private-file-invalid', 'private-root-invalid', 'billing-settings-unreadable', 'extension-uninstalled'], true) ? $error->getMessage() : 'config-invalid';
+                'private-file-invalid', 'private-root-invalid', 'billing-settings-unreadable', 'extension-uninstalled',
+                'database-connection-invalid', 'database-driver-unsupported'], true) ? $error->getMessage() : 'config-invalid';
             if ($this->option('defer-init')) {
                 // Artisan's styled error() writes to its console output stream.
                 // Internal callers consume a bounded, secret-free stderr code.
