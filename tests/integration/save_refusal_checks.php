@@ -34,8 +34,11 @@ namespace {
     );
     $probe = new SaveRefusalProbe();
     $probe->refuse($details['code'], $details['field']);
+    $fieldNotification = \Filament\Notifications\Notification::$last;
+    $probe->refuse('command-not-registered', null);
     echo json_encode([
         'errors' => $probe->errors,
-        'notification' => \Filament\Notifications\Notification::$last,
+        'notification' => $fieldNotification,
+        'command_notification' => \Filament\Notifications\Notification::$last,
     ], JSON_THROW_ON_ERROR);
 }

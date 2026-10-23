@@ -56,6 +56,7 @@ final class Messages
         'storage-required' => 'Keep backups on this server, upload them to S3, or enable both under Storage.',
         'storage-untested' => 'Test storage with the current settings and recovery key before enabling automatic uploads.',
         'config-write-failed' => 'Paymenter couldn\'t save settings to its database. Check the database connection and try again.',
+        'command-not-registered' => 'Paymenter did not load the Backups settings command. Check that CLI PHP can connect to Paymenter\'s database, then save again.',
         'tool-unavailable' => 'A required binary wasn\'t found. Fix it under Advanced, Binary paths, or leave the path empty to detect it.',
         'tool-path-invalid' => 'Enter a full path, for example /usr/bin/tar.',
         'plaintext-offsite-acknowledgement-required' => 'To upload unencrypted backups to S3, confirm that backups in S3 won\'t be encrypted.',

@@ -29,6 +29,7 @@ NON_ERRORS = {
     'recovery-key', 'request-worker', 's3-delivery', 's3-verify', 'scope-changed',
     'staging-removal', 'transactional-database-only', 'untrusted-transport-only',
     'us-east-1', 'utf-8', 'visible-zero',
+    'native-writer-failed', 'writer-exited-without-output', 'writer-process-failed', 'writer-timeout',
 }
 
 
@@ -86,7 +87,7 @@ def emitted_codes():
             values = re.findall(r"['\"]([a-z][a-z0-9-]+)['\"]", expression)
             if CODE.fullmatch(expression):
                 values.append(expression)
-            codes.update(value for value in values if CODE.fullmatch(value))
+            codes.update(value for value in values if CODE.fullmatch(value) and value not in NON_ERRORS)
         if path.name == 'bridge.php':
             match = re.search(r"\$code\s*=.*?\?\s*\$error->getMessage\(\)\s*:\s*'([^']+)'", source)
             if match:
@@ -182,6 +183,59 @@ echo json_encode($result, JSON_THROW_ON_ERROR);
         self.assertIn('settings.schedule_time', value['errors'])
         self.assertNotIn('Open Settings and save', value['errors']['settings.schedule_time'])
         self.assertNotIn('Open Settings and save', value['notification']['body'])
+        self.assertIn('Backups settings command', value['command_notification']['body'])
+        self.assertIn('database', value['command_notification']['body'])
+
+    def test_missing_writer_command_is_logged_and_has_save_copy(self):
+        script = r'''
+namespace Illuminate\Support\Facades {
+    final class Log {
+        public static array $calls = [];
+        public static function warning(string $message, array $context = []): void {
+            self::$calls[] = [$message, $context];
+        }
+    }
+}
+namespace {
+require $argv[1];
+require $argv[2];
+require $argv[3];
+$details = \Paymenter\Extensions\Others\Backups\Runtime::recordNativeWriterFailure(
+    '{"error":"command-not-registered","detail":{"writer_cause":"command-not-registered"}}'
+);
+$redacted = \Paymenter\Extensions\Others\Backups\Runtime::errorDetails(json_encode([
+    'error' => 'config-write-outcome-unknown',
+    'detail' => ['writer_cause' => 'PDO failed password=secret-value username=fixture-user'],
+], JSON_THROW_ON_ERROR));
+$loggedRedaction = \Paymenter\Extensions\Others\Backups\Runtime::recordNativeWriterFailure(json_encode([
+    'error' => 'config-write-outcome-unknown',
+    'detail' => ['writer_cause' => 'PDO failed password=secret-value username=fixture-user'],
+], JSON_THROW_ON_ERROR));
+echo json_encode([
+    'details' => $details,
+    'redacted' => $redacted,
+    'logs' => \Illuminate\Support\Facades\Log::$calls,
+    'message' => \Paymenter\Extensions\Others\Backups\Messages::error('command-not-registered'),
+], JSON_THROW_ON_ERROR);
+}
+'''
+        result = subprocess.run([PHP, '-r', script, str(ROOT / 'extension/Backups/Runtime.php'),
+                                 str(ROOT / 'extension/Backups/Settings.php'),
+                                 str(ROOT / 'extension/Backups/Messages.php')],
+                                capture_output=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stdout.decode() + result.stderr.decode())
+        value = json.loads(result.stdout)
+        self.assertEqual(value['details'], {'code': 'command-not-registered', 'field': None,
+                                            'cause': 'command-not-registered'})
+        self.assertEqual(value['logs'][0][1], {'code': 'native-writer-failed',
+                                               'cause': 'command-not-registered'})
+        self.assertEqual(value['logs'][1][1], {'code': 'native-writer-failed',
+                                               'cause': 'PDO failed password=[redacted] username=[redacted]'})
+        self.assertNotIn('secret-value', value['redacted']['cause'])
+        self.assertNotIn('fixture-user', value['redacted']['cause'])
+        self.assertIn('[redacted]', value['redacted']['cause'])
+        self.assertIn('Backups', value['message'])
+        self.assertIn('database', value['message'])
 
     def test_frozen_upload_refusals_do_not_promise_regeneration_or_reencryption(self):
         messages = self.messages(('delivery-ciphertext-unavailable', 'legacy-plaintext-delivery-blocked',

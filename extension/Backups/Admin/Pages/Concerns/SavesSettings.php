@@ -129,9 +129,12 @@ trait SavesSettings
                 $this->refusePrivateRootProblem($privateProblem);
                 return;
             }
-            if ($code === 'config-save-outcome-unknown') {
+            if (in_array($code, ['config-save-outcome-unknown', 'config-write-outcome-unknown'], true)) {
+                $cause = $error instanceof \Paymenter\Extensions\Others\Backups\EngineCommandException
+                    ? Runtime::safeWriterCause($error->cause) : null;
                 Notification::make()->title('Save outcome unknown')->warning()
-                    ->body('Refresh and check the saved settings before trying again. Keys you entered were cleared.')->send();
+                    ->body('Refresh and check the saved settings before trying again. Keys you entered were cleared.'
+                        . ($cause !== null ? ' Writer cause: ' . $cause . '.' : ''))->send();
             } else {
                 $field = $error instanceof \Paymenter\Extensions\Others\Backups\EngineCommandException ? $error->field : null;
                 $this->refuseSettings($code, false, $field);
@@ -162,12 +165,14 @@ trait SavesSettings
                 $this->refusePrivateRootProblem($privateProblem);
                 return;
             }
+            $writerCause = Runtime::safeWriterCause($saved['writer_cause'] ?? null);
             Notification::make()->title('Save incomplete')->warning()
-                ->body(($saved['outcome_unknown'] ?? false)
+                ->body((($saved['outcome_unknown'] ?? false)
                     ? 'The saved settings or keys could not be confirmed. Backup work is paused. Refresh, check settings and enter the replacement keys again to complete Save.'
                     : (($saved['concurrent_settings_preserved'] ?? false)
                         ? 'Concurrent settings changes were preserved. Keys you entered weren\'t saved. Refresh and check settings before trying again.'
-                        : 'Some settings could not be restored. Backup work is paused. Keys you entered weren\'t saved. Refresh, check settings and enter the replacement keys again to complete Save.'))->send();
+                        : 'Some settings could not be restored. Backup work is paused. Keys you entered weren\'t saved. Refresh, check settings and enter the replacement keys again to complete Save.'))
+                    . ($writerCause !== null ? ' Writer cause: ' . $writerCause . '.' : ''))->send();
             return;
         }
         $problems = [];

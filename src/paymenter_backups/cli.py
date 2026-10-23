@@ -2,6 +2,7 @@ import argparse
 import json
 import os
 import pathlib
+import re
 import subprocess
 import sys
 import time
@@ -17,6 +18,44 @@ from .presentation import overview
 from .requests import cancel, create, list_requests, tick, worker
 from .native_writer import run as run_native_writer
 from .storage import clean_environment, delete_plan, delete_run, deliver, destination_test, retention, retrieve, retrieve_plan
+
+
+def native_writer_cause(stderr, stdout=b"", database_context=None):
+    """Return a short cause for an Artisan writer failure without credentials."""
+    outputs = []
+    for value in (stderr, stdout):
+        if isinstance(value, bytes):
+            value = value.decode("utf-8", errors="replace")
+        if isinstance(value, str) and value:
+            outputs.append(value)
+    combined = "\n".join(outputs)
+    if re.search(r'there are no commands defined in the ["\']?backups["\']? namespace', combined, re.IGNORECASE):
+        return "command-not-registered"
+    for output in outputs:
+        try:
+            refusal = json.loads(output)
+        except (TypeError, ValueError):
+            continue
+        code = refusal.get("error") if isinstance(refusal, dict) else None
+        if isinstance(code, str) and re.fullmatch(r"[a-z0-9][a-z0-9-]{0,63}", code):
+            return code
+    line = next((item for item in combined.splitlines() if item.strip()), "writer-exited-without-output")
+    line = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", line)
+    secrets = []
+    if isinstance(database_context, dict):
+        connection = database_context.get("connection", {})
+        if isinstance(connection, dict):
+            secrets.extend(connection.get(field) for field in ("password", "username") if isinstance(connection.get(field), str))
+    for secret in sorted((item for item in secrets if len(item) >= 4), key=len, reverse=True):
+        line = line.replace(secret, "[redacted]")
+    line = re.sub(
+        r"(?i)\b(password|passwd|pwd|username|user|secret|token|api[_-]?key|access[_-]?key|authorization)\b"
+        r"(\s*[:=]\s*)(?:\"[^\"]*\"|'[^']*'|[^\s,;]+)",
+        r"\1\2[redacted]", line,
+    )
+    line = re.sub(r"(?i)(://)[^/@\s:]+:[^/@\s]+@", r"\1[redacted]@", line)
+    line = " ".join("".join(char for char in line if char.isprintable()).split())
+    return line[:160] or "writer-exited-without-output"
 
 
 def stdin_json():
@@ -122,24 +161,30 @@ def native_settings(args, state, values, descriptors, actor=None, restore=False,
         else:
             result = run_native_writer(command, input_bytes, descriptors, database_context=database_context)
         if result.returncode:
+            cause = native_writer_cause(result.stderr, result.stdout, database_context)
             try:
                 refusal = json.loads(result.stderr)
                 code = refusal.get("error") if isinstance(refusal, dict) else None
             except (ValueError, UnicodeDecodeError):
                 code = None
+            if cause == "command-not-registered":
+                raise BackupError("command-not-registered", detail={"writer_cause": cause})
             safe_refusals = {"config-changed", "credentials-unreadable", "credentials-invalid", "maintenance-probe-credentials-invalid",
                 "maintenance-probe-origin-mismatch", "maintenance-probe-origin-invalid", "installation-missing", "installation-mismatch",
                 "private-file-invalid", "private-root-invalid", "billing-settings-unreadable", "extension-uninstalled",
                 "database-connection-invalid", "database-pdo-driver-unavailable", "database-connection-failed", "database-driver-unsupported"}
             if code in safe_refusals and (finalize or code in {"database-connection-invalid", "database-driver-unsupported"}):
-                raise BackupError(code)
-            raise BackupError("config-write-failed" if code == "config-coordination-required" else "config-write-outcome-unknown")
+                raise BackupError(code, detail={"writer_cause": cause})
+            raise BackupError("config-write-failed" if code == "config-coordination-required" else "config-write-outcome-unknown",
+                              detail={"writer_cause": cause})
         output = json.loads(result.stdout)
         if not isinstance(output, dict) or output.get("ok") is not True:
             raise ValueError()
         return output
-    except (OSError, ValueError, subprocess.TimeoutExpired):
-        raise BackupError("config-write-outcome-unknown") from None
+    except subprocess.TimeoutExpired:
+        raise BackupError("config-write-outcome-unknown", detail={"writer_cause": "writer-timeout"}) from None
+    except (OSError, ValueError):
+        raise BackupError("config-write-outcome-unknown", detail={"writer_cause": "writer-process-failed"}) from None
 
 
 def finish_config_save(state):
@@ -269,6 +314,13 @@ def set_config(args, state, changes):
             finish_config_save(state)
         except (BackupError, OSError) as error:
             failure = error if isinstance(error, BackupError) else BackupError("config-save-failed")
+            writer_cause = failure.detail.get("writer_cause")
+
+            def partial(result):
+                if isinstance(writer_cause, str):
+                    result["writer_cause"] = writer_cause
+                return result
+
             definite_credential_refusals = {"config-changed", "credentials-unreadable", "credentials-invalid", "maintenance-probe-credentials-invalid",
                 "maintenance-probe-origin-mismatch", "maintenance-probe-origin-invalid", "installation-missing", "installation-mismatch",
                 "private-file-invalid", "private-root-invalid", "billing-settings-unreadable", "extension-uninstalled"}
@@ -276,20 +328,20 @@ def set_config(args, state, changes):
                 # A child may have committed before timing out or losing stdout.
                 # Keep the guard durable: workers refuse either possibly mixed
                 # pair until a later complete Save supplies the uncertain groups.
-                return {"updated": False, "credentials_updated": False, "maintenance_probe_credentials_updated": False,
-                        "partial": True, "error": "config-save-outcome-unknown", "settings_restored": False, "outcome_unknown": True}
+                return partial({"updated": False, "credentials_updated": False, "maintenance_probe_credentials_updated": False,
+                                "partial": True, "error": "config-save-outcome-unknown", "settings_restored": False, "outcome_unknown": True})
             if committed_credentials:
                 # Credentials are durably committed. Restoring destination rows
                 # would publish an old destination/new-key pair instead.
                 try:
                     finish_config_save(state)
                 except OSError:
-                    return {"updated": True, "credentials_updated": credentials is not None,
-                            "maintenance_probe_credentials_updated": probe_credentials is not None,
-                            "partial": True, "error": "config-save-outcome-unknown", "outcome_unknown": True}
-                return {"updated": True, "credentials_updated": credentials is not None,
-                        "maintenance_probe_credentials_updated": probe_credentials is not None,
-                        "partial": True, "error": failure.code, "settings_restored": False}
+                    return partial({"updated": True, "credentials_updated": credentials is not None,
+                                    "maintenance_probe_credentials_updated": probe_credentials is not None,
+                                    "partial": True, "error": "config-save-outcome-unknown", "outcome_unknown": True})
+                return partial({"updated": True, "credentials_updated": credentials is not None,
+                                "maintenance_probe_credentials_updated": probe_credentials is not None,
+                                "partial": True, "error": failure.code, "settings_restored": False})
             try:
                 # Cleanup may unlink the intent before directory fsync fails.
                 # Reestablish it before rollback, which can itself fail.
@@ -320,13 +372,13 @@ def set_config(args, state, changes):
                     if not pending_path.exists():
                         restore_configuration_file(pending_path, previous_intent or current_intent)
                 except OSError:
-                    return {"updated": False, "credentials_updated": False, "maintenance_probe_credentials_updated": False,
-                            "partial": True, "error": "config-save-outcome-unknown", "settings_restored": False, "outcome_unknown": True}
-                return {"updated": False, "credentials_updated": False, "maintenance_probe_credentials_updated": False,
-                        "partial": True, "error": failure.code, "settings_restored": False}
+                    return partial({"updated": False, "credentials_updated": False, "maintenance_probe_credentials_updated": False,
+                                    "partial": True, "error": "config-save-outcome-unknown", "settings_restored": False, "outcome_unknown": True})
+                return partial({"updated": False, "credentials_updated": False, "maintenance_probe_credentials_updated": False,
+                                "partial": True, "error": failure.code, "settings_restored": False})
             if skipped:
-                return {"updated": False, "credentials_updated": False, "maintenance_probe_credentials_updated": False,
-                        "partial": True, "error": failure.code, "settings_restored": False, "concurrent_settings_preserved": True}
+                return partial({"updated": False, "credentials_updated": False, "maintenance_probe_credentials_updated": False,
+                                "partial": True, "error": failure.code, "settings_restored": False, "concurrent_settings_preserved": True})
             raise failure
     return {"updated": True, "credentials_updated": credentials is not None,
             "maintenance_probe_credentials_updated": probe_credentials is not None}
