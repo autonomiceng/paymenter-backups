@@ -79,10 +79,16 @@ trait SavesSettings
             $this->refuseSettings('private-root-move-refused');
             return;
         }
+        $privateRoot = ($changes['private_root'] ?? $this->engineValue('private_root', $stored['private_root'])) ?: null;
+        $docroots = $changes['extra_docroots'] ?? $this->engineValue('extra_docroots', $stored['extra_docroots']);
+        $problem = PrivateStore::problem(realpath(base_path()), $privateRoot, $docroots);
+        if ($problem !== null) {
+            $this->refusePrivateRootProblem($problem);
+            return;
+        }
         if (array_key_exists('private_root', $userChanges) || array_key_exists('extra_docroots', $userChanges)) {
             try {
-                $docroots = $changes['extra_docroots'] ?? $this->engineValue('extra_docroots', $stored['extra_docroots']);
-                PrivateStore::root(realpath(base_path()), ($changes['private_root'] ?? $this->engineValue('private_root', $stored['private_root'])) ?: null, false, $docroots);
+                PrivateStore::root(realpath(base_path()), $privateRoot, false, $docroots);
             } catch (\RuntimeException $error) {
                 $this->refuseSettings($error->getMessage());
                 return;
@@ -118,6 +124,11 @@ trait SavesSettings
             $this->storedForm = null;
             $this->overviewCache = null;
             $code = $error instanceof \RuntimeException ? $error->getMessage() : 'config-save-outcome-unknown';
+            $privateProblem = PrivateStore::problem(realpath(base_path()), $privateRoot, $docroots);
+            if ($privateProblem !== null) {
+                $this->refusePrivateRootProblem($privateProblem);
+                return;
+            }
             if ($code === 'config-save-outcome-unknown') {
                 Notification::make()->title('Save outcome unknown')->warning()
                     ->body('Refresh and check the saved settings before trying again. Keys you entered were cleared.')->send();
@@ -146,6 +157,11 @@ trait SavesSettings
         if (($saved['credentials_updated'] ?? false) === true) { $this->secretsSaved['s3'] = true; }
         if (($saved['maintenance_probe_credentials_updated'] ?? false) === true) { $this->secretsSaved['site'] = true; }
         if (($saved['updated'] ?? false) !== true) {
+            $privateProblem = PrivateStore::problem(realpath(base_path()), $privateRoot, $docroots);
+            if ($privateProblem !== null) {
+                $this->refusePrivateRootProblem($privateProblem);
+                return;
+            }
             Notification::make()->title('Save incomplete')->warning()
                 ->body(($saved['outcome_unknown'] ?? false)
                     ? 'The saved settings or keys could not be confirmed. Backup work is paused. Refresh, check settings and enter the replacement keys again to complete Save.'
@@ -212,5 +228,12 @@ trait SavesSettings
         }
         Notification::make()->title('Settings not saved')->danger()
             ->body($environment ? $message . ' Fix Binary paths under Advanced, save, then save your other changes.' : $message)->send();
+    }
+
+    private function refusePrivateRootProblem(array $problem): void
+    {
+        $message = $problem['message'];
+        $this->addError('settings.private_root', $message);
+        $this->dispatch('form-validation-error', livewireId: $this->getId());
     }
 }

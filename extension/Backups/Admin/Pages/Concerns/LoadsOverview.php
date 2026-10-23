@@ -11,12 +11,33 @@ trait LoadsOverview
     private function overview(): array
     {
         if ($this->overviewCache !== null) { return $this->overviewCache; }
+        $problem = $this->privateRootProblem();
+        if ($problem !== null) {
+            $this->overviewError = $problem['code'];
+            return $this->overviewCache = ['initialized' => false, 'runs' => [], 'requests' => [], 'scheduler' => ['last_tick_at' => null],
+                'configuration' => ['available' => false, 'valid' => false, 'error' => $this->overviewError], 'maintenance' => false, 'installation_uuid' => null];
+        }
         try {
             return $this->overviewCache = Runtime::command(['overview'], null, 20);
         } catch (\Throwable $error) {
             $this->overviewError = $error instanceof \RuntimeException ? $error->getMessage() : 'engine-unavailable';
             return $this->overviewCache = ['initialized' => false, 'runs' => [], 'requests' => [], 'scheduler' => ['last_tick_at' => null],
                 'configuration' => ['available' => false, 'valid' => false, 'error' => $this->overviewError], 'maintenance' => false, 'installation_uuid' => null];
+        }
+    }
+
+    /** Return a data directory issue the admin can fix before the engine starts. */
+    private function privateRootProblem(): ?array
+    {
+        try {
+            $record = $this->record();
+            $configured = $record->settings()->where('key', 'private_root')->value('value');
+            $rawDocroots = $record->settings()->where('key', 'extra_docroots')->value('value') ?? '[]';
+            $docroots = json_decode($rawDocroots, true, 16, JSON_THROW_ON_ERROR);
+            if (!is_array($docroots) || !array_is_list($docroots) || !str_starts_with(ltrim($rawDocroots), '[')) { return null; }
+            return PrivateStore::problem(realpath(base_path()), $configured ?: null, $docroots);
+        } catch (\Throwable $error) {
+            return null;
         }
     }
 

@@ -156,6 +156,31 @@ try {
         $record->settings()->where('key', 'private_root')->update(['value' => $freshRoot]);
         $record->settings()->whereIn('key', ['full_schedule', 'database_schedule'])->update(['value' => 'off']);
         $record->settings()->where('key', 'upload_s3')->update(['value' => '0']);
+        $blockedParent = $work . '/test-read-only-parent-' . bin2hex(random_bytes(4));
+        $blockedRoot = $blockedParent . '/paymenter-backups-private';
+        testCheck(mkdir($blockedParent, 0700), 'Could not create read-only Data directory parent');
+        chmod($blockedParent, 0500);
+        try {
+            $refused = submitSettings($class, ['private_root' => $blockedRoot]);
+            $fieldErrors = $refused->instance()->getErrorBag()->getMessages();
+            $fieldMessage = $fieldErrors['settings.private_root'][0] ?? '';
+            testCheck(str_contains($fieldMessage, 'Data directory ' . $blockedRoot . ' can\'t be created')
+                && str_contains($fieldMessage, 'can\'t write to ' . $blockedParent)
+                && str_contains($fieldMessage, 'mode 0700')
+                && !file_exists($blockedRoot), 'Save did not show the Data directory cause and fix by its field');
+            $record->settings()->where('key', 'private_root')->update(['value' => $blockedRoot]);
+            $overviewPage = Livewire\Livewire::test($class);
+            $overviewHtml = $overviewPage->html();
+            testCheck(str_contains($overviewHtml, 'Fix the Data directory')
+                && str_contains($overviewHtml, $blockedRoot)
+                && str_contains($overviewHtml, 'can\'t write to ' . $blockedParent)
+                && !str_contains($overviewHtml, 'To see details, run these as the site user:'),
+                'Overview did not show one actionable Data directory readiness item');
+        } finally {
+            chmod($blockedParent, 0700);
+            rmdir($blockedParent);
+            $record->settings()->where('key', 'private_root')->update(['value' => $freshRoot]);
+        }
         $freshNativeRows = Paymenter\Extensions\Others\Backups\SettingsWriter::snapshot($record);
         $lifecycle = Livewire\Livewire::test(App\Admin\Resources\ExtensionResource\Pages\EditExtension::class, ['record' => $record->getRouteKey()]);
         $lifecycle->update(calls: [['method' => 'save', 'params' => []]], updates: [

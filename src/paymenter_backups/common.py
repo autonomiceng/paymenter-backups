@@ -19,6 +19,7 @@ class BackupError(Exception):
 
 
 TRANSIENT_ERRORS = frozenset({"busy", "billing-guard-stale", "billing-window-protected", "job-lock-busy"})
+PREINSTALL_RUNTIME_FILES = frozenset({"identity.lock", "billing-guard.json"})
 
 
 def digest(path, check=None):
@@ -112,14 +113,17 @@ class State:
         if self.root == self.app or self.app in self.root.parents:
             raise BackupError("private-root-inside-app")
         info = self.root.stat()
-        if info.st_uid != os.getuid() or info.st_mode & 0o077 or self.app.stat().st_uid != os.getuid():
+        if info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o700 or self.app.stat().st_uid != os.getuid():
             raise BackupError("owner-mismatch")
         self.binding = self.root / "installation.json"
         if initialize:
             with self.lock("identity.lock"):
                 if not self.binding.exists():
-                    if any(path.name != "identity.lock" for path in self.root.iterdir()):
+                    entries = list(self.root.iterdir())
+                    if any(path.name not in PREINSTALL_RUNTIME_FILES for path in entries):
                         raise BackupError("installation-state-orphaned")
+                    for path in entries:
+                        private_file(path)
                     atomic_json(self.binding, {"schema_version": 1, "app": str(self.app),
                                 "owner_uid": os.getuid(), "installation_uuid": str(uuid.uuid4()),
                                 "default_local_directory": "backups"})

@@ -485,6 +485,10 @@ final class Messages
         // Engine names for the same conditions.
         $code = ['continuous-worker-present' => 'worker-continuous', 'job-command-unsupported' => 'job-unparseable', 'job-discovery-failed' => 'discovery-failed',
             'job-discovery-incomplete' => 'discovery-failed', 'job-discovery-stale' => 'discovery-stale'][$code] ?? $code;
+        if (in_array($code, ['private-root-invalid', 'private-root-unavailable'], true)
+            && is_string($context['private_root_problem'] ?? null)) {
+            return $item('Fix the Data directory', $context['private_root_problem'], [], $settings('Go to Data directory', 'first-time-setup'));
+        }
         $job = is_string($detail['job'] ?? null) ? ($context['jobs'][$detail['job']] ?? null) : null;
         if ($job === null && $code === 'worker-continuous') {
             foreach ($context['jobs'] ?? [] as $candidate) { if (($candidate['coordination'] ?? null) === 'continuous') { $job = $candidate; break; } }

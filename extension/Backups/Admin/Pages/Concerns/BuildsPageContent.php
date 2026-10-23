@@ -62,7 +62,7 @@ trait BuildsPageContent
                 ->danger()
                 ->description(fn () => Messages::error($this->overviewError) . ' To see details, run these as the site user:')
                 ->footer([Group::make([$this->command(fn () => $this->terminalFunction()), $this->command('paymenter_backups overview --offline')])])
-                ->visible(fn () => $this->overview() && $this->overviewError !== null),
+                ->visible(fn () => $this->overview() && $this->overviewError !== null && $this->privateRootProblem() === null),
             Tabs::make('Backups')
                 ->contained(false)
                 ->persistTabInQueryString('tab')
