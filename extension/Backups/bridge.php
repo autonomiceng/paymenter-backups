@@ -4,6 +4,7 @@ use Illuminate\Encryption\Encrypter;
 use Illuminate\Foundation\Application;
 use Illuminate\Foundation\Bootstrap\LoadConfiguration;
 use Illuminate\Foundation\Bootstrap\LoadEnvironmentVariables;
+use Paymenter\Extensions\Others\Backups\DatabaseConnectionContext;
 use Paymenter\Extensions\Others\Backups\PrivateStore;
 
 umask(0077);
