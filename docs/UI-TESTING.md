@@ -15,7 +15,7 @@ private root and fake credentials created by `tools/native_integration.py` or
 | --- | --- | --- | --- |
 | Setup readiness | Backups tab, Setup: per type, named items with fixes | `overview` `configuration.readiness[mode]`, capture `admission[mode]`, `checks` | Native `check`: Create dialog names blockers once, never counts; `admin_contracts.php field_help`: deep-link targets |
 | Status | Overview, Backup history | `overview`: runs, requests, `last_good`, `schedules`, `storage` | Native `ui-history render` |
-| Edit settings | Settings, one Save settings | Rules, then `config check`, then changed native rows through Eloquent (audited), then `init` with row rollback | Native `check`: invalid values, GiB conversion, weekly days, no storage place, billing overlap, row diff, audit, credential digest; contract test `validation`, `baseline` |
+| Edit settings | Settings, one Save settings | Rules, then `config check`, then changed native rows through Eloquent (audited), then `init` with row rollback | Native `check`: invalid values, GiB conversion, weekly days, no storage place, billing-window save, row diff, audit, credential digest; contract test `validation`, `baseline` |
 | First v2 save | Save settings on 0.3 rows | `Settings::fromLegacy()` view; writes `settings_version=2` and every v2 key | `tests/integration/settings_migration.php` against the shared vectors |
 | Malformed rows | Save settings | Defaults written and named in a warning; malformed guard JSON refused | Native `check`; contract test `repair` |
 | S3 keys | Storage, Upload to S3, key fields | `Runtime::saveCredentials()` after settings and `init`; `{"clear":true}` to remove | Native `check`: incomplete pair writes nothing, canaries cleared, encrypted at rest, settings-only save keeps keys, removal keeps the site password; contract test `credentials`, `modals` |
@@ -37,8 +37,7 @@ private root and fake credentials created by `tools/native_integration.py` or
 | Recovery, export, restore | Help, Command line and Restoring | CLI only | `test_cli`, restore drill |
 
 The native `check` and contract-test phases exercise engine readiness items,
-`config check` for version 2 keys, schedule overlap refusals, and recovery-key
-state.
+`config check` for version 2 keys, billing-window waits, and recovery-key state.
 
 ## Browser checklist
 

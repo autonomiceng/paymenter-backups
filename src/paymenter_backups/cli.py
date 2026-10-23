@@ -12,7 +12,7 @@ from .artifacts import journal as artifact_journal, stream
 from .common import BackupError, State, atomic_json, read_json, private_file
 from .config import DEFAULTS, bridge, load, load_policy, normalize, redact, validate, validate_database_context
 from .engine import capture, export, plan, verify
-from .maintenance import recover, schedule_admission
+from .maintenance import recover
 from .presentation import overview
 from .requests import cancel, create, list_requests, tick, worker
 from .native_writer import run as run_native_writer
@@ -216,7 +216,8 @@ def set_config(args, state, changes):
             if local == state.app or state.app in local.parents:
                 raise BackupError("destination-unsafe")
             state.guard_location(local, "destination-inside-docroot")
-        schedule_admission(state, envelope)
+        # Saving settings validates the proposed values only. Billing guards,
+        # windows and job locks are checked when queued work runs.
         secrets = credentials is not None or probe_credentials is not None
         merge = {"s3": credentials, "site": probe_credentials}
         if secrets:
@@ -436,7 +437,6 @@ def dispatch(args):
             return check_config(args, state, args.command_input if args.command_input is not None else stdin_json())
         envelope = load(args)
         state.apply_policy(envelope["settings"])
-        schedule_admission(state, envelope)
         return {"valid": True}
     if command == "schedule":
         settings = load(args, credential_free=True)["settings"]
@@ -572,7 +572,6 @@ def check_config(args, state, changes):
         if local == state.app or state.app in local.parents:
             raise BackupError("destination-unsafe")
         state.guard_location(local, "destination-inside-docroot")
-    schedule_admission(state, envelope)
     return {"valid": True}
 
 

@@ -18,6 +18,9 @@ class BackupError(Exception):
         super().__init__(code)
 
 
+TRANSIENT_ERRORS = frozenset({"busy", "billing-guard-stale", "billing-window-protected", "job-lock-busy"})
+
+
 def digest(path, check=None):
     result = hashlib.sha256()
     with open(path, "rb") as stream:

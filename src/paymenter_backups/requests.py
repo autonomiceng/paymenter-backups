@@ -8,7 +8,7 @@ import pathlib
 import time
 import uuid
 
-from .common import BackupError, atomic_json, private_file, read_json
+from .common import BackupError, TRANSIENT_ERRORS, atomic_json, private_file, read_json
 from .process import detach, process_identity
 from .config import configured_timezone, schedule_settings
 
@@ -424,8 +424,7 @@ def worker(state, envelope, request_id, envelope_loader=None):
             apply_automatic_retention(state, envelope, result, envelope_loader=envelope_loader)
         item.update({"status": "complete", "result": result})
     except BackupError as error:
-        deferred = {"busy", "billing-guard-stale", "billing-window-protected", "job-lock-busy"}
-        item["status"] = "deferred" if error.code in deferred else "failed"
+        item["status"] = "deferred" if error.code in TRANSIENT_ERRORS else "failed"
         if error.code == "initial-maintenance-scheduled-skip":
             item["status"] = "skipped"
         item["error"] = error.code

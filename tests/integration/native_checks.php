@@ -124,10 +124,10 @@ if ($mode === 'upload') {
     $digest = fn () => is_file($root . "/credentials.json") ? hash_file("sha256", $root . "/credentials.json") : null;
     $secretFields = fn ($livewire) => array_filter([...array_values($livewire->get('s3Keys') ?? []), ...array_values($livewire->get('siteAccess') ?? []), $livewire->get('encryptionInput.passphrase')], fn ($value) => $value !== null && $value !== '');
 
-    $save = function (array $updates) use ($page, $record) {
+    $save = function (array $updates, bool $refreshGuard = true) use ($page, $record) {
         $livewire = Livewire\Livewire::test($page);
         $fullSchedule = $updates['settings.full_schedule'] ?? $record->settings()->where('key', 'full_schedule')->value('value') ?? 'off';
-        if ($fullSchedule !== 'off') {
+        if ($fullSchedule !== 'off' && $refreshGuard) {
             check(Illuminate\Support\Facades\Artisan::call('backups:guard') === 0, 'billing guard refresh failed');
         }
         $livewire->update(calls: [['method' => 'saveSettings', 'params' => []]], updates: $updates);
@@ -176,6 +176,18 @@ if ($mode === 'upload') {
 
     // Engine-matching field rules refuse before any native write.
     $before = $nativeRows();
+    check(Illuminate\Support\Facades\Artisan::call('backups:guard') === 0, 'stale-guard fixture setup failed');
+    $guardPath = $root . '/billing-guard.json';
+    $staleGuard = json_decode(file_get_contents($guardPath), true, 16, JSON_THROW_ON_ERROR);
+    $staleGuard['generated_at'] = time() - 1000;
+    file_put_contents($guardPath, json_encode($staleGuard, JSON_THROW_ON_ERROR));
+    $staleSave = $save(['settings.full_schedule' => 'daily'], false);
+    check($staleSave->instance()->getErrorBag()->isEmpty() && $record->settings()->where('key', 'full_schedule')->value('value') === 'daily',
+        'stale billing guard blocked Settings Save');
+    $notices();
+    check(Illuminate\Support\Facades\Artisan::call('backups:guard') === 0, 'billing guard restore failed');
+    $save(['settings.full_schedule' => $before['full_schedule']]);
+    check($nativeRows() === $before, 'stale-guard Save test did not restore native rows');
     foreach ([['settings.retention_keep_full', 0, 'settings.retention_keep_full'], ['settings.local_byte_budget', 0, 'settings.local_byte_budget'],
               ['settings.capture_timeout', '1.5', 'settings.capture_timeout'], ['settings.job_lock_paths', 'relative.lock', 'settings.job_lock_paths'],
               ['settings.database_minute', 60, null], ['settings.s3_endpoint', 'http://fixture.invalid', null]] as [$field, $value, $errorKey]) {
@@ -187,9 +199,12 @@ if ($mode === 'upload') {
     check($weekly->instance()->getErrorBag()->has('settings.full_weekdays') && $nativeRows() === $before, 'weekly schedule without days accepted');
     $neither = $save(['settings.keep_local' => false, 'settings.upload_s3' => false]);
     check($neither->instance()->getErrorBag()->has('settings.keep_local') && $nativeRows() === $before, 'storage with no place accepted');
-    // Engine-only refusal: a full backup over Paymenter's observed billing minute.
+    // A billing overlap is a readiness wait and never blocks Settings Save.
     $overlap = $save(['settings.full_schedule' => 'daily', 'settings.full_time' => '23:59']);
-    check($overlap->instance()->getErrorBag()->has('settings.full_time') && $nativeRows() === $before, 'engine schedule refusal not mapped before persistence');
+    check($overlap->instance()->getErrorBag()->isEmpty() && $nativeRows()['full_schedule'] === 'daily'
+        && $nativeRows()['full_time'] === '23:59', 'billing overlap blocked Settings Save');
+    $save(['settings.full_schedule' => $before['full_schedule'], 'settings.full_time' => $before['full_time']]);
+    check($nativeRows() === $before, 'billing-window test did not restore native rows');
     $notices();
 
     // A valid save writes only changed native rows and never touches credentials.
@@ -495,7 +510,11 @@ if ($mode === 'upload') {
     }
     $queuedView = Livewire\Livewire::test($page);
     $queuedText = $text($queuedView);
-    check(str_contains($queuedText, 'Queued') && str_contains($queuedText, 'Waiting for Paymenter\'s cron job'), 'queued backup or cron job notice not shown');
+    check(str_contains($queuedText, 'Queued') && str_contains($queuedText, 'Waiting for Paymenter\'s scheduled tasks.'), 'queued backup or scheduler wait line not shown');
+    check(substr_count($queuedText, 'Waiting for Paymenter\'s scheduled tasks.') === 1
+        && preg_match('/<a\\b[^>]*href="([^"]+)"[^>]*>the Backups tab<\\/a>/', $queuedView->html(), $schedulerLink)
+        && str_contains($schedulerLink[1], 'tab=backups') && str_contains($schedulerLink[1], '#setup'),
+        'queued backup does not show one linked scheduler wait line');
     // Phones stack history rows and wrap long commands instead of pushing actions or text off screen.
     check(str_contains($queue->html(), 'fi-ta-table-stacked-on-mobile') && str_contains($queue->html(), 'overflow-wrap: anywhere'), 'mobile history or command wrapping missing');
     // Without a recent cron check-in the page never promises a start time.

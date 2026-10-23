@@ -1,4 +1,5 @@
 """Admin history, download, verification, per-backup delete and config check."""
+import copy
 import json
 import os
 import pathlib
@@ -9,10 +10,11 @@ import unittest
 from unittest.mock import patch
 
 import test_engine
+from paymenter_backups import cli, engine, requests
 from paymenter_backups import artifacts
 from paymenter_backups.cli import dispatch, parser
 from paymenter_backups.common import BackupError, atomic_json, read_json
-from paymenter_backups.config import redact
+from paymenter_backups.config import billing_fingerprint, normalize, redact
 from paymenter_backups.engine import capture, verify
 from paymenter_backups.presentation import overview
 from paymenter_backups.requests import create, next_slot, worker
@@ -360,6 +362,46 @@ class AdminWorkflowTests(unittest.TestCase):
         self.assertEqual(journal["mode"], "database-online")
         self.assertFalse((self.fixture.app / "storage/framework/down").exists())
 
+    def test_manual_backup_with_stale_guard_stays_queued_for_tick_retry(self):
+        self.envelope["settings"].update(mode="full-quiesced", enabled=False, settings_version=1)
+        atomic_json(self.state.root / "billing-guard.json", {
+            "generated_at": time.time() - 1000,
+            "fingerprint": billing_fingerprint(self.envelope["billing"]),
+            "instants": [time.time() + 86400, time.time() + 172800],
+            "timezone": "UTC", "expression": "0 0 * * *",
+        })
+        request = create(self.state, "run", {"mode": "full-quiesced"})
+        result = self.launch(request)
+        stored = read_json(self.state.root / "requests" / (request["request_id"] + ".json"))
+        self.assertEqual((result["status"], result["error"], stored["status"]),
+                         ("deferred", "billing-guard-stale", "deferred"))
+        self.assertEqual(overview(self.state, self.envelope)["runs"], [])
+
+        retry_at = stored["retry_at"] + 1
+        with patch.object(requests.time, "time", return_value=retry_at), \
+                patch.object(requests, "detach", return_value=os.getpid()):
+            retried = requests.tick(self.state, self.envelope, ["fixture-worker"])
+        self.assertEqual(retried["launched"], [request["request_id"]])
+
+    def test_billing_window_race_does_not_leave_a_failed_run(self):
+        self.envelope["settings"].update(mode="full-quiesced", enabled=False, settings_version=1)
+        request = create(self.state, "run", {"mode": "full-quiesced"})
+        checks = 0
+
+        def admission(*_args, **_kwargs):
+            nonlocal checks
+            checks += 1
+            if checks == 1:
+                return {"admitted_at": time.time(), "hold_deadline": time.time() + 60, "protected_instants": []}
+            raise BackupError("billing-window-protected")
+
+        with patch.object(engine, "billing_admission", side_effect=admission):
+            result = self.launch(request)
+        stored = read_json(self.state.root / "requests" / (request["request_id"] + ".json"))
+        self.assertEqual((result["status"], stored["status"], stored["error"]),
+                         ("deferred", "deferred", "billing-window-protected"))
+        self.assertEqual(overview(self.state, self.envelope)["runs"], [])
+
     def test_config_check_validates_without_writing(self):
         args = parser().parse_args(["--app", str(self.fixture.app), "--private-root", str(self.state.root), "config", "check"])
         before = sorted(str(path) for path in self.state.root.rglob("*"))
@@ -378,6 +420,39 @@ class AdminWorkflowTests(unittest.TestCase):
         with self.assertRaisesRegex(BackupError, "s3-tls-required"):
             check({"destination": "s3", "s3_bucket": "fixture", "plaintext_offsite_acknowledged": True, "s3_endpoint": "http://fixture.invalid"})
         self.assertEqual(sorted(str(path) for path in self.state.root.rglob("*")), before)
+
+    def test_saving_settings_does_not_require_a_fresh_billing_guard(self):
+        self.envelope["settings"].update(mode="full-quiesced", enabled=True, settings_version=1)
+        changes = {"mode": "full-quiesced", "enabled": True}
+        atomic_json(self.state.root / "billing-guard.json", {
+            "generated_at": time.time() - 1000,
+            "fingerprint": billing_fingerprint(self.envelope["billing"]),
+            "instants": [time.time() + 86400, time.time() + 172800],
+            "timezone": "UTC", "expression": "0 0 * * *",
+        })
+        check = parser().parse_args(["--app", str(self.fixture.app), "--private-root", str(self.state.root), "config", "check"])
+        validate = parser().parse_args(["--app", str(self.fixture.app), "--private-root", str(self.state.root), "config", "validate"])
+        save = parser().parse_args(["--app", str(self.fixture.app), "--private-root", str(self.state.root), "config", "set"])
+        persisted = copy.deepcopy(self.envelope)
+
+        def bridge(_args, _verb="read", _payload=None):
+            return copy.deepcopy(self.envelope)
+
+        persisted["settings"].update(changes)
+        normalize(persisted["settings"])
+
+        with patch.object(cli, "bridge", side_effect=bridge), patch.object(cli, "stdin_json", return_value={"settings": changes}):
+            self.assertEqual(cli.dispatch(check), {"valid": True})
+
+        with patch.object(cli, "load", return_value=copy.deepcopy(self.envelope)):
+            self.assertEqual(cli.dispatch(validate), {"valid": True})
+
+        with patch.object(cli, "bridge", side_effect=bridge), \
+                patch.object(cli, "stdin_json", return_value={"settings": changes}), \
+                patch.object(cli, "native_settings", return_value={"receipt": {}, "snapshot": {}}), \
+                patch.object(cli, "load", return_value=persisted):
+            result = cli.dispatch(save)
+        self.assertTrue(result["updated"])
 
     def test_native_null_text_settings_normalize_to_empty(self):
         from paymenter_backups.config import DEFAULTS, normalize, validate

@@ -57,7 +57,8 @@ private directory in First-time setup and program paths under Advanced before
 the first save if the defaults do not fit the host. The first save creates the private directory and
 installation ID. Afterwards the private directory can only be moved from the
 terminal. The page checks each save with the engine before writing, including
-schedule and billing overlap, S3 endpoint and backup directory location.
+field rules, the S3 endpoint and backup directory location. A billing window
+can delay a queued full backup without blocking the save.
 
 Backups settings is the only web settings editor. The native Extensions page
 controls enabling, disabling and uninstalling the extension. CLI configuration

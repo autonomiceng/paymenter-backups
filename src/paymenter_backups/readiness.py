@@ -1,6 +1,8 @@
 """Automatic full-state checks shared by plan and capture."""
 import re
 
+from .common import TRANSIENT_ERRORS
+
 STORE_RULES = (
     ('maintenance', 'maintenance_driver', 'APP_MAINTENANCE_DRIVER', 'file', ('file',)),
     ('cache', 'cache_driver', 'CACHE_STORE', 'file', ('file', 'database', 'array')),
@@ -33,6 +35,6 @@ def state_for(items):
         return 'needs-recovery'
     if not codes:
         return 'ready'
-    if codes <= {'busy', 'billing-guard-stale', 'billing-window-protected', 'job-lock-busy'}:
+    if codes <= TRANSIENT_ERRORS:
         return 'waiting'
     return 'needs-setup'

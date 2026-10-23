@@ -16,7 +16,7 @@ import time
 import uuid
 
 from . import artifacts
-from .common import BackupError, atomic_json, digest, identity, read_json
+from .common import BackupError, TRANSIENT_ERRORS, atomic_json, digest, identity, read_json
 from .maintenance import MARKERS, billing_admission, cleanup, coordination, probe, strict_payload, schedule_admission
 from .process import boot_id, hash_stream, process_identity, run
 
@@ -360,6 +360,33 @@ def cleanup_failed_work(state):
             state.save(item)
 
 
+def discard_unstarted_capture(state, directory, payload, defaults):
+    """Remove only this attempt's private setup files before capture starts."""
+    try:
+        directory_info = directory.lstat()
+        if (not stat.S_ISDIR(directory_info.st_mode) or directory_info.st_uid != os.getuid()
+                or directory_info.st_mode & 0o077 or directory.parent != state.root / "runs"):
+            return False
+        children = {item.name for item in directory.iterdir()}
+        if children - {"journal.json", "payload", defaults.name}:
+            return False
+        journal = directory / "journal.json"
+        for path in (journal, defaults):
+            if path.exists() or path.is_symlink():
+                info = path.lstat()
+                if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077:
+                    return False
+        if payload.exists() or payload.is_symlink():
+            info = payload.lstat()
+            if (not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077
+                    or next(payload.iterdir(), None) is not None):
+                return False
+        shutil.rmtree(directory)
+        return True
+    except OSError:
+        return False
+
+
 def capture(state, envelope, scheduled=False, request_id=None, envelope_loader=None):
     with state.lock():
         if envelope_loader is not None:
@@ -516,6 +543,10 @@ def capture(state, envelope, scheduled=False, request_id=None, envelope_loader=N
             return journal
         except BaseException as error:
             defaults.unlink(missing_ok=True)
+            if (isinstance(error, BackupError) and error.code in TRANSIENT_ERRORS
+                    and journal.get("phase") == "admitted" and not journal.get("owned_markers")
+                    and not journal.get("groups") and discard_unstarted_capture(state, directory, payload, defaults)):
+                raise
             journal["error"] = error.code if isinstance(error, BackupError) else "capture-failed"
             journal["phase"] = "failed"
             if full:

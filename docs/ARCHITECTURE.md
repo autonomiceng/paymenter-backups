@@ -138,8 +138,10 @@ Settings saved on the page pass plain Laravel field rules that match the engine
 (positive integers stay positive, weekdays are 0 to 6 and required for an
 enabled weekly schedule, path lists are absolute, the S3 prefix has no empty,
 `.` or `..` parts or backslashes), then `config check`, which
-runs engine normalization, validation, schedule/billing admission and the
-backup-directory location rule without writing. The page passes changes and entered credential groups to
+uses engine normalization and validation plus the backup-directory location
+rule without writing. `config validate` checks saved values against the same
+schema. Billing guards, billing windows and job locks are checked when queued
+work runs; they never block saving settings. The page passes changes and entered credential groups to
 `Runtime::saveConfiguration`, backed by CLI `config set`. The engine acquires
 `config.lock` then `tick.lock` with one ten-second acquisition deadline, or
 refuses `busy` before publication. It rereads and validates the authoritative

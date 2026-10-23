@@ -35,7 +35,10 @@ trait QueuesBackupActions
             return false;
         }
         $this->overviewCache = null;
-        Notification::make()->title($title)->success()->body($body ?? $start)->send();
+        $notification = Notification::make()->title($title)->success();
+        $notice = $body ?? $start;
+        if ($notice !== '') { $notification->body($notice); }
+        $notification->send();
         return true;
     }
 
@@ -106,7 +109,7 @@ trait QueuesBackupActions
                     Notification::make()->title('Backup not queued')->danger()->body($reason)->send();
                     $action->halt();
                 }
-                if (!$this->queue('run', ['mode' => $mode], 'Backup queued')) { $action->halt(); }
+                if (!$this->queue('run', ['mode' => $mode], 'Backup queued', $this->schedulerFresh() ? null : '')) { $action->halt(); }
             });
     }
 

@@ -12,6 +12,7 @@ use Filament\Support\Enums\FontFamily;
 use Filament\Support\Enums\Size;
 use Filament\Tables\Columns\TextColumn;
 use Filament\Tables\Table;
+use Illuminate\Support\HtmlString;
 use Illuminate\Pagination\LengthAwarePaginator;
 use Paymenter\Extensions\Others\Backups\Messages;
 use Paymenter\Extensions\Others\Backups\Runtime;
@@ -43,9 +44,10 @@ trait BuildsHistoryTable
             if (in_array($request['status'], ['complete', 'cancelled', 'satisfied'], true)) { continue; }
             $active = in_array($request['status'], self::ACTIVE, true);
             [$label, $color] = $active || in_array($request['status'], ['expired', 'skipped'], true) ? Messages::taskStatus($request['status']) : ['Didn\'t start', 'danger'];
+            $schedulerFresh = $this->schedulerFresh();
             $detail = match ($request['status']) {
-                'pending' => $this->schedulerFresh() ? 'Starts within a minute.' : 'Waiting for Paymenter\'s cron job.',
-                'deferred' => 'Retrying soon. ' . Messages::error($request['error']),
+                'pending' => $schedulerFresh ? 'Starts within a minute.' : $this->schedulerWaitLine(),
+                'deferred' => $schedulerFresh ? 'Retrying soon. ' . Messages::error($request['error']) : $this->schedulerWaitLine(),
                 'launching' => 'Starting.', 'running' => 'Running.',
                 'expired' => 'Expired: Paymenter\'s cron job didn\'t run in time.',
                 default => Messages::error($request['error']),
@@ -83,6 +85,12 @@ trait BuildsHistoryTable
         }
         usort($rows, static fn ($a, $b) => ($b['created_at'] ?? 0) <=> ($a['created_at'] ?? 0));
         return $rows;
+    }
+
+    private function schedulerWaitLine(): HtmlString
+    {
+        $url = e(static::getUrl(['tab' => 'backups']) . '#setup');
+        return new HtmlString('Waiting for Paymenter\'s scheduled tasks. Set them up on <a class="underline" href="' . $url . '">the Backups tab</a>.');
     }
 
     private function hasDeletedRuns(): bool

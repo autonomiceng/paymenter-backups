@@ -56,10 +56,11 @@ def execute_env_only_database_parent(command, database_environment, cwd=None, in
 
 
 def guarded_write(cli, arguments, **kwargs):
-    """Refresh observed native billing state immediately before a fixture write."""
-    app = cli[cli.index('--app') + 1]
-    php = cli[cli.index('--php') + 1]
-    execute([php, 'artisan', 'backups:guard'], cwd=app)
+    """Refresh billing state before fixture captures; configuration saves do not need it."""
+    if arguments and arguments[0] == 'run':
+        app = cli[cli.index('--app') + 1]
+        php = cli[cli.index('--php') + 1]
+        execute([php, 'artisan', 'backups:guard'], cwd=app)
     return execute(cli + arguments, **kwargs)
 
 

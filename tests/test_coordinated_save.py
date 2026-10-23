@@ -199,8 +199,6 @@ class CoordinatedSaveTests(PrivateFixture):
             mocked.start(); self.addCleanup(mocked.stop)
             mocked = patch.object(target, 'validate')
             mocked.start(); self.addCleanup(mocked.stop)
-        mocked = patch.object(cli, 'schedule_admission')
-        mocked.start(); self.addCleanup(mocked.stop)
 
     @property
     def credentials(self):
