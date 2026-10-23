@@ -10,7 +10,7 @@ import uuid
 
 from . import __version__
 from .artifacts import journal as artifact_journal, stream
-from .common import BackupError, State, atomic_json, read_json, private_file
+from .common import BackupError, State, atomic_json, read_json, private_file, safe_writer_cause
 from .config import DEFAULTS, bridge, load, load_policy, normalize, redact, validate, validate_database_context
 from .engine import capture, export, plan, verify
 from .maintenance import recover
@@ -36,6 +36,10 @@ def native_writer_cause(stderr, stdout=b"", database_context=None):
             refusal = json.loads(output)
         except (TypeError, ValueError):
             continue
+        detail = refusal.get("detail") if isinstance(refusal, dict) else None
+        cause = safe_writer_cause(detail.get("writer_cause")) if isinstance(detail, dict) else None
+        if cause is not None:
+            return cause
         code = refusal.get("error") if isinstance(refusal, dict) else None
         if isinstance(code, str) and re.fullmatch(r"[a-z0-9][a-z0-9-]{0,63}", code):
             return code
@@ -165,8 +169,11 @@ def native_settings(args, state, values, descriptors, actor=None, restore=False,
             try:
                 refusal = json.loads(result.stderr)
                 code = refusal.get("error") if isinstance(refusal, dict) else None
+                field = refusal.get("field") if isinstance(refusal, dict) else None
             except (ValueError, UnicodeDecodeError):
-                code = None
+                code, field = None, None
+            if not isinstance(field, str) or not re.fullmatch(r"[a-z][a-z0-9_]{0,63}", field) or field not in DEFAULTS:
+                field = None
             if cause == "command-not-registered":
                 raise BackupError("command-not-registered", detail={"writer_cause": cause})
             safe_refusals = {"config-changed", "credentials-unreadable", "credentials-invalid", "maintenance-probe-credentials-invalid",
@@ -174,9 +181,9 @@ def native_settings(args, state, values, descriptors, actor=None, restore=False,
                 "private-file-invalid", "private-root-invalid", "billing-settings-unreadable", "extension-uninstalled",
                 "database-connection-invalid", "database-pdo-driver-unavailable", "database-connection-failed", "database-driver-unsupported"}
             if code in safe_refusals and (finalize or code in {"database-connection-invalid", "database-driver-unsupported"}):
-                raise BackupError(code, detail={"writer_cause": cause})
+                raise BackupError(code, field=field, detail={"writer_cause": cause})
             raise BackupError("config-write-failed" if code == "config-coordination-required" else "config-write-outcome-unknown",
-                              detail={"writer_cause": cause})
+                              field=field, detail={"writer_cause": cause})
         output = json.loads(result.stdout)
         if not isinstance(output, dict) or output.get("ok") is not True:
             raise ValueError()
@@ -201,6 +208,23 @@ def finish_config_save(state):
         if intent is not None:
             restore_configuration_file(path, intent)
         raise
+
+
+def retain_writer_cause(path, cause):
+    cause = safe_writer_cause(cause)
+    if cause is None or not path.exists():
+        return
+    try:
+        private_file(path)
+        pending = read_json(path)
+        if (not isinstance(pending, dict) or pending.get("schema_version") != 1
+                or type(pending.get("s3_requested")) is not bool or type(pending.get("site_requested")) is not bool):
+            return
+        pending["writer_cause"] = cause
+        atomic_json(path, pending)
+    except (BackupError, OSError):
+        # A diagnostic must not change whether the durable uncertainty guard remains.
+        return
 
 
 def configuration_file_snapshot(path):
@@ -319,6 +343,9 @@ def set_config(args, state, changes):
             def partial(result):
                 if isinstance(writer_cause, str):
                     result["writer_cause"] = writer_cause
+                    retain_writer_cause(pending_path, writer_cause)
+                if failure.field is not None:
+                    result["field"] = failure.field
                 return result
 
             definite_credential_refusals = {"config-changed", "credentials-unreadable", "credentials-invalid", "maintenance-probe-credentials-invalid",
@@ -429,11 +456,17 @@ def dispatch(args):
         return {"initialized": True, "installation_uuid": state.uuid}
     if command == "overview":
         envelope, error = None, None
+        pending_save, pending_writer_cause = False, None
         if not args.offline:
             try:
                 with state.lock("config.lock", timeout=10, create=state.initialized):
                     envelope = bridge(args)
-                    pending_save = (state.root / "config-save.json").exists()
+                    pending_path = state.root / "config-save.json"
+                    pending_save = pending_path.exists()
+                    if pending_save:
+                        private_file(pending_path)
+                        pending_intent = read_json(pending_path)
+                        pending_writer_cause = safe_writer_cause(pending_intent.get("writer_cause"))
                 envelope["settings"] = {**DEFAULTS, **envelope.get("settings", {})}
                 normalize(envelope["settings"])
             except BackupError as failure:
@@ -448,7 +481,7 @@ def dispatch(args):
                 if pending_save:
                     error = "config-save-outcome-unknown"
                     envelope["validation_error"] = {"field": None, "detail": {}}
-        return overview(state, envelope, error)
+        return overview(state, envelope, error, writer_cause=pending_writer_cause)
     if command == "artifact-stream":
         return stream_artifact(state, args)
     if command in ("status", "list"):

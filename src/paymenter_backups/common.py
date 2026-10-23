@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 import pathlib
+import re
 import stat
 import time
 import uuid
@@ -20,6 +21,21 @@ class BackupError(Exception):
 
 TRANSIENT_ERRORS = frozenset({"busy", "billing-guard-stale", "billing-window-protected", "job-lock-busy"})
 PREINSTALL_RUNTIME_FILES = frozenset({"identity.lock", "billing-guard.json"})
+
+
+def safe_writer_cause(value):
+    """Accept only bounded, secret-free causes that the native writer emits."""
+    if not isinstance(value, str) or len(value) > 160:
+        return None
+    if re.fullmatch(r"[a-z][a-z0-9-]{0,63}", value):
+        return value
+    if re.fullmatch(r"unknown-input-key:[a-z][a-z0-9_]{0,63}", value):
+        return value
+    if re.fullmatch(r"validation:[a-z][a-z0-9_]{0,63}:[a-z][a-z0-9_-]{0,31}", value):
+        return value
+    if re.fullmatch(r"exception:[A-Za-z][A-Za-z0-9_]{0,63}", value):
+        return value
+    return None
 
 
 def digest(path, check=None):

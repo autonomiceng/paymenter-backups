@@ -117,6 +117,7 @@ class Backups extends Page implements HasTable
     #[Locked]
     public ?string $publicDirectoriesRepairPin = null;
     private ?string $overviewError = null;
+    private ?string $overviewErrorCause = null;
     private array $deletePreviews = [];
     /** Revealed key for this request only; never a public property. */
     private ?array $revealedKey = null;

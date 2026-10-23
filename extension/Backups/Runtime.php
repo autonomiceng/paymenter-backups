@@ -299,7 +299,7 @@ PYTHON;
         }
         if (!$process->isSuccessful()) {
             $failure = self::errorDetails($process->getErrorOutput(), 'config-save-outcome-unknown');
-            if (in_array($failure['code'], ['command-not-registered', 'config-write-outcome-unknown', 'config-write-failed'], true)) {
+            if ($failure['cause'] !== null || in_array($failure['code'], ['command-not-registered', 'config-write-outcome-unknown', 'config-write-failed'], true)) {
                 $failure = self::recordNativeWriterFailure($process->getErrorOutput());
                 throw new EngineCommandException($failure['code'], $failure['field'], $failure['cause'] ?? null);
             }

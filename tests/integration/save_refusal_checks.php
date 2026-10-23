@@ -26,17 +26,18 @@ namespace {
         public function addError(string $field, string $message): void { $this->errors[$field] = $message; }
         public function dispatch(string $event, mixed ...$parameters): void {}
         public function getId(): string { return 'save-refusal-test'; }
-        public function refuse(string $code, ?string $field): void { $this->refuseSettings($code, false, $field); }
+        public function refuse(string $code, ?string $field, ?string $cause = null): void { $this->refuseSettings($code, false, $field, $cause); }
     }
 
     $details = \Paymenter\Extensions\Others\Backups\Runtime::errorDetails(
-        '{"error":"config-invalid","field":"schedule_time","detail":{"value":"private"}}'
+        '{"error":"config-invalid","field":"schedule_time","detail":{"writer_cause":"actor-login-failed"}}'
     );
     $probe = new SaveRefusalProbe();
-    $probe->refuse($details['code'], $details['field']);
+    $probe->refuse($details['code'], $details['field'], $details['cause'] ?? null);
     $fieldNotification = \Filament\Notifications\Notification::$last;
     $probe->refuse('command-not-registered', null);
     echo json_encode([
+        'details' => $details,
         'errors' => $probe->errors,
         'notification' => $fieldNotification,
         'command_notification' => \Filament\Notifications\Notification::$last,

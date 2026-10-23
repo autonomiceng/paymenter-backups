@@ -180,7 +180,10 @@ echo json_encode($result, JSON_THROW_ON_ERROR);
                                 capture_output=True, timeout=10)
         self.assertEqual(result.returncode, 0, result.stderr.decode())
         value = json.loads(result.stdout)
+        self.assertEqual(value['details'], {'code': 'config-invalid', 'field': 'schedule_time',
+                                            'cause': 'actor-login-failed'})
         self.assertIn('settings.schedule_time', value['errors'])
+        self.assertIn('Writer cause: actor-login-failed.', value['notification']['body'])
         self.assertNotIn('Open Settings and save', value['errors']['settings.schedule_time'])
         self.assertNotIn('Open Settings and save', value['notification']['body'])
         self.assertIn('Backups settings command', value['command_notification']['body'])
@@ -211,9 +214,13 @@ $loggedRedaction = \Paymenter\Extensions\Others\Backups\Runtime::recordNativeWri
     'error' => 'config-write-outcome-unknown',
     'detail' => ['writer_cause' => 'PDO failed password=secret-value username=fixture-user'],
 ], JSON_THROW_ON_ERROR));
+$actorFailure = \Paymenter\Extensions\Others\Backups\Runtime::recordNativeWriterFailure(
+    '{"error":"config-invalid","detail":{"writer_cause":"actor-not-authorized"}}'
+);
 echo json_encode([
     'details' => $details,
     'redacted' => $redacted,
+    'actor_failure' => $actorFailure,
     'logs' => \Illuminate\Support\Facades\Log::$calls,
     'message' => \Paymenter\Extensions\Others\Backups\Messages::error('command-not-registered'),
 ], JSON_THROW_ON_ERROR);
@@ -231,6 +238,10 @@ echo json_encode([
                                                'cause': 'command-not-registered'})
         self.assertEqual(value['logs'][1][1], {'code': 'native-writer-failed',
                                                'cause': 'PDO failed password=[redacted] username=[redacted]'})
+        self.assertEqual(value['actor_failure'], {'code': 'config-invalid', 'field': None,
+                                                  'cause': 'actor-not-authorized'})
+        self.assertEqual(value['logs'][2][1], {'code': 'native-writer-failed',
+                                               'cause': 'actor-not-authorized'})
         self.assertNotIn('secret-value', value['redacted']['cause'])
         self.assertNotIn('fixture-user', value['redacted']['cause'])
         self.assertIn('[redacted]', value['redacted']['cause'])

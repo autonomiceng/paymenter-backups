@@ -69,9 +69,15 @@ namespace Illuminate\Console {
         public function error($line) { echo "   ERROR  ", $line, "\n"; }
     }
 }
+namespace Illuminate\Validation {
+    class ValidationException extends \RuntimeException {
+        public function __construct(public object $validator) { parent::__construct('The given data was invalid.'); }
+    }
+}
 namespace Illuminate\Support\Facades {
     class DB {
         public static bool $active = false;
+        public static function purge($name) {}
         public static function transaction($callback) {
             if (self::$active) { return $callback(); }
             $handle = fopen(\fixtureFile(), 'r+b'); flock($handle, LOCK_EX);
@@ -86,12 +92,29 @@ namespace Illuminate\Support\Facades {
         }
     }
     class Validator {
-        public static function make(...$args) { return new class { public function validate() {} }; }
+        public static function make(...$args) {
+            return new class($args[0] ?? []) {
+                public function __construct(private array $values) {}
+                public function validate() {
+                    foreach ($this->values as $key => $value) {
+                        if ($value === '__fixture_validation_failure__') {
+                            throw new \Illuminate\Validation\ValidationException(
+                                new \FixtureFailedValidator([$key => ['Integer' => []]])
+                            );
+                        }
+                    }
+                }
+            };
+        }
     }
     class Auth {
         public static int $actor = 0;
         public static function loginUsingId($actor) { self::$actor = $actor; return true; }
-        public static function user() { return new class { public function hasPermission($permission) { return true; } }; }
+        public static function onceUsingId($actor) {
+            if ($actor === 13) { throw new \RuntimeException('fixture actor lookup failed'); }
+            self::$actor = $actor; return true;
+        }
+        public static function user() { return new class { public function hasPermission($permission) { return \Illuminate\Support\Facades\Auth::$actor !== 14; } }; }
     }
 }
 namespace App\Models {
@@ -122,6 +145,9 @@ namespace App\Models {
             };
         }
         public function updateOrCreate($keys, $attributes) {
+            if (($attributes['value'] ?? null) === '__fixture_unexpected_exception__') {
+                throw new \LogicException('fixture backend failure');
+            }
             $key = $keys['key'];
             $previous = Extension::$data['rows'][$key] ?? ['id' => ++Extension::$data['next_id'], 'key' => $key];
             Extension::$data['rows'][$key] = array_replace($previous, $attributes);
@@ -161,6 +187,16 @@ namespace Paymenter\Extensions\Others\Backups {
     }
 }
 namespace {
+    class FixtureFailedValidator {
+        public function __construct(private array $failed) {}
+        public function failed() { return $this->failed; }
+    }
+    class FixtureConfig {
+        private array $values = [];
+        public function get($key, $default = null) { return $this->values[$key] ?? $default; }
+        public function set($key, $value) { $this->values[$key] = $value; }
+    }
+    function app($key = null) { static $config; return $config ??= new FixtureConfig; }
     function base_path() { return __DIR__; }
     function config($values) {}
     function fixtureFile() {
@@ -223,6 +259,117 @@ class CoordinatedSaveTests(PrivateFixture):
         envelope['settings'].update({key: row['value'] for key, row in self.rows()['rows'].items()})
         envelope['credentials'] = {} if verb == 'read-settings' else copy.deepcopy(self.credentials)
         return envelope
+
+    def test_r9_settings_save_uses_stateless_actor_with_scrubbed_demo_environment(self):
+        from test_database_context import MARIADB_CONTEXT
+
+        root = pathlib.Path(__file__).resolve().parents[1]
+        artisan = self.app / 'artisan'
+        writer = PHP_WRITER.replace('__ROOT__', json.dumps(str(root)))
+        login_method = '''public static function loginUsingId($actor) {
+            if (getenv('SESSION_DRIVER') === false || getenv('CACHE_STORE') === false || getenv('REDIS_HOST') === false) {
+                throw new \\RuntimeException('session environment unavailable');
+            }
+            self::$actor = $actor; return true;
+        }'''
+        once_method = '''public static function onceUsingId($actor) {
+            if (getenv('SESSION_DRIVER') !== false || getenv('CACHE_STORE') !== false || getenv('REDIS_HOST') !== false) {
+                throw new \\RuntimeException('unexpected session environment forwarding');
+            }
+            if (getenv('DB_CONNECTION') !== 'mariadb' || getenv('DB_PASSWORD') !== 'fixture-password'
+                || getenv('AWS_SECRET_ACCESS_KEY') !== false) {
+                throw new \\RuntimeException('database context or environment scrub failed');
+            }
+            self::$actor = $actor; return true;
+        }'''
+        login_start = writer.index('public static function loginUsingId($actor) {')
+        once_start = writer.index('public static function onceUsingId($actor) {', login_start)
+        writer = writer[:login_start] + login_method + writer[once_start:]
+        once_start = writer.index('public static function onceUsingId($actor) {')
+        user_start = writer.index('public static function user()', once_start)
+        writer = writer[:once_start] + once_method + writer[user_start:]
+        self.assertNotEqual(writer, PHP_WRITER.replace('__ROOT__', json.dumps(str(root))))
+        artisan.write_text(writer)
+        self.args.database_connection = MARIADB_CONTEXT
+        submitted_settings = {
+            'full_schedule': 'daily', 'full_time': '03:00', 'full_weekdays': [6],
+            'database_schedule': 'daily', 'database_time': '02:00',
+            'database_weekdays': [0, 1, 2, 3, 4, 5, 6], 'schedule_timezone': 'UTC',
+            'local_path': '/data/archives', 'local_byte_budget': 5 * 1024 ** 3,
+            'minimum_free_bytes': 2 * 1024 ** 3, 'keep_local': True, 'upload_s3': False,
+            'automatic_retention': True, 'retention_keep_full': 7,
+            'retention_keep_database': 7, 'full_host_assumptions_acknowledged': True,
+            'no_concurrent_ddl_acknowledged': True,
+        }
+        current_settings = dict(cli.DEFAULTS)
+        current_settings.update(
+            settings_version=2,
+            full_schedule='off',
+            database_schedule='off',
+            retention_keep_database=24,
+        )
+        config.normalize(current_settings)
+        self.envelope['settings'].update(current_settings)
+        effective_settings = {**current_settings, **submitted_settings}
+        config.normalize(effective_settings)
+        # The page sends all visible form values, then writes only values that
+        # changed against its server-loaded native rows. Advanced stays untouched.
+        settings = {key: value for key, value in effective_settings.items()
+                    if key not in config.LEGACY_KEYS and key != 'settings_version'
+                    and value != current_settings[key]}
+        self.assertEqual(set(settings), {
+            'full_schedule', 'database_schedule', 'local_path', 'local_byte_budget',
+            'minimum_free_bytes', 'retention_keep_database',
+            'full_host_assumptions_acknowledged', 'no_concurrent_ddl_acknowledged',
+        })
+        parent_environment = {
+            'APP_KEY': 'base64:fixture-key', 'DB_CONNECTION': 'mariadb', 'DB_DATABASE': 'paymenter_fixture',
+            'DB_HOST': '127.0.0.1', 'DB_PORT': '3307', 'DB_USERNAME': 'fixture', 'DB_PASSWORD': 'fixture-password',
+            'CACHE_STORE': 'redis', 'SESSION_DRIVER': 'redis', 'REDIS_HOST': 'redis', 'QUEUE_CONNECTION': 'redis',
+            'AWS_SECRET_ACCESS_KEY': 'parent-only-secret',
+        }
+        with patch.dict(os.environ, parent_environment, clear=True):
+            with patch.object(self.state, 'guard_location'):
+                self.assertEqual(cli.check_config(self.args, self.state, {'settings': settings}), {'valid': True})
+                result = cli.set_config(self.args, self.state, {'settings': settings, '_actor': 9})
+
+        self.assertTrue(result['updated'], json.dumps(result, sort_keys=True))
+        rows = self.rows()['rows']
+        self.assertEqual(rows['full_schedule']['value'], 'daily')
+        self.assertEqual(rows['database_schedule']['value'], 'daily')
+        self.assertEqual(rows['local_path']['value'], '/data/archives')
+        self.assertEqual(rows['local_byte_budget']['value'], str(5 * 1024 ** 3))
+        self.assertEqual(rows['minimum_free_bytes']['value'], str(2 * 1024 ** 3))
+        self.assertEqual(rows['retention_keep_database']['value'], '7')
+        self.assertEqual(rows['full_host_assumptions_acknowledged']['value'], '1')
+        self.assertEqual(rows['no_concurrent_ddl_acknowledged']['value'], '1')
+
+    def test_r9_native_writer_preserves_bounded_php_failure_reasons(self):
+        from test_database_context import MARIADB_CONTEXT
+
+        self.args.database_connection = MARIADB_CONTEXT
+        cases = (
+            ({'unexpected_setting_name': 'never logged'}, 9, 'unknown-input-key:unexpected_setting_name', None),
+            ({'retention_keep_full': '__fixture_validation_failure__'}, 9,
+             'validation:retention_keep_full:integer', 'retention_keep_full'),
+            ({'retention_keep_full': '7'}, 13, 'actor-login-failed', None),
+            ({'retention_keep_full': '7'}, 14, 'actor-not-authorized', None),
+            ({'s3_bucket': '__fixture_unexpected_exception__'}, 9, 'exception:LogicException', None),
+        )
+        for values, actor, cause, field in cases:
+            with self.subTest(cause=cause), \
+                    self.state.lock('config.lock') as config_fd, self.state.lock('tick.lock') as tick_fd:
+                with self.assertRaises(BackupError) as raised:
+                    cli.native_settings(self.args, self.state, values, (config_fd, tick_fd), actor=actor)
+                self.assertEqual(raised.exception.code, 'config-write-outcome-unknown')
+                self.assertEqual(raised.exception.detail, {'writer_cause': cause})
+                self.assertEqual(raised.exception.field, field)
+
+    def test_r9_overview_carries_a_bounded_writer_cause(self):
+        value = cli.overview(self.state, self.envelope, 'config-save-outcome-unknown', writer_cause='actor-login-failed')
+        self.assertEqual(value['configuration']['writer_cause'], 'actor-login-failed')
+        value = cli.overview(self.state, self.envelope, 'config-save-outcome-unknown', writer_cause='password=private')
+        self.assertNotIn('writer_cause', value['configuration'])
 
     def test_audited_native_receipts_skip_unchanged_rows_and_restore_only_own_rows(self):
         with self.state.lock('config.lock') as config_fd, self.state.lock('tick.lock') as tick_fd:

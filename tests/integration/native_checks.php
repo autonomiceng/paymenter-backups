@@ -142,6 +142,42 @@ if ($mode === 'upload') {
     $bridgeRead = function () use ($process) { $process->mustRun(); return json_decode($process->getOutput(), true, 32, JSON_THROW_ON_ERROR); };
     session()->forget(['filament.notifications', 'filament.claimed_notifications']);
 
+    // The web request still holds the authorized role, but the cold native
+    // writer reloads the actor after a permission change and must report why it refused.
+    $admin->load('role');
+    $adminRoleId = $admin->role_id;
+    $limitedRole = App\Models\Role::create(['name' => 'writer-cause-limited-' . bin2hex(random_bytes(4)), 'permissions' => ['admin.extensions.viewAny']]);
+    $writerCauseKeep = (int) $record->settings()->where('key', 'retention_keep_full')->value('value');
+    $writerCauseNextKeep = $writerCauseKeep + 1;
+    try {
+        App\Models\User::whereKey($admin->id)->update(['role_id' => $limitedRole->id]);
+        Illuminate\Support\Facades\Auth::login($admin);
+        $writerCausePage = $save(['settings.retention_keep_full' => $writerCauseNextKeep]);
+        $writerCauseNotices = $notices();
+        $writerCauseNotice = array_values(array_filter($writerCauseNotices, static fn ($item) => $item['title'] === 'Save incomplete'))[0] ?? null;
+        check(is_array($writerCauseNotice) && str_contains($writerCauseNotice['body'], 'Writer cause: actor-not-authorized.'),
+            'Save notice did not show the bounded native writer cause');
+        check(str_contains($text($writerCausePage), 'Writer cause: actor-not-authorized.'),
+            'Overview did not render the native writer cause after Save');
+        check((int) $record->settings()->where('key', 'retention_keep_full')->value('value') === $writerCauseKeep,
+            'Unauthorized native writer changed settings');
+
+        App\Models\User::whereKey($admin->id)->update(['role_id' => $adminRoleId]);
+        $admin->unsetRelation('role');
+        Illuminate\Support\Facades\Auth::login($admin);
+        $retry = $save(['settings.retention_keep_full' => $writerCauseNextKeep]);
+        check((int) $record->settings()->where('key', 'retention_keep_full')->value('value') === $writerCauseNextKeep
+            && !is_file($root . '/config-save.json'), 'Authorized retry did not clear the uncertain Save guard');
+        $record->settings()->where('key', 'retention_keep_full')->update(['value' => (string) $writerCauseKeep]);
+    } finally {
+        App\Models\User::whereKey($admin->id)->update(['role_id' => $adminRoleId]);
+        $admin->unsetRelation('role');
+        Illuminate\Support\Facades\Auth::login($admin);
+        $limitedRole->delete();
+        if (is_file($root . '/config-save.json')) { unlink($root . '/config-save.json'); }
+        $record->settings()->where('key', 'retention_keep_full')->update(['value' => (string) $writerCauseKeep]);
+    }
+
     // Fields explain themselves; no field opens a help dialog.
     $fresh = Livewire\Livewire::test($page);
     check(!str_contains($fresh->html(), "mountAction('cronLockHelp'") && !str_contains($fresh->html(), 'Help for '), 'field help dialog returned');

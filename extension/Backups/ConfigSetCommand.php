@@ -13,6 +13,8 @@ final class ConfigSetCommand extends Command
     public function handle(): int
     {
         $handles = [];
+        $writerCause = null;
+        $writerField = null;
         try {
             $bytes = stream_get_contents(STDIN, 65537);
             if (strlen($bytes) > 65536) { throw new \RuntimeException('config-invalid'); }
@@ -26,11 +28,25 @@ final class ConfigSetCommand extends Command
             }
             if (!$this->option('restore') && !$this->option('finalize')) {
                 $fields = array_column(Settings::fields(), null, 'name');
-                if (array_diff(array_keys($input), array_keys($fields))) { throw new \RuntimeException('config-invalid'); }
+                $unknown = array_values(array_diff(array_map('strval', array_keys($input)), array_keys($fields)));
+                if ($unknown) {
+                    $writerCause = 'unknown-input-key:' . self::safeInputKey($unknown[0]);
+                    throw new \RuntimeException('config-invalid');
+                }
                 foreach ($input as $key => $value) {
-                    if (is_array($value) || is_object($value) || is_null($value)) { throw new \RuntimeException('config-invalid'); }
+                    if (is_array($value) || is_object($value) || is_null($value)) {
+                        $writerField = self::safeInputKey($key);
+                        $writerCause = 'validation:' . $writerField . ':scalar';
+                        throw new \RuntimeException('config-invalid');
+                    }
                     if (!empty($fields[$key]['validation'])) {
-                        \Illuminate\Support\Facades\Validator::make([$key => $value], [$key => $fields[$key]['validation']])->validate();
+                        try {
+                            \Illuminate\Support\Facades\Validator::make([$key => $value], [$key => $fields[$key]['validation']])->validate();
+                        } catch (\Illuminate\Validation\ValidationException $error) {
+                            $writerField = self::safeInputKey($key);
+                            $writerCause = self::validationCause($error, $key);
+                            throw $error;
+                        }
                     }
                 }
             }
@@ -59,8 +75,33 @@ final class ConfigSetCommand extends Command
             }
             $actor = $this->option('actor');
             if ($actor !== null) {
-                if (!ctype_digit((string) $actor) || !\Illuminate\Support\Facades\Auth::loginUsingId((int) $actor)
-                    || !\Illuminate\Support\Facades\Auth::user()->hasPermission('admin.extensions.update')) { throw new \RuntimeException('config-invalid'); }
+                if (!ctype_digit((string) $actor)) {
+                    $writerCause = 'actor-login-failed';
+                    throw new \RuntimeException('config-invalid');
+                }
+                try {
+                    // This child has a scrubbed environment and must not start a
+                    // stateful web session or depend on Redis session settings.
+                    $authenticated = \Illuminate\Support\Facades\Auth::onceUsingId((int) $actor);
+                    $user = $authenticated ? \Illuminate\Support\Facades\Auth::user() : null;
+                } catch (\Throwable $error) {
+                    $writerCause = 'actor-login-failed';
+                    throw new \RuntimeException('config-invalid');
+                }
+                if (!$user) {
+                    $writerCause = 'actor-login-failed';
+                    throw new \RuntimeException('config-invalid');
+                }
+                try {
+                    $authorized = $user->hasPermission('admin.extensions.update');
+                } catch (\Throwable $error) {
+                    $writerCause = 'actor-login-failed';
+                    throw new \RuntimeException('config-invalid');
+                }
+                if (!$authorized) {
+                    $writerCause = 'actor-not-authorized';
+                    throw new \RuntimeException('config-invalid');
+                }
             }
             // Paymenter's audit.console defaults false. This native writer must
             // keep page saves audited even though persistence is in a CLI child.
@@ -84,15 +125,42 @@ final class ConfigSetCommand extends Command
                 'maintenance-probe-origin-invalid', 'maintenance-probe-origin-mismatch', 'installation-missing', 'installation-mismatch',
                 'private-file-invalid', 'private-root-invalid', 'billing-settings-unreadable', 'extension-uninstalled',
                 'database-connection-invalid', 'database-driver-unsupported'], true) ? $error->getMessage() : 'config-invalid';
+            $writerCause ??= self::exceptionCause($error);
             if ($this->option('defer-init')) {
                 // Artisan's styled error() writes to its console output stream.
-                // Internal callers consume a bounded, secret-free stderr code.
-                fwrite(STDERR, json_encode(['error' => $code], JSON_THROW_ON_ERROR) . "\n");
+                // Internal callers consume a fixed code and bounded cause.
+                $failure = ['error' => $code, 'detail' => ['writer_cause' => $writerCause]];
+                if ($writerField !== null && isset(Settings::LABELS[$writerField])) { $failure['field'] = $writerField; }
+                fwrite(STDERR, json_encode($failure, JSON_THROW_ON_ERROR) . "\n");
             } else { $this->error($code); }
             return self::FAILURE;
         } finally {
             // Closing inherited copies must not unlock the parent's descriptors.
             foreach ($handles as $handle) { fclose($handle); }
         }
+    }
+
+    private static function safeInputKey(mixed $key): string
+    {
+        return is_string($key) && preg_match('/^[a-z][a-z0-9_]{0,63}$/D', $key) ? $key : 'unknown';
+    }
+
+    private static function validationCause(\Illuminate\Validation\ValidationException $error, string $field): string
+    {
+        $rule = null;
+        try {
+            $failed = $error->validator->failed();
+            $rules = is_array($failed) ? ($failed[$field] ?? []) : [];
+            $rule = is_array($rules) ? array_key_first($rules) : null;
+        } catch (\Throwable $ignored) {}
+        $rule = is_string($rule) ? explode(':', $rule, 2)[0] : 'invalid';
+        $rule = preg_match('/^[A-Za-z][A-Za-z0-9_-]{0,31}$/D', $rule) ? strtolower($rule) : 'invalid';
+        return 'validation:' . self::safeInputKey($field) . ':' . $rule;
+    }
+
+    private static function exceptionCause(\Throwable $error): string
+    {
+        $class = (new \ReflectionClass($error))->getShortName();
+        return 'exception:' . (preg_match('/^[A-Za-z][A-Za-z0-9_]{0,63}$/D', $class) ? $class : 'Throwable');
     }
 }

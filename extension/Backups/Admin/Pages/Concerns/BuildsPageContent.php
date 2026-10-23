@@ -58,11 +58,18 @@ trait BuildsPageContent
     public function content(Schema $schema): Schema
     {
         return $schema->components([
+            Callout::make('Settings save needs attention')
+                ->warning()
+                ->description(fn () => Messages::error($this->overviewError)
+                    . ' Writer cause: ' . $this->overviewErrorCause . '.')
+                ->visible(fn () => $this->overview() && $this->overviewError !== null
+                    && $this->overviewErrorCause !== null && $this->privateRootProblem() === null),
             Callout::make('Backups can\'t start')
                 ->danger()
                 ->description(fn () => Messages::error($this->overviewError) . ' To see details, run these as the site user:')
                 ->footer([Group::make([$this->command(fn () => $this->terminalFunction()), $this->command('paymenter_backups overview --offline')])])
-                ->visible(fn () => $this->overview() && $this->overviewError !== null && $this->privateRootProblem() === null),
+                ->visible(fn () => $this->overview() && $this->overviewError !== null
+                    && $this->overviewErrorCause === null && $this->privateRootProblem() === null),
             Tabs::make('Backups')
                 ->contained(false)
                 ->persistTabInQueryString('tab')

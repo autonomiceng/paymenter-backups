@@ -62,6 +62,24 @@ class DatabaseContextTests(unittest.TestCase):
         self.assertEqual(raised.exception.code, "command-not-registered")
         self.assertEqual(raised.exception.detail, {"writer_cause": "command-not-registered"})
 
+    def test_native_writer_uses_structured_php_reason_and_field(self):
+        args = SimpleNamespace(php="/usr/bin/php", database_connection=MARIADB_CONTEXT)
+        state = SimpleNamespace(app=pathlib.Path("/fixture/app"), root=pathlib.Path("/fixture/private"))
+        completed = SimpleNamespace(
+            returncode=1,
+            stdout=b"",
+            stderr=(b'{"error":"config-invalid","field":"retention_keep_full",'
+                    b'"detail":{"writer_cause":"validation:retention_keep_full:integer"}}'),
+        )
+        with patch.object(cli, "run_native_writer", return_value=completed):
+            with self.assertRaises(BackupError) as raised:
+                cli.native_settings(args, state, {"retention_keep_full": "seven"}, (11, 12), actor=9)
+
+        self.assertEqual(raised.exception.code, "config-write-outcome-unknown")
+        self.assertEqual(raised.exception.field, "retention_keep_full")
+        self.assertEqual(raised.exception.detail,
+                         {"writer_cause": "validation:retention_keep_full:integer"})
+
     def test_native_writer_cause_redacts_connection_secrets(self):
         cause = cli.native_writer_cause(
             b"PDO error for fixture: password=fixture-password username=fixture-user",

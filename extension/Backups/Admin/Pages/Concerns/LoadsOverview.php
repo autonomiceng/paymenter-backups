@@ -18,9 +18,19 @@ trait LoadsOverview
                 'configuration' => ['available' => false, 'valid' => false, 'error' => $this->overviewError], 'maintenance' => false, 'installation_uuid' => null];
         }
         try {
-            return $this->overviewCache = Runtime::command(['overview'], null, 20);
+            $overview = Runtime::command(['overview'], null, 20);
+            $configuration = $overview['configuration'] ?? [];
+            $cause = Runtime::safeWriterCause($configuration['writer_cause'] ?? null);
+            if ($cause !== null) {
+                $this->overviewError = is_string($configuration['error'] ?? null)
+                    ? $configuration['error'] : 'config-save-outcome-unknown';
+                $this->overviewErrorCause = $cause;
+            }
+            return $this->overviewCache = $overview;
         } catch (\Throwable $error) {
             $this->overviewError = $error instanceof \RuntimeException ? $error->getMessage() : 'engine-unavailable';
+            $this->overviewErrorCause = $error instanceof \Paymenter\Extensions\Others\Backups\EngineCommandException
+                ? Runtime::safeWriterCause($error->cause) : null;
             return $this->overviewCache = ['initialized' => false, 'runs' => [], 'requests' => [], 'scheduler' => ['last_tick_at' => null],
                 'configuration' => ['available' => false, 'valid' => false, 'error' => $this->overviewError], 'maintenance' => false, 'installation_uuid' => null];
         }

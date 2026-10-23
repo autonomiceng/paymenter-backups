@@ -12,7 +12,7 @@ import time
 import urllib.parse
 
 from . import artifacts
-from .common import BackupError, private_file, read_json
+from .common import BackupError, private_file, read_json, safe_writer_cause
 from .engine import plan, storage_usage
 from .process import process_identity
 from .requests import ACTIVE, list_requests, next_slot
@@ -190,9 +190,13 @@ def origin(url):
     return None
 
 
-def configuration(state, envelope, error=None, encryption_key_status=None):
+def configuration(state, envelope, error=None, encryption_key_status=None, writer_cause=None):
+    writer_cause = safe_writer_cause(writer_cause)
     if envelope is None:
-        return {"available": False, "valid": False, "error": code(error) or "unknown"}
+        result = {"available": False, "valid": False, "error": code(error) or "unknown"}
+        if writer_cause is not None:
+            result["writer_cause"] = writer_cause
+        return result
     settings = envelope["settings"]
     v2 = settings.get("settings_version", 1) == 2
     from .tools import checks
@@ -225,6 +229,8 @@ def configuration(state, envelope, error=None, encryption_key_status=None):
               "app_origin": origin((envelope.get("framework") or {}).get("app_url")),
               "billing": {"time": (envelope.get("billing") or {}).get("daily_time"), "timezone": (envelope.get("billing") or {}).get("timezone")},
               "admission": {}}
+    if writer_cause is not None:
+        result["writer_cause"] = writer_cause
     validation = envelope.get("validation_error")
     field = validation.get("field") if isinstance(validation, dict) else None
     if isinstance(field, str) and field in settings:
@@ -376,7 +382,7 @@ def scheduler(state):
         return {"last_tick_at": None}
 
 
-def overview(state, envelope=None, error=None):
+def overview(state, envelope=None, error=None, writer_cause=None):
     journals = state.journals() if state.initialized else []
     requests = list_requests(state) if state.initialized else []
     active_runs = {(item.get("action"), (item.get("arguments") or {}).get("run_id")) for item in requests if item.get("status") in ACTIVE}
@@ -396,7 +402,8 @@ def overview(state, envelope=None, error=None):
     return {"schema_version": 1, "generated_at": time.time(), "initialized": state.initialized,
             "installation_uuid": state.uuid, "maintenance": (state.app / "storage/framework/down").exists(),
             "scheduler": scheduler(state) if state.initialized else {"last_tick_at": None},
-            "configuration": configuration(state, envelope, error, encryption_key_status=destination_binding.get("key_status")), "runs": runs,
+            "configuration": configuration(state, envelope, error, encryption_key_status=destination_binding.get("key_status"),
+                                            writer_cause=writer_cause), "runs": runs,
             "last_good": last_good,
             "s3_pending": {"count": len(pending_s3) if envelope and envelope["settings"]["destination"] == "s3" else 0,
                            "oldest_at": min((number(item.get("created_at")) or 0 for item in pending_s3), default=None) if envelope and envelope["settings"]["destination"] == "s3" else None},
