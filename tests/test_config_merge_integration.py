@@ -213,6 +213,10 @@ class MergedRuntimeTests(unittest.TestCase):
             private = base / 'private'
             private.mkdir(mode=0o700)
             source = archive_keys.PHP_RUNTIME.replace(
+                "namespace Illuminate\\Support\\Facades {",
+                "namespace Paymenter\\Extensions\\Others\\Backups { function posix_geteuid() { return getmyuid(); } }\n"
+                "namespace Illuminate\\Support\\Facades {")
+            source = source.replace(
                 "public static function where(...$args) { return new self; }",
                 "public static function __callStatic($name, $args) { return new self; }")
             source = source.replace(
@@ -226,13 +230,16 @@ class MergedRuntimeTests(unittest.TestCase):
     ]);
     $result['combined'] = array_values(array_filter(\Symfony\Component\Process\Process::$calls,
         static fn ($entry) => array_slice($entry[0], -2) === ['config', 'set']));
+    \Symfony\Component\Process\Process::$response = ['settings_version' => 2];
+    $result['schedule'] = \Paymenter\Extensions\Others\Backups\Runtime::command(['schedule', 'show']);
+    $result['schedule-call'] = end(\Symfony\Component\Process\Process::$calls);
 '''
             source = source.replace('    echo json_encode($result);', combined + '    echo json_encode($result);')
             script = base / 'runtime.php'
             script.write_text(source)
             process = subprocess.run([PHP, str(script), str(ROOT), str(app), str(private)],
                                      capture_output=True, timeout=10)
-            self.assertEqual(process.returncode, 0, process.stderr.decode())
+            self.assertEqual(process.returncode, 0, process.stderr.decode() + process.stdout.decode())
             result = json.loads(process.stdout)
             self.assertEqual(result['generated']['state'], 'pending')
             self.assertEqual(result['generic-command'], 'sensitive-command-refused')
@@ -243,6 +250,9 @@ class MergedRuntimeTests(unittest.TestCase):
             self.assertIsNone(combined_input['maintenance_probe_credentials'])
             self.assertEqual(combined_input['_actor'], 42)
             self.assertEqual(combined_input['_database_connection']['connection']['driver'], 'mysql')
+            self.assertEqual(result['schedule'], {'settings_version': 2})
+            self.assertIn('--database-connection-stdin', result['schedule-call'][0])
+            self.assertEqual(json.loads(result['schedule-call'][1])['_database_connection']['connection']['driver'], 'mysql')
 
 
 class MergedConfigurationTests(unittest.TestCase):

@@ -43,6 +43,9 @@ if ($mode === 'upload') {
     check($runtime::command(['config', 'validate'], null, 30)['valid'] === true, 'environment-only configuration validation failed');
     check($runtime::command(['config', 'check'], ['settings' => new stdClass], 30)['valid'] === true,
         'environment-only config check failed');
+    $schedule = $runtime::command(['schedule', 'show']);
+    check(array_key_exists('settings_version', $schedule) || array_key_exists('enabled', $schedule),
+        'environment-only schedule read did not receive the active database context');
     $options = config('database.connections.mariadb.options', []);
     config(['database.connections.mariadb.options' => [PDO::MYSQL_ATTR_SSL_CA => '/fixture/unused-ca.pem']]);
     $tlsCode = null;
@@ -64,9 +67,18 @@ if ($mode === 'upload') {
         if (is_string($name)) { $childEnvironment[$name] = false; }
     }
     $childEnvironment = array_replace($childEnvironment, ['PATH' => '/usr/local/bin:/usr/bin:/bin', 'LANG' => 'C.UTF-8', 'LC_ALL' => 'C.UTF-8', 'TZ' => 'UTC']);
+    $coldBridge = new Symfony\Component\Process\Process([PHP_BINARY, $base . '/extensions/Others/Backups/bridge.php', 'read', '--app', $base, '--private-root', $root], $base, $childEnvironment);
+    $coldBridge->run();
+    $coldCode = Paymenter\Extensions\Others\Backups\Runtime::errorCode($coldBridge->getErrorOutput());
+    check(!$coldBridge->isSuccessful() && in_array($coldCode, ['database-driver-unsupported', 'unsupported-database', 'database-connection-failed'], true),
+        'scrubbed bridge unexpectedly resolved a database absent from .env');
     $bridgeRead = new Symfony\Component\Process\Process([PHP_BINARY, $base . '/extensions/Others/Backups/bridge.php', 'read', '--database-connection-stdin', '--app', $base, '--private-root', $root], $base, $childEnvironment, $readInput);
     $bridgeRead->mustRun();
-    $oldCredentials = json_decode($bridgeRead->getOutput(), true, 32, JSON_THROW_ON_ERROR)['credentials'] ?? [];
+    $bridgeEnvelope = json_decode($bridgeRead->getOutput(), true, 32, JSON_THROW_ON_ERROR);
+    check(($bridgeEnvelope['database']['driver'] ?? null) === 'mariadb'
+        && ($bridgeEnvelope['database']['name'] ?? null) === 'paymenter_fixture',
+        'active database context did not reach the bridge envelope');
+    $oldCredentials = $bridgeEnvelope['credentials'] ?? [];
     $credentials = ['s3' => ['access_key' => 'ENV-ONLY-FIXTURE-ACCESS', 'secret_key' => 'ENV-ONLY-FIXTURE-SECRET'], 'site' => null];
     try {
         $saved = $runtime::saveConfiguration(['dump' => '/usr/bin/mysqldump'], $credentials);

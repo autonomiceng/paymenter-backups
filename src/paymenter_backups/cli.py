@@ -126,7 +126,7 @@ def native_settings(args, state, values, descriptors, actor=None, restore=False,
             safe_refusals = {"config-changed", "credentials-unreadable", "credentials-invalid", "maintenance-probe-credentials-invalid",
                 "maintenance-probe-origin-mismatch", "maintenance-probe-origin-invalid", "installation-missing", "installation-mismatch",
                 "private-file-invalid", "private-root-invalid", "billing-settings-unreadable", "extension-uninstalled",
-                "database-connection-invalid", "database-driver-unsupported"}
+                "database-connection-invalid", "database-pdo-driver-unavailable", "database-connection-failed", "database-driver-unsupported"}
             if code in safe_refusals and (finalize or code in {"database-connection-invalid", "database-driver-unsupported"}):
                 raise BackupError(code)
             raise BackupError("config-write-failed" if code == "config-coordination-required" else "config-write-outcome-unknown")
@@ -446,7 +446,7 @@ def dispatch(args):
                 raise BackupError("schedule-kind-required")
             if args.verb == "show":
                 return {key: value for key, value in settings.items() if key.startswith("schedule_") or key == "enabled"}
-            changes = stdin_json() if args.verb == "set" else {"enabled": args.verb == "enable"}
+            changes = (args.command_input if args.command_input is not None else stdin_json()) if args.verb == "set" else {"enabled": args.verb == "enable"}
             if set(changes) - {key for key in DEFAULTS if key.startswith("schedule_")} - {"enabled"}:
                 raise BackupError("schedule-field-invalid")
         else:
@@ -466,7 +466,7 @@ def dispatch(args):
             elif args.verb == "enable":
                 changes = {kind + "_schedule": settings[kind + "_schedule"] if settings[kind + "_schedule"] != "off" else ("daily" if kind == "full" else "hourly")}
             else:
-                values = stdin_json()
+                values = args.command_input if args.command_input is not None else stdin_json()
                 mapping = {"frequency": kind + "_schedule", "time": kind + "_time", "weekdays": kind + "_weekdays",
                            "timezone": "schedule_timezone"}
                 if kind == "database":

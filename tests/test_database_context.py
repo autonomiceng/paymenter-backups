@@ -64,6 +64,40 @@ class DatabaseContextTests(unittest.TestCase):
 
             read_input.assert_called_once_with()
 
+    def test_schedule_set_consumes_context_wrapped_stdin_once(self):
+        with tempfile.TemporaryDirectory(prefix="backups-db-context-schedule-") as temporary:
+            root = pathlib.Path(temporary)
+            app = root / "app"
+            app.mkdir()
+            private = root / "private"
+            private.mkdir(mode=0o700)
+            args = cli.parser().parse_args([
+                "--app", str(app), "--private-root", str(private), "--database-connection-stdin",
+                "schedule", "set", "--kind", "full",
+            ])
+            request = {
+                "_database_connection": MARIADB_CONTEXT,
+                "frequency": "daily", "time": "02:00", "weekdays": [0], "timezone": "UTC",
+            }
+            settings = dict(cli.DEFAULTS, settings_version=2)
+            envelope = {"settings": settings}
+            state = SimpleNamespace()
+            result = {"updated": True}
+            with patch.object(cli, "clean_environment"), \
+                    patch.object(cli, "stdin_json", return_value=request) as read_input, \
+                    patch.object(cli, "State", return_value=state), \
+                    patch.object(cli, "bridge", return_value=envelope), \
+                    patch.object(cli, "load", return_value=envelope), \
+                    patch.object(cli, "set_config", return_value=result) as write_config:
+                self.assertIs(cli.dispatch(args), result)
+
+            read_input.assert_called_once_with()
+            self.assertEqual(args.database_connection, MARIADB_CONTEXT)
+            write_config.assert_called_once_with(args, state, {"settings": {
+                "full_schedule": "daily", "full_time": "02:00", "full_weekdays": [0],
+                "schedule_timezone": "UTC",
+            }})
+
     def test_bridge_wraps_context_and_payload_on_private_stdin(self):
         from paymenter_backups import config as config_module
         from paymenter_backups.cli import parser
@@ -86,6 +120,46 @@ class DatabaseContextTests(unittest.TestCase):
             "payload": expected_payload,
         })
         self.assertNotIn("fixture-password", json.dumps(command))
+
+    def test_bridge_preserves_safe_php_failure_codes(self):
+        from paymenter_backups import config as config_module
+        from paymenter_backups.cli import parser
+
+        args = parser().parse_args([
+            "--app", "/fixture/app", "--private-root", "/fixture/private",
+            "--bridge", "/fixture/bridge.php", "--php", "/usr/bin/php", "config", "check",
+        ])
+        args.database_connection = MARIADB_CONTEXT
+        for code in ("bridge-unavailable", "database-pdo-driver-unavailable", "database-connection-failed"):
+            completed = SimpleNamespace(returncode=1, stdout=b"", stderr=json.dumps({"error": code}).encode())
+            with self.subTest(code=code), patch("subprocess.run", return_value=completed):
+                with self.assertRaises(BackupError) as raised:
+                    config_module.bridge(args, "read-settings")
+                self.assertEqual(raised.exception.code, code)
+
+        completed = SimpleNamespace(returncode=0, stdout=json.dumps({"error": "database-driver-unsupported"}).encode(), stderr=b"")
+        with patch("subprocess.run", return_value=completed):
+            with self.assertRaises(BackupError) as raised:
+                config_module.bridge(args, "read-settings")
+        self.assertEqual(raised.exception.code, "database-driver-unsupported")
+
+        completed = SimpleNamespace(returncode=1, stdout=json.dumps({"error": "database-driver-unsupported"}).encode(), stderr=b"")
+        with patch("subprocess.run", return_value=completed):
+            with self.assertRaises(BackupError) as raised:
+                config_module.bridge(args, "read-settings")
+        self.assertEqual(raised.exception.code, "database-driver-unsupported")
+
+        completed = SimpleNamespace(returncode=0, stdout=b"{}", stderr=json.dumps({"error": "database-driver-unsupported"}).encode())
+        with patch("subprocess.run", return_value=completed):
+            with self.assertRaises(BackupError) as raised:
+                config_module.bridge(args, "read-settings")
+        self.assertEqual(raised.exception.code, "database-driver-unsupported")
+
+        completed = SimpleNamespace(returncode=0, stdout=b"{}", stderr=json.dumps({"error": "credential-value-hidden"}).encode())
+        with patch("subprocess.run", return_value=completed):
+            with self.assertRaises(BackupError) as raised:
+                config_module.bridge(args, "read-settings")
+        self.assertEqual(raised.exception.code, "bridge-failed")
 
     def test_database_context_rejects_extra_fields_and_oversized_secrets(self):
         invalid = json.loads(json.dumps(MARIADB_CONTEXT))

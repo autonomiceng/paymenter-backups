@@ -397,13 +397,30 @@ def main():
             # Laravel config cache cannot supply or mask any database field.
             dotenv_path = app / '.env'
             original_dotenv = dotenv_path.read_text()
-            kept_lines, removed_db_lines = [], []
+            removed_db_lines = []
             for line in original_dotenv.splitlines(keepends=True):
                 name = line.split('=', 1)[0].strip()
-                (removed_db_lines if name.startswith('DB_') else kept_lines).append(line)
+                if name.startswith('DB_'):
+                    removed_db_lines.append(line)
             if not removed_db_lines:
                 raise RuntimeError('env-only database fixture found no DB settings to remove')
-            dotenv_path.write_text(''.join(kept_lines))
+            env_directory = app / 'var'
+            env_directory.mkdir(exist_ok=True)
+            dotenv_target = env_directory / '.env'
+            dotenv_target.write_text('APP_KEY=' + app_key + '\n')
+            dotenv_target.chmod(0o644)
+            if os.geteuid() == 0:
+                os.chown(dotenv_target, 0, 0)
+            dotenv_path.unlink()
+            dotenv_path.symlink_to(dotenv_target)
+            if os.geteuid() == 0:
+                os.chown(dotenv_path, 0, 0, follow_symlinks=False)
+            if not dotenv_path.is_symlink() or dotenv_path.stat().st_mode & 0o777 != 0o644 or dotenv_target.stat().st_size != 60:
+                raise RuntimeError('symlinked minimal .env fixture differs')
+            if os.geteuid() == 0 and (dotenv_path.lstat().st_uid != 0 or dotenv_target.stat().st_uid != 0):
+                raise RuntimeError('symlinked minimal .env fixture ownership differs')
+            if any(line.split('=', 1)[0].strip().startswith('DB_') for line in dotenv_path.read_text().splitlines()):
+                raise RuntimeError('symlinked minimal .env fixture still contains DB settings')
             config_cache = app / 'bootstrap/cache/config.php'
             config_cache.unlink(missing_ok=True)
             env_database = {
@@ -417,6 +434,8 @@ def main():
                 if result.get('env_only_mariadb_save') is not True:
                     raise RuntimeError('env-only MariaDB save regression did not complete')
             finally:
+                dotenv_path.unlink(missing_ok=True)
+                dotenv_target.unlink(missing_ok=True)
                 dotenv_path.write_text(original_dotenv)
                 config_cache.unlink(missing_ok=True)
             results['env_only_mariadb_save'] = True

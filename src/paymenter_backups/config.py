@@ -40,6 +40,24 @@ LEGACY_KEYS = {'enabled', 'destination', 'schedule_frequency', 'schedule_time', 
                'retention_keep', 's3_retention_policy', 's3_retention_keep', 's3_retention_days',
                'cooperative_writers_acknowledged', 'external_state_acknowledged'}
 
+BRIDGE_ERROR_CODES = frozenset({
+    "private-pipe-required", "application-unavailable", "database-connection-invalid",
+    "database-pdo-driver-unavailable", "database-connection-failed", "database-driver-unsupported",
+    "database-tls-unsupported", "database-prefix-unsupported", "unsupported-database",
+    "extension-uninstalled", "native-secret-row-refused", "private-root-invalid",
+    "document-roots-invalid", "private-root-unavailable", "billing-settings-unreadable",
+    "installation-mismatch", "installation-missing", "credentials-unreadable", "credentials-invalid",
+    "bridge-command-invalid", "private-file-invalid", "private-write-failed",
+    "maintenance-probe-credentials-invalid", "maintenance-probe-origin-invalid",
+    "maintenance-probe-origin-mismatch", "archive-key-invalid", "archive-key-mismatch",
+    "archive-key-required", "archive-key-change-busy", "archive-key-pending-exists",
+    "archive-key-already-exists", "archive-key-limit", "archive-key-audit-failed",
+    "bridge-unavailable", "config-invalid", "archive-key-save-required", "archive-key-unavailable",
+    "archive-encryption-tool-missing", "archive-encryption-tool-unusable", "archive-encryption-failed",
+    "archive-decryption-failed", "archive-integrity-failed", "private-root-inside-docroot",
+    "maintenance-probe-http-saved",
+})
+
 
 def billing_fingerprint(billing):
     import hashlib
@@ -116,26 +134,17 @@ def bridge(args, verb="read", payload=None):
     try:
         result = subprocess.run(command, input=input_bytes,
                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30, close_fds=True, env=safe_environment())
-        if result.returncode:
+        for output in (result.stderr, result.stdout):
             try:
-                error = json.loads(result.stderr).get("error")
-            except (ValueError, AttributeError):
-                error = None
-            if error in {"credentials-unreadable", "database-connection-invalid", "database-tls-unsupported", "database-driver-unsupported", "unsupported-database",
-                         "database-prefix-unsupported", "native-secret-row-refused", "billing-settings-unreadable",
-                         "installation-mismatch", "private-root-invalid", "private-file-invalid",
-                         "private-root-inside-docroot", "private-pipe-required", "application-unavailable",
-                         "archive-key-invalid", "archive-key-mismatch", "archive-key-required", "archive-key-change-busy",
-                         "archive-key-pending-exists", "archive-key-already-exists", "archive-key-limit", "archive-key-audit-failed", "installation-missing",
-                         "archive-key-save-required", "archive-key-unavailable", "archive-encryption-tool-missing",
-                         "archive-encryption-tool-unusable", "archive-encryption-failed", "archive-decryption-failed", "archive-integrity-failed",
-                         "extension-uninstalled", "credentials-invalid", "private-write-failed", "maintenance-probe-credentials-invalid", "maintenance-probe-origin-mismatch",
-                         "maintenance-probe-origin-invalid", "maintenance-probe-http-saved", "document-roots-invalid"}:
-                raise BackupError(error)
+                value = json.loads(output)
+            except (ValueError, TypeError):
+                continue
+            if isinstance(value, dict) and "error" in value:
+                error = value["error"]
+                raise BackupError(error if isinstance(error, str) and error in BRIDGE_ERROR_CODES else "bridge-failed")
+        if result.returncode:
             raise BackupError("bridge-failed")
         value = json.loads(result.stdout)
-        if isinstance(value, dict) and value.get("error"):
-            raise BackupError(value["error"] if value["error"] in ("credentials-unreadable", "config-invalid") else "bridge-failed")
         return value
     except (OSError, ValueError, subprocess.TimeoutExpired):
         raise BackupError("bridge-failed") from None

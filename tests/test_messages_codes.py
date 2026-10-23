@@ -144,6 +144,11 @@ echo json_encode($result, JSON_THROW_ON_ERROR);
         self.assertIn('driver', driver.lower())
         self.assertIn('database name', name.lower())
 
+    def test_bridge_reports_php_mysql_driver_and_connection_failures(self):
+        messages = self.messages(('database-pdo-driver-unavailable', 'database-connection-failed'))
+        self.assertIn('PDO MySQL', messages['database-pdo-driver-unavailable'][1])
+        self.assertIn('could not connect', messages['database-connection-failed'][1])
+
     def test_frozen_upload_refusals_do_not_promise_regeneration_or_reencryption(self):
         messages = self.messages(('delivery-ciphertext-unavailable', 'legacy-plaintext-delivery-blocked',
                                   'credentials-unreadable'))

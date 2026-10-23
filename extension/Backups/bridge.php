@@ -71,6 +71,7 @@ try {
         $dbName = $config->get('database.default');
         $db = (new \Illuminate\Database\ConfigurationUrlParser)->parseConfiguration($config->get('database.connections.' . $dbName));
     }
+    if (!class_exists(PDO::class) || !in_array('mysql', PDO::getAvailableDrivers(), true)) { throw new RuntimeException('database-pdo-driver-unavailable'); }
     $tlsOptions = [PDO::MYSQL_ATTR_SSL_CA, PDO::MYSQL_ATTR_SSL_CAPATH, PDO::MYSQL_ATTR_SSL_CERT, PDO::MYSQL_ATTR_SSL_KEY, PDO::MYSQL_ATTR_SSL_CIPHER, PDO::MYSQL_ATTR_SSL_VERIFY_SERVER_CERT];
     if (array_intersect(array_keys($db['options'] ?? []), $tlsOptions)) { throw new RuntimeException('database-tls-unsupported'); }
     if (!in_array($db['driver'] ?? '', ['mysql', 'mariadb'], true)) { throw new RuntimeException('database-driver-unsupported'); }
@@ -80,7 +81,11 @@ try {
     if (!is_string($prefix) || !preg_match('/^[a-zA-Z0-9_]*$/D', $prefix)) { throw new RuntimeException('database-prefix-unsupported'); }
     $host = is_string($db['host'] ?? null) && $db['host'] !== '' ? $db['host'] : 'localhost';
     $dsn = !empty($db['unix_socket']) ? 'mysql:unix_socket=' . $db['unix_socket'] : 'mysql:host=' . $host . ';port=' . ($db['port'] ?? 3306);
-    $pdo = new PDO($dsn . ';dbname=' . $databaseName . ';charset=utf8mb4', $db['username'] ?? '', $db['password'] ?? '', array_replace($db['options'] ?? [], [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION]));
+    try {
+        $pdo = new PDO($dsn . ';dbname=' . $databaseName . ';charset=utf8mb4', $db['username'] ?? '', $db['password'] ?? '', array_replace($db['options'] ?? [], [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION]));
+    } catch (PDOException $error) {
+        throw new RuntimeException('database-connection-failed');
+    }
     $statement = $pdo->query("SELECT id, enabled FROM {$prefix}extensions WHERE extension='Backups' AND type='other' AND deleted_at IS NULL ORDER BY id DESC LIMIT 1");
     $extension = $statement->fetch(PDO::FETCH_ASSOC);
     if (!$extension) { throw new RuntimeException('extension-uninstalled'); }
@@ -230,7 +235,7 @@ try {
     if ($verb !== 'read') { throw new RuntimeException('bridge-command-invalid'); }
     echo json_encode($readEnvelope($credentials), JSON_THROW_ON_ERROR | JSON_UNESCAPED_SLASHES) . "\n";
 } catch (Throwable $error) {
-    $safe = ['private-pipe-required', 'application-unavailable', 'database-connection-invalid', 'database-driver-unsupported', 'database-tls-unsupported', 'database-prefix-unsupported', 'unsupported-database', 'extension-uninstalled', 'native-secret-row-refused', 'private-root-invalid', 'document-roots-invalid', 'private-root-unavailable', 'billing-settings-unreadable', 'installation-mismatch', 'installation-missing', 'credentials-unreadable', 'credentials-invalid', 'bridge-command-invalid', 'private-file-invalid', 'private-write-failed', 'maintenance-probe-credentials-invalid', 'maintenance-probe-origin-invalid', 'maintenance-probe-origin-mismatch', 'archive-key-invalid', 'archive-key-mismatch', 'archive-key-required', 'archive-key-change-busy', 'archive-key-pending-exists', 'archive-key-already-exists', 'archive-key-limit', 'archive-key-audit-failed'];
+    $safe = ['private-pipe-required', 'application-unavailable', 'database-connection-invalid', 'database-pdo-driver-unavailable', 'database-connection-failed', 'database-driver-unsupported', 'database-tls-unsupported', 'database-prefix-unsupported', 'unsupported-database', 'extension-uninstalled', 'native-secret-row-refused', 'private-root-invalid', 'document-roots-invalid', 'private-root-unavailable', 'billing-settings-unreadable', 'installation-mismatch', 'installation-missing', 'credentials-unreadable', 'credentials-invalid', 'bridge-command-invalid', 'private-file-invalid', 'private-write-failed', 'maintenance-probe-credentials-invalid', 'maintenance-probe-origin-invalid', 'maintenance-probe-origin-mismatch', 'archive-key-invalid', 'archive-key-mismatch', 'archive-key-required', 'archive-key-change-busy', 'archive-key-pending-exists', 'archive-key-already-exists', 'archive-key-limit', 'archive-key-audit-failed'];
     $code = in_array($error->getMessage(), $safe, true) ? $error->getMessage() : 'bridge-unavailable';
     fwrite(STDERR, json_encode(['error' => $code]) . "\n"); exit(1);
 }
