@@ -219,6 +219,20 @@ def retain_writer_cause(path, cause):
         return
 
 
+def read_config_save_intent(path):
+    """Read a pending Save intent without weakening its private-file boundary."""
+    private_file(path)
+    try:
+        intent = read_json(path)
+    except BackupError as failure:
+        if failure.code != "state-unreadable":
+            raise
+        raise BackupError("config-save-outcome-unknown") from None
+    if not isinstance(intent, dict):
+        raise BackupError("config-save-outcome-unknown")
+    return intent
+
+
 def configuration_file_snapshot(path):
     if path.exists() or path.is_symlink():
         private_file(path)
@@ -293,7 +307,7 @@ def set_config(args, state, changes):
         pending_path = state.root / "config-save.json"
         previous_intent = configuration_file_snapshot(pending_path)
         if previous_intent is not None:
-            pending = read_json(pending_path)
+            pending = read_config_save_intent(pending_path)
             if pending.get("s3_requested") and credentials is None or pending.get("site_requested") and probe_credentials is None:
                 raise BackupError("config-save-outcome-unknown")
         derived_before = {state.root / name: configuration_file_snapshot(state.root / name)
@@ -453,9 +467,13 @@ def dispatch(args):
                     pending_path = state.root / "config-save.json"
                     pending_save = pending_path.exists()
                     if pending_save:
-                        private_file(pending_path)
-                        pending_intent = read_json(pending_path)
-                        pending_writer_cause = safe_writer_cause(pending_intent.get("writer_cause"), fields=DEFAULTS)
+                        try:
+                            pending_intent = read_config_save_intent(pending_path)
+                        except BackupError as failure:
+                            if failure.code != "config-save-outcome-unknown":
+                                raise
+                        else:
+                            pending_writer_cause = safe_writer_cause(pending_intent.get("writer_cause"), fields=DEFAULTS)
                 envelope["settings"] = {**DEFAULTS, **envelope.get("settings", {})}
                 normalize(envelope["settings"])
             except BackupError as failure:
