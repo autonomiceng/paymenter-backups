@@ -222,11 +222,11 @@ class PrivateStoreUiTests(unittest.TestCase):
             private.mkdir(mode=0o750)
             marker = private / "installation.json"
             marker.write_text('{"schema_version":1}')
-            setup = (
-                'eval("namespace Paymenter\\\\Extensions\\\\Others\\\\Backups; '
-                'function is_readable(\\$path) { return false; }"); '
-            )
-            result = self.private_root_problem(app, private, setup)
+            marker.chmod(0o000)
+            try:
+                result = self.private_root_problem(app, private)
+            finally:
+                marker.chmod(0o600)
             self.assertEqual(result["problem"]["params"]["reason"], "mode")
             self.assertIn("Choose a new, dedicated, empty folder", result["message"])
             self.assertNotIn("Set its mode", result["message"])
