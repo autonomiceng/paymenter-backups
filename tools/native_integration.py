@@ -30,6 +30,12 @@ def fixture_http():
     return urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
 
+def require_maria_socket_path(socket_path):
+    if not isinstance(socket_path, str):
+        raise TypeError('MariaDB socket path must be a string')
+    return socket_path
+
+
 def execute(command, cwd=None, input=None, env=None, timeout=180):
     result = subprocess.run(list(map(str, command)), cwd=cwd, input=input, env=child_environment(env), stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout)
     if result.returncode:
@@ -106,7 +112,7 @@ def maria(work):
             time.sleep(.1)
         else:
             raise RuntimeError('disposable MariaDB readiness timeout')
-        yield sock, db_port
+        yield require_maria_socket_path(str(sock)), db_port
     finally:
         process.terminate()
         try:
@@ -314,14 +320,15 @@ def main():
         private = work / 'private'
         private.mkdir(mode=0o700)
         with maria(work) as (sock, db_port):
-            execute(['mariadb', '--no-defaults', '--socket=' + str(sock), '-uroot', '-e', "CREATE DATABASE paymenter_fixture; CREATE DATABASE paymenter_restore; CREATE DATABASE paymenter_legacy_fixture; CREATE USER 'paymenter_fixture_user'@'localhost' IDENTIFIED BY 'paymenter-fixture-password'; CREATE USER 'paymenter_fixture_user'@'127.0.0.1' IDENTIFIED BY 'paymenter-fixture-password'; GRANT SELECT,INSERT,UPDATE,DELETE,CREATE,ALTER,INDEX,DROP,REFERENCES ON paymenter_fixture.* TO 'paymenter_fixture_user'@'localhost'; GRANT SELECT,INSERT,UPDATE,DELETE,CREATE,ALTER,INDEX,DROP,REFERENCES ON paymenter_fixture.* TO 'paymenter_fixture_user'@'127.0.0.1'; GRANT SELECT,INSERT,UPDATE,DELETE,CREATE,ALTER,INDEX,DROP,REFERENCES ON paymenter_restore.* TO 'paymenter_fixture_user'@'localhost'; GRANT SELECT,INSERT,UPDATE,DELETE,CREATE,ALTER,INDEX,DROP,REFERENCES ON paymenter_legacy_fixture.* TO 'paymenter_fixture_user'@'localhost';"])
+            sock = require_maria_socket_path(sock)
+            execute(['mariadb', '--no-defaults', '--socket=' + sock, '-uroot', '-e', "CREATE DATABASE paymenter_fixture; CREATE DATABASE paymenter_restore; CREATE DATABASE paymenter_legacy_fixture; CREATE USER 'paymenter_fixture_user'@'localhost' IDENTIFIED BY 'paymenter-fixture-password'; CREATE USER 'paymenter_fixture_user'@'127.0.0.1' IDENTIFIED BY 'paymenter-fixture-password'; GRANT SELECT,INSERT,UPDATE,DELETE,CREATE,ALTER,INDEX,DROP,REFERENCES ON paymenter_fixture.* TO 'paymenter_fixture_user'@'localhost'; GRANT SELECT,INSERT,UPDATE,DELETE,CREATE,ALTER,INDEX,DROP,REFERENCES ON paymenter_fixture.* TO 'paymenter_fixture_user'@'127.0.0.1'; GRANT SELECT,INSERT,UPDATE,DELETE,CREATE,ALTER,INDEX,DROP,REFERENCES ON paymenter_restore.* TO 'paymenter_fixture_user'@'localhost'; GRANT SELECT,INSERT,UPDATE,DELETE,CREATE,ALTER,INDEX,DROP,REFERENCES ON paymenter_legacy_fixture.* TO 'paymenter_fixture_user'@'localhost';"])
             sys.path.insert(0, str(ROOT / 'tests/integration'))
             from database_visibility import check_visibility
             visibility = check_visibility(work, sock)
             http_port = port()
             native_url = 'http://127.0.0.1:' + str(http_port)
             app_key = 'base64:' + base64.b64encode(os.urandom(32)).decode()
-            env = {'APP_NAME': 'Fixture', 'APP_ENV': 'local', 'APP_KEY': app_key, 'APP_DEBUG': 'false', 'APP_URL': 'http://127.0.0.1:1', 'APP_TIMEZONE': 'America/New_York', 'APP_MAINTENANCE_DRIVER': 'file', 'DB_CONNECTION': 'mysql', 'DB_SOCKET': str(sock), 'DB_HOST': 'deliberately-unused.invalid', 'DB_DATABASE': 'deliberately_unused_database', 'DB_URL': 'mysql://paymenter_fixture_user:paymenter-fixture-password@localhost/paymenter_fixture?' + urllib.parse.urlencode({'unix_socket': str(sock)}), 'DB_USERNAME': 'root', 'DB_PASSWORD': '', 'DB_COLLATION': 'utf8mb4_unicode_ci', 'CACHE_STORE': 'file', 'QUEUE_CONNECTION': 'sync', 'SESSION_DRIVER': 'file', 'FILESYSTEM_DISK': 'local', 'MAIL_MAILER': 'log', 'TELEMETRY_ENABLED': 'false'}
+            env = {'APP_NAME': 'Fixture', 'APP_ENV': 'local', 'APP_KEY': app_key, 'APP_DEBUG': 'false', 'APP_URL': 'http://127.0.0.1:1', 'APP_TIMEZONE': 'America/New_York', 'APP_MAINTENANCE_DRIVER': 'file', 'DB_CONNECTION': 'mysql', 'DB_SOCKET': sock, 'DB_HOST': 'deliberately-unused.invalid', 'DB_DATABASE': 'deliberately_unused_database', 'DB_URL': 'mysql://paymenter_fixture_user:paymenter-fixture-password@localhost/paymenter_fixture?' + urllib.parse.urlencode({'unix_socket': sock}), 'DB_USERNAME': 'root', 'DB_PASSWORD': '', 'DB_COLLATION': 'utf8mb4_unicode_ci', 'CACHE_STORE': 'file', 'QUEUE_CONNECTION': 'sync', 'SESSION_DRIVER': 'file', 'FILESYSTEM_DISK': 'local', 'MAIL_MAILER': 'log', 'TELEMETRY_ENABLED': 'false'}
             # Direct removal precedes the first Laravel bootstrap.
             for cached in (app / 'bootstrap/cache').glob('*.php'):
                 if cached.name not in ('packages.php', 'services.php'):
@@ -371,7 +378,7 @@ def main():
             bridge = app / 'extensions/Others/Backups/bridge.php'
             cold = json.loads(execute([args.php, bridge, 'read', '--app', app, '--private-root', private]))
             expected_fp = hashlib.sha256(json.dumps(cold['billing'], sort_keys=True, separators=(',', ':')).encode()).hexdigest()
-            if cold['database']['name'] != 'paymenter_fixture' or cold['database']['host'] != 'localhost' or cold['database']['socket'] != str(sock):
+            if cold['database']['name'] != 'paymenter_fixture' or cold['database']['host'] != 'localhost' or cold['database']['socket'] != sock:
                 raise RuntimeError('cold DB_URL parser differs from native connection')
             before_tls = (app / '.env').read_text()
             (app / '.env').write_text(before_tls + 'MYSQL_ATTR_SSL_CA=/fixture/required-ca.pem\n')
@@ -659,7 +666,7 @@ def main():
                 restored = candidates[0].parent
             if hashlib.sha256((restored / 'isolated-restore-payload.bin').read_bytes()).hexdigest() != large_payload_sha256:
                 raise RuntimeError('large encrypted restore payload differs')
-            execute(['mariadb', '--no-defaults', '--socket=' + str(sock), '-uroot', 'paymenter_restore'], input=(payload / 'database.sql').read_bytes())
+            execute(['mariadb', '--no-defaults', '--socket=' + require_maria_socket_path(sock), '-uroot', 'paymenter_restore'], input=(payload / 'database.sql').read_bytes())
             restored_env = (restored / '.env').read_text().replace('DB_DATABASE=deliberately_unused_database', 'DB_DATABASE=paymenter_restore').replace('/paymenter_fixture?', '/paymenter_restore?')
             if 'APP_KEY=' + app_key not in restored_env:
                 raise RuntimeError('APP_KEY not preserved in archive')

@@ -22,7 +22,9 @@ import sys
 import tarfile
 import time
 
-from native_integration import ROOT, execute, fetch, hashes, fixture_http, maria, port
+from native_integration import (
+    ROOT, execute, fetch, hashes, fixture_http, maria, port, require_maria_socket_path,
+)
 from fixture_environment import child_environment, private_work_directory, require_private_workroot
 
 
@@ -292,8 +294,9 @@ def serve(args):
     original = hashes(app)
     private = work / 'private'
     private.mkdir(mode=0o700)
-    with maria(work) as sock:
-        execute(['mariadb', '--no-defaults', '--socket=' + str(sock), '-uroot', '-e',
+    with maria(work) as (sock, _db_port):
+        socket_path = require_maria_socket_path(sock)
+        execute(['mariadb', '--no-defaults', '--socket=' + socket_path, '-uroot', '-e',
                  "CREATE DATABASE paymenter_fixture; CREATE USER 'paymenter_fixture_user'@'localhost' IDENTIFIED BY 'paymenter-fixture-password'; GRANT SELECT,INSERT,UPDATE,DELETE,CREATE,ALTER,INDEX,DROP,REFERENCES ON paymenter_fixture.* TO 'paymenter_fixture_user'@'localhost';"])
         http_port = args.port or port()
         import ipaddress
@@ -309,7 +312,7 @@ def serve(args):
                'APP_KEY': 'base64:' + base64.b64encode(os.urandom(32)).decode(),
                'APP_DEBUG': 'false', 'APP_URL': url, 'APP_TIMEZONE': 'UTC',
                'APP_MAINTENANCE_DRIVER': 'file', 'DB_CONNECTION': 'mysql',
-               'DB_SOCKET': str(sock), 'DB_HOST': 'localhost',
+               'DB_SOCKET': socket_path, 'DB_HOST': 'localhost',
                'DB_DATABASE': 'paymenter_fixture', 'DB_USERNAME': 'paymenter_fixture_user',
                'DB_PASSWORD': 'paymenter-fixture-password', 'DB_COLLATION': 'utf8mb4_unicode_ci',
                'CACHE_STORE': 'file', 'QUEUE_CONNECTION': 'sync', 'SESSION_DRIVER': 'file',
@@ -322,7 +325,7 @@ def serve(args):
         execute([args.php, 'artisan', 'passport:keys', '--force'], cwd=app)
         execute([args.php, php_helper(work), app, 'users', url])
         metadata = {'work': str(work), 'app': str(app), 'private_root': str(private),
-                    'socket': str(sock), 'php': args.php, 'owner_pid': os.getpid(),
+                    'socket': socket_path, 'php': args.php, 'owner_pid': os.getpid(),
                     'url': url, 'admin_url': url + '/admin/backups',
                     'login_url': url + '/login',
                     'admin_email': 'ui-admin@example.invalid', 'limited_email': 'ui-limited@example.invalid',
