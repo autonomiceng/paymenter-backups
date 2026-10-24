@@ -196,6 +196,7 @@ class PrivateStoreUiTests(unittest.TestCase):
             result = self.private_root_problem(app, private)
             self.assertEqual(result["problem"]["code"], "private-root-invalid")
             self.assertEqual(result["problem"]["params"]["reason"], "mode")
+            self.assertNotIn("repair_required", result["problem"]["params"])
             self.assertIn("Choose a new, dedicated, empty folder", result["message"])
             self.assertNotIn("Set its mode", result["message"])
 
@@ -233,6 +234,7 @@ class PrivateStoreUiTests(unittest.TestCase):
             finally:
                 marker.chmod(0o600)
             self.assertEqual(result["problem"]["params"]["reason"], "mode")
+            self.assertNotIn("repair_required", result["problem"]["params"])
             self.assertIn("Choose a new, dedicated, empty folder", result["message"])
             self.assertNotIn("Set its mode", result["message"])
 
@@ -275,7 +277,7 @@ class PrivateStoreUiTests(unittest.TestCase):
             setup = (
                 'eval("namespace Paymenter\\\\Extensions\\\\Others\\\\Backups; '
                 'function is_readable(\\$path) { return !str_ends_with(\\$path, \'/installation.json\'); } '
-                'function realpath(\\$path) { return str_ends_with(\\$path, \'/private\') ? false : \\realpath(\\$path); }"); '
+                'function is_dir(\\$path) { return !str_ends_with(\\$path, \'/private\'); }"); '
             )
             try:
                 result = self.private_root_problem(app, private, setup, saved_root=True)
@@ -349,6 +351,25 @@ class PrivateStoreUiTests(unittest.TestCase):
             finally:
                 private.chmod(0o700)
             self.assertEqual(result, [True, False])
+
+    def test_unreadable_installation_marker_still_identifies_a_saved_default_root(self):
+        with tempfile.TemporaryDirectory(prefix="backups-private-store-saved-default-") as temporary:
+            private = pathlib.Path(temporary) / "private"
+            private.mkdir(mode=0o700)
+            marker = private / "installation.json"
+            marker.write_text('{"installation_uuid":"fixture"}')
+            marker.chmod(0o000)
+            try:
+                source = ROOT / "extension/Backups/PrivateStore.php"
+                result = self.php(
+                    'require $argv[1]; echo json_encode('
+                    'Paymenter\\Extensions\\Others\\Backups\\PrivateStore::hasInstallationMarker($argv[2]), '
+                    'JSON_THROW_ON_ERROR);',
+                    source, private,
+                )
+            finally:
+                marker.chmod(0o600)
+            self.assertEqual(json.loads(result), True)
 
 
 if __name__ == "__main__":

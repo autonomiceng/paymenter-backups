@@ -79,9 +79,13 @@ trait SavesSettings
             $this->refuseSettings('private-root-move-refused');
             return;
         }
-        $privateRoot = ($changes['private_root'] ?? $this->engineValue('private_root', $stored['private_root'])) ?: null;
+        $currentPrivateRoot = $this->engineValue('private_root', $stored['private_root']) ?: null;
+        $privateRoot = ($changes['private_root'] ?? $currentPrivateRoot) ?: null;
+        $defaultPrivateRoot = PrivateStore::defaultPath(realpath(base_path()));
+        $savedRoot = $privateRoot === $currentPrivateRoot
+            && ($currentPrivateRoot !== null || PrivateStore::hasInstallationMarker($privateRoot ?? $defaultPrivateRoot));
         $docroots = $changes['extra_docroots'] ?? $this->engineValue('extra_docroots', $stored['extra_docroots']);
-        $problem = PrivateStore::problem(realpath(base_path()), $privateRoot, $docroots);
+        $problem = PrivateStore::problem(realpath(base_path()), $privateRoot, $docroots, $savedRoot);
         if ($problem !== null) {
             $this->refusePrivateRootProblem($problem);
             return;
@@ -126,7 +130,7 @@ trait SavesSettings
             $code = $error instanceof \RuntimeException ? $error->getMessage() : 'config-save-outcome-unknown';
             $cause = $error instanceof \Paymenter\Extensions\Others\Backups\EngineCommandException
                 ? Runtime::safeWriterCause($error->cause) : null;
-            $privateProblem = PrivateStore::problem(realpath(base_path()), $privateRoot, $docroots);
+            $privateProblem = PrivateStore::problem(realpath(base_path()), $privateRoot, $docroots, $savedRoot);
             if ($privateProblem !== null) {
                 $this->refusePrivateRootProblem($privateProblem);
                 return;
@@ -166,7 +170,7 @@ trait SavesSettings
         if (($saved['credentials_updated'] ?? false) === true) { $this->secretsSaved['s3'] = true; }
         if (($saved['maintenance_probe_credentials_updated'] ?? false) === true) { $this->secretsSaved['site'] = true; }
         if (($saved['updated'] ?? false) !== true) {
-            $privateProblem = PrivateStore::problem(realpath(base_path()), $privateRoot, $docroots);
+            $privateProblem = PrivateStore::problem(realpath(base_path()), $privateRoot, $docroots, $savedRoot);
             if ($privateProblem !== null) {
                 $this->refusePrivateRootProblem($privateProblem);
                 return;
