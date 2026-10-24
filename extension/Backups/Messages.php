@@ -56,6 +56,7 @@ final class Messages
         'storage-required' => 'Keep backups on this server, upload them to S3, or enable both under Storage.',
         'storage-untested' => 'Test storage with the current settings and recovery key before enabling automatic uploads.',
         'config-write-failed' => 'Paymenter couldn\'t save settings to its database. Check the database connection and try again.',
+        'command-not-registered' => 'Paymenter did not load the Backups settings command. Check that CLI PHP can connect to Paymenter\'s database, then save again.',
         'tool-unavailable' => 'A required binary wasn\'t found. Fix it under Advanced, Binary paths, or leave the path empty to detect it.',
         'tool-path-invalid' => 'Enter a full path, for example /usr/bin/tar.',
         'plaintext-offsite-acknowledgement-required' => 'To upload unencrypted backups to S3, confirm that backups in S3 won\'t be encrypted.',
@@ -63,16 +64,16 @@ final class Messages
         's3-tls-required' => 'The endpoint must start with https://.',
         's3-endpoint-invalid' => 'Enter the provider\'s https:// API URL, without a username or query.',
         's3-prefix-invalid' => 'The folder in bucket can\'t contain "//", ".", ".." or "\\".',
-        'private-root-invalid' => 'The data directory must be a full path outside Paymenter and any public web folder, owned by the site user, with permissions 700. If a saved path no longer works, follow the terminal instructions to point Backups to its existing data directory.',
+        'private-root-invalid' => 'The data directory is not identified as Backups data. Choose a new, dedicated, empty folder for Backups data.',
         'private-root-inside-app' => 'The data directory must be outside Paymenter\'s folder.',
         'private-root-inside-docroot' => 'The data directory is inside a public web folder. Choose a folder that no site serves.',
         'private-root-unsafe' => 'The data directory can\'t be a symlink. Enter its real path.',
-        'private-root-unavailable' => 'The web server can\'t create or open the data directory. Check its owner and PHP\'s open_basedir.',
+        'private-root-unavailable' => 'The web server can\'t open the data directory. Choose a new, dedicated, empty folder for Backups data, or ask the server administrator to check PHP\'s open_basedir.',
         'document-roots-invalid' => 'The saved list of other public web folders is damaged. In Backups settings, enter every other public web folder, one full path per line, and confirm the complete list. Backups stay blocked until the list is corrected.',
-        'owner-mismatch' => 'The data directory and Paymenter must belong to the same user. Set the data directory\'s permissions to 700.',
-        'private-state-permissions' => 'A file in the data directory has the wrong owner or permissions. As the site user, set the data directory to 700 and its files to 600.',
-        'private-file-invalid' => 'A file in the data directory has the wrong owner or permissions. As the site user, set the data directory to 700 and its files to 600.',
-        'private-write-failed' => 'The data directory isn\'t writable. Check its owner and free disk space.',
+        'owner-mismatch' => 'Paymenter and its Backups data directory are owned by different users. Choose a new, dedicated, empty folder for Backups data.',
+        'private-state-permissions' => 'A Backups data file has an unsafe owner or mode. Ask the server administrator to inspect the data directory before changing it.',
+        'private-file-invalid' => 'A Backups data file has an unsafe owner or mode. Ask the server administrator to inspect the data directory before changing it.',
+        'private-write-failed' => 'The data directory isn\'t writable. Check free disk space or choose a new, dedicated, empty folder for Backups data.',
         'state-unreadable' => 'A file in the data directory couldn\'t be read. It may be damaged or incomplete.',
         'installation-mismatch' => 'This data directory belongs to another Paymenter installation. Use this site\'s original data directory.',
         'installation-missing' => 'Save settings once to finish setup.',
@@ -165,7 +166,7 @@ final class Messages
         'dump-empty' => 'The database export was empty. Check the database name and user in Paymenter\'s .env.',
         'disk-reserve-exceeded' => 'Disk is below the minimum free space. Free space, or lower the minimum in Settings, Storage.',
         'local-byte-budget-exceeded' => 'Backup space is full. Delete old backups or raise the limit in Settings, Storage.',
-        'destination-unsafe' => 'The backup directory must be owned by the site user, have permissions 700, and be outside Paymenter and any public web folder.',
+        'destination-unsafe' => 'The backup directory must be dedicated to this site, writable by the site user, and outside Paymenter and any public web folder.',
         'destination-inside-docroot' => 'The backup directory is inside a public web folder. Choose a folder that no site serves.',
         'private-root-move-refused' => 'The data directory can\'t be changed after setup. It holds your backup history and saved keys.',
 
@@ -282,6 +283,61 @@ final class Messages
     }
 
     public static function known(string $code): bool { return isset(self::ERRORS[$code]); }
+
+    /** Append a bounded writer cause to administrator copy when one is available. */
+    public static function withWriterCause(string $text, ?string $cause, ?string $refusalCode = null): string
+    {
+        return $cause === null || $cause === $refusalCode ? $text : $text . ' Writer cause: ' . $cause . '.';
+    }
+
+    /** Format bounded data-directory details for Save and readiness messages. */
+    public static function privateRootProblem(array $problem): string
+    {
+        $code = $problem['code'] ?? null;
+        $params = is_array($problem['params'] ?? null) ? $problem['params'] : [];
+        $path = self::displayPath($params['path'] ?? null);
+        if ($path === '') { return self::error(is_string($code) ? $code : null); }
+        if ($code === 'private-root-invalid') {
+            if (($params['identified'] ?? null) !== true) {
+                return 'Data directory ' . $path . ' isn\'t identified as a readable Backups data directory. Choose a new, dedicated, empty folder for Backups data.';
+            }
+            return match ($params['reason'] ?? null) {
+                'owner' => 'Backups data directory ' . $path . ' isn\'t owned by the web user. Change its owner to the web user and set mode 0700.',
+                'mode' => 'Backups data directory ' . $path . ' must have mode 0700. Set its mode to 0700.',
+                default => self::error($code),
+            };
+        }
+        if ($code === 'private-root-unavailable') {
+            if (($params['path_exists'] ?? null) === true && ($params['identified'] ?? null) !== true) {
+                return 'Data directory ' . $path . ' isn\'t identified as a readable Backups data directory. Choose a new, dedicated, empty folder for Backups data.';
+            }
+            $parent = self::displayPath($params['parent'] ?? null);
+            if ($parent === '') { return self::error($code); }
+            if (($params['parent_is_folder'] ?? null) === false) {
+                return 'Data directory ' . $path . ' can\'t be created: ' . $parent . ' isn\'t a folder. Choose a writable, dedicated, empty folder outside Paymenter.';
+            }
+            if (($params['parent_is_folder'] ?? null) === true) {
+                return 'Data directory ' . $path . ' can\'t be created: the web user can\'t write to ' . $parent . '. Create it for the web user with mode 0700, or choose another folder outside Paymenter.';
+            }
+        }
+        return self::error(is_string($code) ? $code : null);
+    }
+
+    private static function displayPath(mixed $path): string
+    {
+        if (!is_string($path) || $path === '') { return ''; }
+        $path = preg_replace('/[\x00-\x1f\x7f]/', '?', $path) ?? '';
+        return strlen($path) > 400 ? substr($path, 0, 397) . '...' : $path;
+    }
+
+    /** Waiting copy and its escaped setup link for backup history. */
+    public static function schedulerWaitLine(string $url): \Illuminate\Support\HtmlString
+    {
+        $url = htmlspecialchars($url, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
+        return new \Illuminate\Support\HtmlString(
+            'Waiting for Paymenter\'s scheduled tasks. Set them up on <a class="underline" href="' . $url . '">the Backups tab</a>.'
+        );
+    }
 
     private static function shellWord(string $word): string
     {
@@ -485,6 +541,10 @@ final class Messages
         // Engine names for the same conditions.
         $code = ['continuous-worker-present' => 'worker-continuous', 'job-command-unsupported' => 'job-unparseable', 'job-discovery-failed' => 'discovery-failed',
             'job-discovery-incomplete' => 'discovery-failed', 'job-discovery-stale' => 'discovery-stale'][$code] ?? $code;
+        if (in_array($code, ['private-root-invalid', 'private-root-unavailable'], true)
+            && is_string($context['private_root_problem'] ?? null)) {
+            return $item('Fix the Data directory', $context['private_root_problem'], [], $settings('Go to Data directory', 'first-time-setup'));
+        }
         $job = is_string($detail['job'] ?? null) ? ($context['jobs'][$detail['job']] ?? null) : null;
         if ($job === null && $code === 'worker-continuous') {
             foreach ($context['jobs'] ?? [] as $candidate) { if (($candidate['coordination'] ?? null) === 'continuous') { $job = $candidate; break; } }

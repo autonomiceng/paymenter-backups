@@ -29,7 +29,9 @@ NON_ERRORS = {
     'recovery-key', 'request-worker', 's3-delivery', 's3-verify', 'scope-changed',
     'staging-removal', 'transactional-database-only', 'untrusted-transport-only',
     'us-east-1', 'utf-8', 'visible-zero',
-    'command-not-registered', 'writer-failed', 'writer-output-invalid', 'writer-process-failed', 'writer-timeout',
+    'command-not-registered', 'writer-failed', 'writer-output-invalid',
+    'native-writer-failed', 'writer-exited-without-output', 'writer-process-failed', 'writer-timeout',
+    'actor-login-failed', 'actor-not-authorized',
 }
 
 
@@ -87,7 +89,7 @@ def emitted_codes():
             values = re.findall(r"['\"]([a-z][a-z0-9-]+)['\"]", expression)
             if CODE.fullmatch(expression):
                 values.append(expression)
-            codes.update(value for value in values if CODE.fullmatch(value))
+            codes.update(value for value in values if CODE.fullmatch(value) and value not in NON_ERRORS)
         if path.name == 'bridge.php':
             match = re.search(r"\$code\s*=.*?\?\s*\$error->getMessage\(\)\s*:\s*'([^']+)'", source)
             if match:
@@ -157,6 +159,28 @@ echo json_encode($result, JSON_THROW_ON_ERROR);
         self.assertIn('PDO MySQL', messages['database-pdo-driver-unavailable'][1])
         self.assertIn('could not connect', messages['database-connection-failed'][1])
 
+    def test_writer_cause_copy_is_formatted_by_messages(self):
+        script = r'''
+require $argv[1];
+echo json_encode([
+    \Paymenter\Extensions\Others\Backups\Messages::withWriterCause('Settings were not saved.', 'busy'),
+    \Paymenter\Extensions\Others\Backups\Messages::withWriterCause('Settings were not saved.', null),
+    \Paymenter\Extensions\Others\Backups\Messages::withWriterCause(
+        \Paymenter\Extensions\Others\Backups\Messages::error('credentials-unreadable'),
+        'credentials-unreadable',
+        'credentials-unreadable'
+    ),
+], JSON_THROW_ON_ERROR);
+'''
+        result = subprocess.run([PHP, '-r', script, str(ROOT / 'extension/Backups/Messages.php')],
+                                capture_output=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stdout.decode() + result.stderr.decode())
+        self.assertEqual(json.loads(result.stdout), [
+            'Settings were not saved. Writer cause: busy.',
+            'Settings were not saved.',
+            'Saved credentials or recovery keys could not be read. Restore the matching APP_KEY or APP_PREVIOUS_KEYS and keep credentials.json. Replacing it can lose keys needed for earlier S3 backups.',
+        ])
+
     def test_save_errors_keep_the_field_and_have_direct_repair_guidance(self):
         script = r'''
 require $argv[1];
@@ -169,7 +193,9 @@ $result = [
     'gzip' => \Paymenter\Extensions\Others\Backups\Messages::readinessItem('gzip-busybox', [])['text'],
     'details' => \Paymenter\Extensions\Others\Backups\Runtime::errorDetails('{"error":"config-invalid","field":"schedule_time","detail":{"value":"secret"}}'),
     'database_cause' => \Paymenter\Extensions\Others\Backups\Runtime::errorDetails('{"error":"config-write-outcome-unknown","detail":{"writer_cause":"database-pdo-driver-unavailable"}}'),
+    'timezone_cause' => \Paymenter\Extensions\Others\Backups\Runtime::errorDetails('{"error":"config-invalid","field":"schedule_timezone","detail":{"writer_cause":"validation:schedule_timezone:timezone"}}'),
     'unknown_cause' => \Paymenter\Extensions\Others\Backups\Runtime::errorDetails('{"error":"config-write-outcome-unknown","detail":{"writer_cause":"arbitrary-sensitive-text"}}'),
+    'unknown_code' => \Paymenter\Extensions\Others\Backups\Runtime::errorDetails('{"error":"app"}'),
 ];
 echo json_encode($result, JSON_THROW_ON_ERROR);
 '''
@@ -186,16 +212,113 @@ echo json_encode($result, JSON_THROW_ON_ERROR);
         self.assertEqual(value['gzip'], 'gzip on this server is BusyBox; Backups needs GNU gzip')
         self.assertEqual(value['details'], {'code': 'config-invalid', 'field': 'schedule_time', 'cause': None})
         self.assertEqual(value['database_cause']['cause'], 'database-pdo-driver-unavailable')
+        self.assertEqual(value['timezone_cause']['cause'], 'validation:schedule_timezone:timezone')
         self.assertEqual(value['unknown_cause']['cause'], 'unrecognized')
+        self.assertEqual(value['unknown_code']['code'], 'engine-unavailable')
+
+    def test_cause_free_save_refusal_survives_warning_to_exception_handler(self):
+        result = subprocess.run([PHP, str(ROOT / 'tests/integration/runtime_cause_free_refusal.php')],
+                                capture_output=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stderr.decode())
+        self.assertEqual(result.stdout.decode(), 'RuntimeException:busy')
+
+    def test_scheduler_wait_copy_and_link_are_owned_by_messages(self):
+        script = r'''
+namespace Illuminate\Support {
+    final class HtmlString { public function __construct(private string $value) {} public function __toString(): string { return $this->value; } }
+}
+namespace {
+require $argv[1];
+echo (string) \Paymenter\Extensions\Others\Backups\Messages::schedulerWaitLine('/admin/backups?x="&');
+}
+'''
+        result = subprocess.run([PHP, '-r', script, str(ROOT / 'extension/Backups/Messages.php')],
+                                capture_output=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stdout.decode() + result.stderr.decode())
+        self.assertIn("Waiting for Paymenter's scheduled tasks.", result.stdout.decode())
+        self.assertIn('href="/admin/backups?x=&quot;&amp;"', result.stdout.decode())
+        self.assertIn('>the Backups tab</a>', result.stdout.decode())
 
     def test_engine_field_reaches_the_save_form_error(self):
         result = subprocess.run([PHP, str(ROOT / 'tests/integration/save_refusal_checks.php')],
                                 capture_output=True, timeout=10)
         self.assertEqual(result.returncode, 0, result.stderr.decode())
         value = json.loads(result.stdout)
+        self.assertEqual(value['details'], {'code': 'config-invalid', 'field': 'schedule_time',
+                                            'cause': 'actor-login-failed'})
         self.assertIn('settings.schedule_time', value['errors'])
+        self.assertIn('Writer cause: actor-login-failed.', value['notification']['body'])
+        self.assertNotIn('highlighted setting', value['errors']['settings.schedule_time'])
+        self.assertNotIn('highlighted setting', value['notification']['body'])
+        self.assertEqual(value['credentials_notification'], {
+            'title': 'Settings not saved',
+            'status': 'danger',
+            'body': self.messages(('credentials-unreadable',))['credentials-unreadable'][1],
+        })
+        self.assertFalse(value['credentials_errors'])
         self.assertNotIn('Open Settings and save', value['errors']['settings.schedule_time'])
         self.assertNotIn('Open Settings and save', value['notification']['body'])
+        self.assertIn('Backups settings command', value['command_notification']['body'])
+        self.assertIn('database', value['command_notification']['body'])
+
+    def test_missing_writer_command_is_logged_and_has_save_copy(self):
+        script = r'''
+namespace Illuminate\Support\Facades {
+    final class Log {
+        public static array $calls = [];
+        public static function warning(string $message, array $context = []): void {
+            self::$calls[] = [$message, $context];
+        }
+    }
+}
+namespace {
+require $argv[1];
+require $argv[2];
+require $argv[3];
+$details = \Paymenter\Extensions\Others\Backups\Runtime::recordNativeWriterFailure(
+    '{"error":"command-not-registered","detail":{"writer_cause":"command-not-registered"}}'
+);
+$redacted = \Paymenter\Extensions\Others\Backups\Runtime::errorDetails(json_encode([
+    'error' => 'config-write-outcome-unknown',
+    'detail' => ['writer_cause' => 'PDO failed password=secret-value username=fixture-user'],
+], JSON_THROW_ON_ERROR));
+$loggedRedaction = \Paymenter\Extensions\Others\Backups\Runtime::recordNativeWriterFailure(json_encode([
+    'error' => 'config-write-outcome-unknown',
+    'detail' => ['writer_cause' => 'PDO failed password=secret-value username=fixture-user'],
+], JSON_THROW_ON_ERROR));
+$actorFailure = \Paymenter\Extensions\Others\Backups\Runtime::recordNativeWriterFailure(
+    '{"error":"config-invalid","detail":{"writer_cause":"actor-not-authorized"}}'
+);
+echo json_encode([
+    'details' => $details,
+    'redacted' => $redacted,
+    'actor_failure' => $actorFailure,
+    'logs' => \Illuminate\Support\Facades\Log::$calls,
+    'message' => \Paymenter\Extensions\Others\Backups\Messages::error('command-not-registered'),
+], JSON_THROW_ON_ERROR);
+}
+'''
+        result = subprocess.run([PHP, '-r', script, str(ROOT / 'extension/Backups/Runtime.php'),
+                                 str(ROOT / 'extension/Backups/Settings.php'),
+                                 str(ROOT / 'extension/Backups/Messages.php')],
+                                capture_output=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stdout.decode() + result.stderr.decode())
+        value = json.loads(result.stdout)
+        self.assertEqual(value['details'], {'code': 'command-not-registered', 'field': None,
+                                            'cause': 'command-not-registered'})
+        self.assertEqual(value['logs'][0][1], {'code': 'native-writer-failed',
+                                               'cause': 'command-not-registered'})
+        self.assertEqual(value['logs'][1][1], {'code': 'native-writer-failed',
+                                               'cause': 'unrecognized'})
+        self.assertEqual(value['actor_failure'], {'code': 'config-invalid', 'field': None,
+                                                  'cause': 'actor-not-authorized'})
+        self.assertEqual(value['logs'][2][1], {'code': 'native-writer-failed',
+                                               'cause': 'actor-not-authorized'})
+        self.assertEqual(value['redacted']['cause'], 'unrecognized')
+        self.assertNotIn('secret-value', json.dumps(value['logs']))
+        self.assertNotIn('fixture-user', json.dumps(value['logs']))
+        self.assertIn('Backups', value['message'])
+        self.assertIn('database', value['message'])
 
     def test_frozen_upload_refusals_do_not_promise_regeneration_or_reencryption(self):
         messages = self.messages(('delivery-ciphertext-unavailable', 'legacy-plaintext-delivery-blocked',

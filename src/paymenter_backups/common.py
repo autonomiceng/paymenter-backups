@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 import pathlib
+import re
 import stat
 import time
 import uuid
@@ -16,6 +17,38 @@ class BackupError(Exception):
         self.field = field
         self.detail = detail or {}
         super().__init__(code)
+
+
+TRANSIENT_ERRORS = frozenset({"busy", "billing-guard-stale", "billing-window-protected", "job-lock-busy"})
+PREINSTALL_RUNTIME_FILES = frozenset({"identity.lock", "billing-guard.json"})
+WRITER_CAUSE_CODES = frozenset({
+    "actor-login-failed", "actor-not-authorized", "archive-key-change-busy", "application-unavailable", "billing-settings-unreadable",
+    "busy", "command-not-registered", "config-changed", "config-coordination-required", "config-save-incomplete",
+    "config-save-outcome-unknown", "config-write-failed", "config-write-outcome-unknown",
+    "credentials-invalid", "credentials-unreadable", "document-roots-invalid", "extension-uninstalled",
+    "installation-missing", "installation-mismatch", "maintenance-probe-credentials-invalid",
+    "maintenance-probe-origin-invalid", "maintenance-probe-origin-mismatch", "native-secret-row-refused",
+    "private-file-invalid", "private-pipe-required", "private-root-invalid", "private-root-unavailable",
+    "database-connection-invalid", "database-connection-failed", "database-pdo-driver-unavailable",
+    "database-driver-unsupported", "database-tls-unsupported", "database-prefix-unsupported",
+    "unsupported-database", "writer-failed", "writer-timeout", "writer-process-failed", "writer-output-invalid",
+    "writer-exited-without-output",
+})
+WRITER_VALIDATION_RULES = frozenset({
+    "boolean", "in", "integer", "json", "max", "min", "nullable", "regex", "required", "scalar", "string", "timezone",
+})
+
+
+def safe_writer_cause(value, fields=None):
+    """Accept only fixed writer diagnostics and validation details for known fields."""
+    if not isinstance(value, str) or len(value) > 160:
+        return None
+    if value in WRITER_CAUSE_CODES:
+        return value
+    match = re.fullmatch(r"validation:([a-z][a-z0-9_]{0,63}):([a-z][a-z0-9_-]{0,31})", value)
+    if match and fields is not None and match.group(1) in fields and match.group(2) in WRITER_VALIDATION_RULES:
+        return value
+    return None
 
 
 def digest(path, check=None):
@@ -109,14 +142,17 @@ class State:
         if self.root == self.app or self.app in self.root.parents:
             raise BackupError("private-root-inside-app")
         info = self.root.stat()
-        if info.st_uid != os.getuid() or info.st_mode & 0o077 or self.app.stat().st_uid != os.getuid():
+        if info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o700 or self.app.stat().st_uid != os.getuid():
             raise BackupError("owner-mismatch")
         self.binding = self.root / "installation.json"
         if initialize:
             with self.lock("identity.lock"):
                 if not self.binding.exists():
-                    if any(path.name != "identity.lock" for path in self.root.iterdir()):
+                    entries = list(self.root.iterdir())
+                    if any(path.name not in PREINSTALL_RUNTIME_FILES for path in entries):
                         raise BackupError("installation-state-orphaned")
+                    for path in entries:
+                        private_file(path)
                     atomic_json(self.binding, {"schema_version": 1, "app": str(self.app),
                                 "owner_uid": os.getuid(), "installation_uuid": str(uuid.uuid4()),
                                 "default_local_directory": "backups"})

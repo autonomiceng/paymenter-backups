@@ -22,6 +22,7 @@ use Filament\Schemas\Components\Utilities\Get;
 use Filament\Schemas\Schema;
 use Filament\Support\Enums\FontFamily;
 use Paymenter\Extensions\Others\Backups\Messages;
+use Paymenter\Extensions\Others\Backups\PrivateStore;
 use Paymenter\Extensions\Others\Backups\Settings;
 
 trait BuildsSettingsForm
@@ -77,7 +78,7 @@ trait BuildsSettingsForm
                     ->description('Choose where Backups keeps its private data. You can\'t change this after the first save.')
                     ->visible(fn () => !$this->initialized())
                     ->schema([
-                        $path('private_root', 'Data directory', 'Holds backup history, the installation ID and encrypted keys. Must be outside Paymenter and any public web folder.', dirname(base_path()) . '/paymenter-backups-private')
+                        $path('private_root', 'Data directory', 'Holds backup history, the installation ID and encrypted keys. Must be outside Paymenter and any public web folder.', PrivateStore::defaultPath(realpath(base_path())))
                             ->visible(fn () => !$this->initialized()),
                         $lineList('extra_docroots', 'Other public web folders', 'Document roots of other sites on this account, one per line. Backups are never stored inside them.')
                             ->visible(fn () => !$this->initialized() && !in_array('extra_docroots', $this->malformedKeys, true)),

@@ -25,6 +25,7 @@ class GuardedWriteChecks(fixtures.PrivateFixture):
         self.cli = [sys.executable, '--app', str(self.app), '--private-root', str(self.state.root),
                     '--php', '/usr/bin/php']
         self.refresh_guard()
+        self.guard_generated_at = self.now
         self.now += 181
 
     def refresh_guard(self):
@@ -62,7 +63,7 @@ class GuardedWriteChecks(fixtures.PrivateFixture):
              patch.object(native_integration.time, 'time', side_effect=lambda: self.now):
             return native_integration.guarded_write(self.cli, arguments, **kwargs)
 
-    def test_schedule_writes_refresh_after_each_slow_step(self):
+    def test_schedule_writes_do_not_require_a_fresh_guard(self):
         for kind in ('full', 'database'):
             for verb in ('set', 'enable', 'disable'):
                 with self.subTest(kind=kind, verb=verb):
@@ -70,31 +71,31 @@ class GuardedWriteChecks(fixtures.PrivateFixture):
                     payload = json.dumps({'frequency': 'weekly', 'time': '02:30', 'weekdays': [0, 2],
                                           'timezone': 'UTC'}).encode() if verb == 'set' else None
                     self.write(['schedule', verb, '--kind', kind], input=payload)
-                    self.assertEqual(read_json(self.state.root / 'billing-guard.json')['generated_at'], self.now)
+                    self.assertEqual(read_json(self.state.root / 'billing-guard.json')['generated_at'], self.guard_generated_at)
                     self.assertEqual(self.commands[-1][1], payload)
         self.assertEqual(self.settings['full_schedule'], 'off')
         self.assertEqual(self.settings['database_schedule'], 'off')
 
-    def test_config_write_with_enabled_full_schedule_refreshes_expired_guard(self):
+    def test_config_write_with_enabled_full_schedule_ignores_expired_guard(self):
         self.settings.update(full_schedule='weekly', full_time='02:30', full_weekdays=[0, 2])
         config.normalize(self.settings)
         payload = json.dumps({'settings': {'retention_keep_full': 5}}).encode()
         self.write(['config', 'set'], input=payload, timeout=42)
         self.assertEqual(self.settings['retention_keep_full'], 5)
         self.assertEqual(self.commands[-1][2]['timeout'], 42)
+        self.assertEqual(read_json(self.state.root / 'billing-guard.json')['generated_at'], self.guard_generated_at)
 
-    def test_refresh_failure_does_not_attempt_write(self):
+    def test_guard_refresh_failure_does_not_block_configuration_write(self):
         self.guard_failure = True
-        with self.assertRaisesRegex(RuntimeError, 'fixture guard refresh failed'):
-            self.write(['schedule', 'enable', '--kind', 'full'])
+        self.write(['config', 'set'], input=json.dumps({'settings': {'retention_keep_full': 5}}).encode())
+        self.assertEqual(self.settings['retention_keep_full'], 5)
         self.assertEqual(len(self.commands), 1)
-        self.assertEqual(self.settings['full_schedule'], 'off')
 
-    def test_product_still_refuses_expired_guard_without_fixture_refresh(self):
+    def test_schedule_write_succeeds_with_expired_guard_without_fixture_refresh(self):
         with patch.object(native_integration.time, 'time', side_effect=lambda: self.now):
-            with self.assertRaisesRegex(BackupError, 'billing-guard-stale'):
-                self.execute(self.cli + ['schedule', 'enable', '--kind', 'full'])
-        self.assertEqual(self.settings['full_schedule'], 'off')
+            self.execute(self.cli + ['schedule', 'enable', '--kind', 'full'])
+        self.assertEqual(self.settings['full_schedule'], 'daily')
+        self.assertEqual(read_json(self.state.root / 'billing-guard.json')['generated_at'], self.guard_generated_at)
 
 
 class LegacyConfigurationChecks(fixtures.PrivateFixture):

@@ -1,6 +1,7 @@
 <?php
 /** Bounded download stream checks. Uses disposable child programs only; no Paymenter boot. */
 function base_path(string $path = ''): string { return sys_get_temp_dir(); }
+require dirname(__DIR__, 2) . '/extension/Backups/Messages.php';
 require dirname(__DIR__, 2) . '/extension/Backups/Runtime.php';
 
 use Paymenter\Extensions\Others\Backups\Runtime;

@@ -16,6 +16,20 @@ final class EngineCommandException extends RuntimeException
 
 final class Runtime
 {
+    private const SAFE_WRITER_CAUSES = [
+        'actor-login-failed', 'actor-not-authorized', 'archive-key-change-busy', 'application-unavailable',
+        'billing-settings-unreadable', 'busy', 'command-not-registered', 'config-changed',
+        'config-coordination-required', 'config-save-incomplete', 'config-save-outcome-unknown',
+        'config-write-failed', 'config-write-outcome-unknown', 'credentials-invalid', 'credentials-unreadable',
+        'database-connection-invalid', 'database-connection-failed', 'database-pdo-driver-unavailable',
+        'database-driver-unsupported', 'database-tls-unsupported', 'database-prefix-unsupported',
+        'document-roots-invalid', 'extension-uninstalled', 'installation-missing', 'installation-mismatch',
+        'maintenance-probe-credentials-invalid', 'maintenance-probe-origin-invalid', 'maintenance-probe-origin-mismatch',
+        'native-secret-row-refused', 'private-file-invalid', 'private-pipe-required', 'private-root-invalid',
+        'private-root-unavailable', 'unsupported-database', 'writer-failed', 'writer-timeout',
+        'writer-process-failed', 'writer-output-invalid', 'writer-exited-without-output',
+    ];
+
     /** Child startup excludes loader, resolver, TLS and application overrides. */
     private static function safeEnvironment(): array
     {
@@ -93,11 +107,11 @@ PYTHON;
     }
 
     /** Engine argv; the run ID or other public arguments follow the global flags. */
-    private static function engine(array $arguments, bool $databaseContext = false): array
+    private static function engine(array $arguments, ?array $databaseContext = null): array
     {
         $root = self::privateRoot();
         $binaries = self::binaries();
-        return [$binaries['python'], '-I', __DIR__ . '/runtime/cli.py', '--app', realpath(base_path()), '--private-root', $root, '--bridge', __DIR__ . '/bridge.php', '--php', $binaries['php'], ...($databaseContext ? ['--database-connection-stdin'] : []), ...$arguments];
+        return [$binaries['python'], '-I', __DIR__ . '/runtime/cli.py', '--app', realpath(base_path()), '--private-root', $root, '--bridge', __DIR__ . '/bridge.php', '--php', $binaries['php'], ...($databaseContext !== null ? ['--database-connection-stdin'] : []), ...$arguments];
     }
 
     /** The active request's resolved DB settings, kept off argv and the child environment. */
@@ -120,32 +134,41 @@ PYTHON;
     {
         $decoded = json_decode(trim($stderr), true);
         $code = is_array($decoded) ? ($decoded['error'] ?? null) : null;
-        if (!is_string($code) || !preg_match('/^[a-z0-9][a-z0-9-]{0,63}$/D', $code)) { $code = $fallback; }
+        if (!is_string($code) || !Messages::known($code)) { $code = Messages::known($fallback) ? $fallback : 'engine-unavailable'; }
         $field = is_array($decoded) && is_string($decoded['field'] ?? null) ? $decoded['field'] : null;
         if ($field === null || !array_key_exists($field, Settings::LABELS)) { $field = null; }
-        $detail = is_array($decoded) ? ($decoded['detail'] ?? null) : null;
-        $cause = self::safeWriterCause(is_array($detail) ? ($detail['writer_cause'] ?? null) : null);
-        return ['code' => $code, 'field' => $field, 'cause' => $cause];
+        $details = ['code' => $code, 'field' => $field, 'cause' => null];
+        $cause = self::safeWriterCause(is_array($decoded) ? ($decoded['detail']['writer_cause'] ?? null) : null);
+        if ($cause !== null) { $details['cause'] = $cause; }
+        return $details;
     }
 
-    /** Keep native writer diagnostics to known codes so output cannot carry secrets. */
+    /** Remove credentials and terminal control bytes before a writer cause reaches logs or UI. */
     public static function safeWriterCause(mixed $cause): ?string
     {
         if ($cause === null) { return null; }
-        $allowed = [
-            'unrecognized', 'command-not-registered', 'busy', 'config-invalid', 'config-coordination-required',
-            'config-save-incomplete', 'config-changed', 'config-save-outcome-unknown', 'config-write-failed',
-            'credentials-unreadable', 'credentials-invalid', 'maintenance-probe-credentials-invalid',
-            'maintenance-probe-origin-invalid', 'maintenance-probe-origin-mismatch', 'installation-missing',
-            'installation-mismatch', 'private-file-invalid', 'private-root-invalid', 'billing-settings-unreadable',
-            'extension-uninstalled', 'database-connection-invalid', 'database-pdo-driver-unavailable',
-            'database-connection-failed', 'private-pipe-required', 'application-unavailable',
-            'database-driver-unsupported', 'database-tls-unsupported',
-            'database-prefix-unsupported', 'unsupported-database', 'native-secret-row-refused',
-            'document-roots-invalid', 'private-root-unavailable', 'archive-key-change-busy',
-            'writer-timeout', 'writer-process-failed', 'writer-output-invalid', 'writer-failed',
-        ];
-        return is_string($cause) && in_array($cause, $allowed, true) ? $cause : 'unrecognized';
+        if ($cause === 'unrecognized') { return $cause; }
+        if (!is_string($cause) || strlen($cause) > 160) { return 'unrecognized'; }
+        if (in_array($cause, self::SAFE_WRITER_CAUSES, true)) { return $cause; }
+        if (preg_match('/^validation:([a-z][a-z0-9_]{0,63}):([a-z][a-z0-9_-]{0,31})$/D', $cause, $match)
+            && array_key_exists($match[1], Settings::LABELS)
+            && in_array($match[2], ['boolean', 'in', 'integer', 'json', 'max', 'min', 'nullable', 'regex', 'required', 'scalar', 'string', 'timezone'], true)) {
+            return $cause;
+        }
+        return 'unrecognized';
+    }
+
+    /** Record a fixed event code and only the bounded, redacted writer cause. */
+    public static function recordNativeWriterFailure(string $stderr): array
+    {
+        $details = self::errorDetails($stderr, 'config-write-outcome-unknown');
+        $cause = $details['cause'] ?? 'writer-failed';
+        \Illuminate\Support\Facades\Log::warning('Backups native writer failed', [
+            'code' => 'native-writer-failed',
+            'cause' => $cause,
+        ]);
+        $details['cause'] = $cause;
+        return $details;
     }
 
     /** Compatibility helper for stream commands that only consume the fixed code. */
@@ -158,17 +181,18 @@ PYTHON;
     public static function command(array $arguments, ?array $input = null, int $timeout = 10): array
     {
         if (in_array($arguments[0] ?? '', ['encryption-key', 'recovery-key', 'credentials-rewrap'], true)) { throw new RuntimeException('sensitive-command-refused'); }
-        $databaseContext = self::needsDatabaseConnectionContext($arguments);
-        if ($databaseContext) {
+        $databaseContext = null;
+        if (self::needsDatabaseConnectionContext($arguments)) {
+            $databaseContext = self::databaseConnectionContext();
             $input ??= [];
-            $input['_database_connection'] = self::databaseConnectionContext();
+            $input['_database_connection'] = $databaseContext;
         }
         $process = new Process(self::engine($arguments, $databaseContext), base_path(), self::safeEnvironment(), $input === null ? null : json_encode($input === [] ? new \stdClass : $input, JSON_THROW_ON_ERROR));
         $process->setTimeout($timeout);
         $process->run();
         if (!$process->isSuccessful()) {
             $failure = self::errorDetails($process->getErrorOutput());
-            throw new EngineCommandException($failure['code'], $failure['field'], $failure['cause']);
+            throw new EngineCommandException($failure['code'], $failure['field'], $failure['cause'] ?? null);
         }
         return json_decode($process->getOutput(), true, 64, JSON_THROW_ON_ERROR);
     }
@@ -264,14 +288,15 @@ PYTHON;
     public static function saveConfiguration(array $settings, ?array $credentials = null): array
     {
         $input = ['settings' => $settings ?: new \stdClass];
-        $input['_database_connection'] = self::databaseConnectionContext();
+        $databaseContext = self::databaseConnectionContext();
+        $input['_database_connection'] = $databaseContext;
         if ($credentials !== null) {
             $input['credentials'] = $credentials['s3'] ?? null;
             $input['maintenance_probe_credentials'] = $credentials['site'] ?? null;
         }
         $actor = \Illuminate\Support\Facades\Auth::id();
         if ($actor !== null) { $input['_actor'] = (int) $actor; }
-        $arguments = self::engine(['config', 'set'], true);
+        $arguments = self::engine(['config', 'set'], $databaseContext);
         if (array_key_exists('private_root', $settings) && !is_file(self::privateRoot() . '/installation.json')) {
             // A first save may choose its private location before any identity exists.
             $index = array_search('--private-root', $arguments, true);
@@ -284,14 +309,32 @@ PYTHON;
         $process->setTimeout(300);
         try { $process->run(); }
         catch (\Symfony\Component\Process\Exception\ProcessTimedOutException $error) {
-            throw new EngineCommandException('config-save-outcome-unknown', null, 'writer-timeout');
+            $failure = self::recordNativeWriterFailure('{"error":"config-write-outcome-unknown","detail":{"writer_cause":"writer-timeout"}}');
+            throw new EngineCommandException($failure['code'], $failure['field'], $failure['cause'] ?? null);
         }
         if (!$process->isSuccessful()) {
             $failure = self::errorDetails($process->getErrorOutput(), 'config-save-outcome-unknown');
-            throw new EngineCommandException($failure['code'], $failure['field'], $failure['cause']);
+            if (($failure['cause'] ?? null) !== null || in_array($failure['code'], ['command-not-registered', 'config-write-outcome-unknown', 'config-write-failed'], true)) {
+                $failure = self::recordNativeWriterFailure($process->getErrorOutput());
+                throw new EngineCommandException($failure['code'], $failure['field'], $failure['cause'] ?? null);
+            }
+            throw new RuntimeException($failure['code']);
         }
-        $result = json_decode($process->getOutput(), true, 32, JSON_THROW_ON_ERROR);
-        if (!is_array($result) || !is_bool($result['updated'] ?? null)) { throw new RuntimeException('config-save-outcome-unknown'); }
+        try { $result = json_decode($process->getOutput(), true, 32, JSON_THROW_ON_ERROR); }
+        catch (\JsonException $error) {
+            $failure = self::recordNativeWriterFailure('{"error":"config-write-outcome-unknown","detail":{"writer_cause":"writer-output-invalid"}}');
+            throw new EngineCommandException($failure['code'], $failure['field'], $failure['cause'] ?? null);
+        }
+        if (!is_array($result) || !is_bool($result['updated'] ?? null)) {
+            $failure = self::recordNativeWriterFailure('{"error":"config-write-outcome-unknown","detail":{"writer_cause":"writer-output-invalid"}}');
+            throw new EngineCommandException($failure['code'], $failure['field'], $failure['cause'] ?? null);
+        }
+        $cause = self::safeWriterCause($result['writer_cause'] ?? null);
+        if ($cause !== null) {
+            $result['writer_cause'] = $cause;
+            self::recordNativeWriterFailure(json_encode(['error' => $result['error'] ?? 'config-save-outcome-unknown',
+                'detail' => ['writer_cause' => $cause]], JSON_THROW_ON_ERROR));
+        }
         return $result;
     }
 

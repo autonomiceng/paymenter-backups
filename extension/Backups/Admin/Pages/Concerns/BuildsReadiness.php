@@ -59,6 +59,12 @@ trait BuildsReadiness
     {
         $groups = ['all' => [], 'database-online' => [], 'full-quiesced' => []];
         $configuration = $this->configuration();
+        $privateRootProblem = $this->privateRootProblem();
+        if ($privateRootProblem !== null) {
+            $problem = Messages::readinessItem($privateRootProblem['code'], [], ['private_root_problem' => Messages::privateRootProblem($privateRootProblem)]);
+            $groups['all'][] = $problem + ['code' => $privateRootProblem['code'], 'id' => 'private-root-problem', 'page' => true, 'advisory' => false];
+            return $groups;
+        }
         if ($this->overviewError !== null) { return $groups; }
         $context = $this->readinessContext();
         $render = static function (array $item) use ($context): array {
@@ -142,7 +148,9 @@ trait BuildsReadiness
     {
         $configuration = $this->configuration();
         if ($this->overviewError !== null || !($configuration['available'] ?? false)) {
-            return [Messages::readinessItem($configuration['error'] ?? 'engine-unavailable', [])];
+            $problem = $this->privateRootProblem();
+            return [Messages::readinessItem($problem['code'] ?? ($configuration['error'] ?? 'engine-unavailable'), [],
+                $problem ? ['private_root_problem' => Messages::privateRootProblem($problem)] : [])];
         }
         $groups = $this->setupGroups();
         $items = [...$groups['all'], ...$groups[$mode]];
@@ -170,7 +178,7 @@ trait BuildsReadiness
 
     private function setupOpen(): bool
     {
-        if ($this->overviewError !== null) { return false; }
+        if ($this->overviewError !== null) { return $this->privateRootProblem() !== null; }
         foreach ($this->setupGroups() as $items) { if ($items) { return true; } }
         return false;
     }

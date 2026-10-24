@@ -140,12 +140,13 @@ def validate_database_context(context):
 
 
 def database_connection_environment(context):
-    """Return only the validated Laravel database variables for Artisan."""
+    """Return only Laravel's database variables for a booted Artisan child."""
     context = validate_database_context(context)
     connection = context["connection"]
     return {
         "DB_CONNECTION": context["default"],
-        # Prevent a .env DB_URL from overriding the captured active connection.
+        # Explicit null prevents a stale DB_URL in .env from replacing the
+        # already-resolved fields below.
         "DB_URL": "null",
         "DB_HOST": connection["host"],
         "DB_PORT": str(connection["port"]),

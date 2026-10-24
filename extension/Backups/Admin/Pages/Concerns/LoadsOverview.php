@@ -11,12 +11,43 @@ trait LoadsOverview
     private function overview(): array
     {
         if ($this->overviewCache !== null) { return $this->overviewCache; }
-        try {
-            return $this->overviewCache = Runtime::command(['overview'], null, 20);
-        } catch (\Throwable $error) {
-            $this->overviewError = $error instanceof \RuntimeException ? $error->getMessage() : 'engine-unavailable';
+        $problem = $this->privateRootProblem();
+        if ($problem !== null) {
+            $this->overviewError = $problem['code'];
             return $this->overviewCache = ['initialized' => false, 'runs' => [], 'requests' => [], 'scheduler' => ['last_tick_at' => null],
                 'configuration' => ['available' => false, 'valid' => false, 'error' => $this->overviewError], 'maintenance' => false, 'installation_uuid' => null];
+        }
+        try {
+            $overview = Runtime::command(['overview'], null, 20);
+            $configuration = $overview['configuration'] ?? [];
+            $cause = Runtime::safeWriterCause($configuration['writer_cause'] ?? null);
+            if ($cause !== null) {
+                $this->overviewError = is_string($configuration['error'] ?? null)
+                    ? $configuration['error'] : 'config-save-outcome-unknown';
+                $this->overviewErrorCause = $cause;
+            }
+            return $this->overviewCache = $overview;
+        } catch (\Throwable $error) {
+            $this->overviewError = $error instanceof \RuntimeException ? $error->getMessage() : 'engine-unavailable';
+            $this->overviewErrorCause = $error instanceof \Paymenter\Extensions\Others\Backups\EngineCommandException
+                ? Runtime::safeWriterCause($error->cause) : null;
+            return $this->overviewCache = ['initialized' => false, 'runs' => [], 'requests' => [], 'scheduler' => ['last_tick_at' => null],
+                'configuration' => ['available' => false, 'valid' => false, 'error' => $this->overviewError], 'maintenance' => false, 'installation_uuid' => null];
+        }
+    }
+
+    /** Return a data directory issue the admin can fix before the engine starts. */
+    private function privateRootProblem(): ?array
+    {
+        try {
+            $record = $this->record();
+            $configured = $record->settings()->where('key', 'private_root')->value('value');
+            $rawDocroots = $record->settings()->where('key', 'extra_docroots')->value('value') ?? '[]';
+            $docroots = json_decode($rawDocroots, true, 16, JSON_THROW_ON_ERROR);
+            if (!is_array($docroots) || !array_is_list($docroots) || !str_starts_with(ltrim($rawDocroots), '[')) { return null; }
+            return PrivateStore::problem(realpath(base_path()), $configured ?: null, $docroots);
+        } catch (\Throwable $error) {
+            return null;
         }
     }
 
@@ -30,11 +61,14 @@ trait LoadsOverview
         if ($this->overview()['initialized'] ?? false) { return true; }
         try { return @is_file(Runtime::privateRoot() . '/installation.json'); }
         catch (\Throwable $error) {
-            // Read only presence, to keep an existing data directory immutable
-            // while its public-directory guard is awaiting explicit repair.
+            // Keep existing or inaccessible data out of first-time setup while
+            // owner, mode, and public-directory checks wait for repair.
             try {
                 $configured = $this->record()->settings()->where('key', 'private_root')->value('value');
-                return @is_file(PrivateStore::root(realpath(base_path()), $configured ?: null) . '/installation.json');
+                $application = realpath(base_path());
+                if ($application === false) { return false; }
+                $path = is_string($configured) && $configured !== '' ? $configured : PrivateStore::defaultPath($application);
+                return PrivateStore::installedOrRequiresRepair($path);
             } catch (\Throwable $ignored) { return false; }
         }
     }

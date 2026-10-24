@@ -149,10 +149,10 @@ if ($mode === 'upload') {
     $digest = fn () => is_file($root . "/credentials.json") ? hash_file("sha256", $root . "/credentials.json") : null;
     $secretFields = fn ($livewire) => array_filter([...array_values($livewire->get('s3Keys') ?? []), ...array_values($livewire->get('siteAccess') ?? []), $livewire->get('encryptionInput.passphrase')], fn ($value) => $value !== null && $value !== '');
 
-    $save = function (array $updates) use ($page, $record) {
+    $save = function (array $updates, bool $refreshGuard = true) use ($page, $record) {
         $livewire = Livewire\Livewire::test($page);
         $fullSchedule = $updates['settings.full_schedule'] ?? $record->settings()->where('key', 'full_schedule')->value('value') ?? 'off';
-        if ($fullSchedule !== 'off') {
+        if ($fullSchedule !== 'off' && $refreshGuard) {
             check(Illuminate\Support\Facades\Artisan::call('backups:guard') === 0, 'billing guard refresh failed');
         }
         $livewire->update(calls: [['method' => 'saveSettings', 'params' => []]], updates: $updates);
@@ -166,6 +166,69 @@ if ($mode === 'upload') {
     $text = fn ($livewire) => html_entity_decode($livewire->html());
     $bridgeRead = function () use ($process) { $process->mustRun(); return json_decode($process->getOutput(), true, 32, JSON_THROW_ON_ERROR); };
     session()->forget(['filament.notifications', 'filament.claimed_notifications']);
+
+    // The web request still holds the authorized role, but the cold native
+    // writer reloads the actor after a permission change and must report why it refused.
+    $admin->load('role');
+    $adminRoleId = $admin->role_id;
+    $limitedRole = App\Models\Role::create(['name' => 'writer-cause-limited-' . bin2hex(random_bytes(4)), 'permissions' => ['admin.extensions.viewAny']]);
+    $writerCauseKeep = (int) $record->settings()->where('key', 'retention_keep_full')->value('value');
+    $writerCauseNextKeep = $writerCauseKeep + 1;
+    try {
+        App\Models\User::whereKey($admin->id)->update(['role_id' => $limitedRole->id]);
+        Illuminate\Support\Facades\Auth::login($admin);
+        $writerCausePage = $save(['settings.retention_keep_full' => $writerCauseNextKeep]);
+        $writerCauseNotices = $notices();
+        $writerCauseNotice = array_values(array_filter($writerCauseNotices, static fn ($item) => $item['title'] === 'Save incomplete'))[0] ?? null;
+        check(is_array($writerCauseNotice) && str_contains($writerCauseNotice['body'], 'Writer cause: actor-not-authorized.'),
+            'Save notice did not show the bounded native writer cause');
+        check(str_contains($text($writerCausePage), 'Writer cause: actor-not-authorized.'),
+            'Overview did not render the native writer cause after Save');
+        check((int) $record->settings()->where('key', 'retention_keep_full')->value('value') === $writerCauseKeep,
+            'Unauthorized native writer changed settings');
+
+        App\Models\User::whereKey($admin->id)->update(['role_id' => $adminRoleId]);
+        $admin->unsetRelation('role');
+        Illuminate\Support\Facades\Auth::login($admin);
+        $retry = $save(['settings.retention_keep_full' => $writerCauseNextKeep]);
+        check((int) $record->settings()->where('key', 'retention_keep_full')->value('value') === $writerCauseNextKeep
+            && !is_file($root . '/config-save.json'), 'Authorized retry did not clear the uncertain Save guard');
+        $record->settings()->where('key', 'retention_keep_full')->update(['value' => (string) $writerCauseKeep]);
+    } finally {
+        App\Models\User::whereKey($admin->id)->update(['role_id' => $adminRoleId]);
+        $admin->unsetRelation('role');
+        Illuminate\Support\Facades\Auth::login($admin);
+        $limitedRole->delete();
+        if (is_file($root . '/config-save.json')) { unlink($root . '/config-save.json'); }
+        $record->settings()->where('key', 'retention_keep_full')->update(['value' => (string) $writerCauseKeep]);
+    }
+
+    // A stale authorized web actor must be refused when the native process
+    // cannot resolve the actor ID from the database.
+    $admin->load('role');
+    $missingActor = clone $admin;
+    $missingActor->setAttribute($missingActor->getKeyName(), (int) App\Models\User::max('id') + 1);
+    Illuminate\Support\Facades\Auth::login($missingActor);
+    $missingActorKeep = (int) $record->settings()->where('key', 'retention_keep_full')->value('value');
+    $missingActorNextKeep = $missingActorKeep + 1;
+    $missingActorRows = $nativeRows();
+    try {
+        try {
+            $missingActorResult = Paymenter\Extensions\Others\Backups\Runtime::saveConfiguration(['retention_keep_full' => $missingActorNextKeep]);
+        } catch (Paymenter\Extensions\Others\Backups\EngineCommandException $error) {
+            $missingActorResult = ['updated' => false, 'cause' => $error->cause];
+        }
+        check(($missingActorResult['updated'] ?? true) === false
+            && ($missingActorResult['cause'] ?? $missingActorResult['writer_cause'] ?? null) === 'actor-login-failed',
+            'Missing native actor did not report the bounded login failure');
+        check($nativeRows() === $missingActorRows, 'Missing native actor changed settings rows');
+    } finally {
+        Illuminate\Support\Facades\Auth::login($admin);
+        if ($nativeRows() !== $missingActorRows || is_file($root . '/config-save.json')) {
+            $restored = Paymenter\Extensions\Others\Backups\Runtime::saveConfiguration(['retention_keep_full' => $missingActorKeep]);
+            check(($restored['updated'] ?? false) === true, 'Admin could not clear the missing-actor Save guard');
+        }
+    }
 
     // Fields explain themselves; no field opens a help dialog.
     $fresh = Livewire\Livewire::test($page);
@@ -201,6 +264,18 @@ if ($mode === 'upload') {
 
     // Engine-matching field rules refuse before any native write.
     $before = $nativeRows();
+    check(Illuminate\Support\Facades\Artisan::call('backups:guard') === 0, 'stale-guard fixture setup failed');
+    $guardPath = $root . '/billing-guard.json';
+    $staleGuard = json_decode(file_get_contents($guardPath), true, 16, JSON_THROW_ON_ERROR);
+    $staleGuard['generated_at'] = time() - 1000;
+    file_put_contents($guardPath, json_encode($staleGuard, JSON_THROW_ON_ERROR));
+    $staleSave = $save(['settings.full_schedule' => 'daily'], false);
+    check($staleSave->instance()->getErrorBag()->isEmpty() && $record->settings()->where('key', 'full_schedule')->value('value') === 'daily',
+        'stale billing guard blocked Settings Save');
+    $notices();
+    check(Illuminate\Support\Facades\Artisan::call('backups:guard') === 0, 'billing guard restore failed');
+    $save(['settings.full_schedule' => $before['full_schedule']]);
+    check($nativeRows() === $before, 'stale-guard Save test did not restore native rows');
     foreach ([['settings.retention_keep_full', 0, 'settings.retention_keep_full'], ['settings.local_byte_budget', 0, 'settings.local_byte_budget'],
               ['settings.capture_timeout', '1.5', 'settings.capture_timeout'], ['settings.job_lock_paths', 'relative.lock', 'settings.job_lock_paths'],
               ['settings.database_minute', 60, null], ['settings.s3_endpoint', 'http://fixture.invalid', null]] as [$field, $value, $errorKey]) {
@@ -212,9 +287,12 @@ if ($mode === 'upload') {
     check($weekly->instance()->getErrorBag()->has('settings.full_weekdays') && $nativeRows() === $before, 'weekly schedule without days accepted');
     $neither = $save(['settings.keep_local' => false, 'settings.upload_s3' => false]);
     check($neither->instance()->getErrorBag()->has('settings.keep_local') && $nativeRows() === $before, 'storage with no place accepted');
-    // Engine-only refusal: a full backup over Paymenter's observed billing minute.
+    // A billing overlap is a readiness wait and never blocks Settings Save.
     $overlap = $save(['settings.full_schedule' => 'daily', 'settings.full_time' => '23:59']);
-    check($overlap->instance()->getErrorBag()->has('settings.full_time') && $nativeRows() === $before, 'engine schedule refusal not mapped before persistence');
+    check($overlap->instance()->getErrorBag()->isEmpty() && $nativeRows()['full_schedule'] === 'daily'
+        && $nativeRows()['full_time'] === '23:59', 'billing overlap blocked Settings Save');
+    $save(['settings.full_schedule' => $before['full_schedule'], 'settings.full_time' => $before['full_time']]);
+    check($nativeRows() === $before, 'billing-window test did not restore native rows');
     $notices();
 
     // A valid save writes only changed native rows and never touches credentials.
@@ -314,7 +392,8 @@ if ($mode === 'upload') {
         check($refused->instance()->getErrorBag()->isEmpty(), 'unreadable-store scenario stopped at form validation');
         $refusalNotices = $notices();
         check(array_filter($refusalNotices, static fn ($n) => $n['status'] === 'danger' && $n['title'] === 'Settings not saved'
-            && $n['body'] === Paymenter\Extensions\Others\Backups\Messages::error('credentials-unreadable')) !== [], 'unreadable store did not report complete Save refusal');
+            && $n['body'] === Paymenter\Extensions\Others\Backups\Messages::error('credentials-unreadable')) !== [],
+            'unreadable store did not report its complete cause-free Save refusal');
         check(array_filter($refusalNotices, static fn ($n) => $n['status'] === 'success') === [], 'unreadable-store refusal reported success');
         check($nativeRows() === $beforeRefusal, 'unreadable-store refusal changed native settings');
         check(!is_file($root . '/config-save.json'), 'definite unreadable-store refusal left its new save guard');
@@ -520,7 +599,11 @@ if ($mode === 'upload') {
     }
     $queuedView = Livewire\Livewire::test($page);
     $queuedText = $text($queuedView);
-    check(str_contains($queuedText, 'Queued') && str_contains($queuedText, 'Waiting for Paymenter\'s cron job'), 'queued backup or cron job notice not shown');
+    check(str_contains($queuedText, 'Queued') && str_contains($queuedText, 'Waiting for Paymenter\'s scheduled tasks.'), 'queued backup or scheduler wait line not shown');
+    check(substr_count($queuedText, 'Waiting for Paymenter\'s scheduled tasks.') === 1
+        && preg_match('/<a\\b[^>]*href="([^"]+)"[^>]*>the Backups tab<\\/a>/', $queuedView->html(), $schedulerLink)
+        && str_contains($schedulerLink[1], 'tab=backups') && str_contains($schedulerLink[1], '#setup'),
+        'queued backup does not show one linked scheduler wait line');
     // Phones stack history rows and wrap long commands instead of pushing actions or text off screen.
     check(str_contains($queue->html(), 'fi-ta-table-stacked-on-mobile') && str_contains($queue->html(), 'overflow-wrap: anywhere'), 'mobile history or command wrapping missing');
     // Without a recent cron check-in the page never promises a start time.

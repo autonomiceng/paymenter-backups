@@ -2,6 +2,7 @@ import argparse
 import json
 import os
 import pathlib
+import re
 import subprocess
 import sys
 import time
@@ -9,52 +10,52 @@ import uuid
 
 from . import __version__
 from .artifacts import journal as artifact_journal, stream
-from .common import BackupError, State, atomic_json, read_json, private_file
+from .common import BackupError, State, atomic_json, read_json, private_file, safe_writer_cause, WRITER_CAUSE_CODES
 from .config import DEFAULTS, bridge, load, load_policy, normalize, redact, validate, validate_database_context
 from .engine import capture, export, plan, verify
-from .maintenance import recover, schedule_admission
+from .maintenance import recover
 from .presentation import overview
 from .requests import cancel, create, list_requests, tick, worker
 from .native_writer import run as run_native_writer
 from .storage import clean_environment, delete_plan, delete_run, deliver, destination_test, retention, retrieve, retrieve_plan
 
 
-WRITER_CAUSE_CODES = frozenset({
-    "unrecognized", "command-not-registered", "busy", "config-invalid", "config-coordination-required",
-    "config-save-incomplete", "config-changed", "config-save-outcome-unknown", "config-write-failed",
-    "credentials-unreadable", "credentials-invalid", "maintenance-probe-credentials-invalid",
-    "maintenance-probe-origin-invalid", "maintenance-probe-origin-mismatch", "installation-missing",
-    "installation-mismatch", "private-file-invalid", "private-root-invalid", "billing-settings-unreadable",
-    "extension-uninstalled", "database-connection-invalid", "database-pdo-driver-unavailable",
-    "database-connection-failed", "private-pipe-required", "application-unavailable",
-    "database-driver-unsupported", "database-tls-unsupported",
-    "database-prefix-unsupported", "unsupported-database", "native-secret-row-refused",
-    "document-roots-invalid", "private-root-unavailable", "archive-key-change-busy",
-    "writer-timeout", "writer-process-failed", "writer-output-invalid", "writer-failed",
+WRITER_REFUSAL_CODES = frozenset({
+    "application-unavailable", "archive-key-change-busy", "billing-settings-unreadable",
+    "config-changed", "credentials-invalid", "credentials-unreadable",
+    "database-connection-failed", "database-connection-invalid", "database-driver-unsupported",
+    "database-pdo-driver-unavailable", "database-prefix-unsupported", "database-tls-unsupported",
+    "document-roots-invalid", "extension-uninstalled", "installation-mismatch", "installation-missing",
+    "maintenance-probe-credentials-invalid", "maintenance-probe-origin-invalid",
+    "maintenance-probe-origin-mismatch", "native-secret-row-refused", "private-file-invalid",
+    "private-pipe-required", "private-root-invalid", "private-root-unavailable", "unsupported-database",
 })
 
 
 def native_writer_cause(stderr, stdout=b""):
-    """Return a fixed writer code for diagnostics without forwarding raw output."""
+    """Return a fixed cause for an Artisan writer failure, never raw output."""
+    outputs = []
     for value in (stderr, stdout):
         if isinstance(value, bytes):
             value = value.decode("utf-8", errors="replace")
-        if not isinstance(value, str) or not value:
-            continue
+        if isinstance(value, str) and value:
+            outputs.append(value)
+    combined = "\n".join(outputs)
+    if re.search(r'there are no commands defined in the ["\']?backups["\']? namespace', combined, re.IGNORECASE):
+        return "command-not-registered"
+    for output in outputs:
         try:
-            refusal = json.loads(value)
-        except ValueError:
+            refusal = json.loads(output)
+        except (TypeError, ValueError):
             continue
-        if not isinstance(refusal, dict):
-            continue
-        detail = refusal.get("detail")
-        cause = detail.get("writer_cause") if isinstance(detail, dict) else None
-        if isinstance(cause, str) and cause in WRITER_CAUSE_CODES:
-            return cause
-        code = refusal.get("error")
+        detail = refusal.get("detail") if isinstance(refusal, dict) else None
+        if isinstance(detail, dict) and "writer_cause" in detail:
+            cause = safe_writer_cause(detail.get("writer_cause"), fields=DEFAULTS)
+            return cause if cause is not None else "unrecognized"
+        code = refusal.get("error") if isinstance(refusal, dict) else None
         if isinstance(code, str) and code in WRITER_CAUSE_CODES:
             return code
-    return "unrecognized"
+    return "writer-exited-without-output" if not combined.strip() else "unrecognized"
 
 
 def stdin_json():
@@ -149,12 +150,12 @@ def native_settings(args, state, values, descriptors, actor=None, restore=False,
         command.append("--actor=" + str(actor))
     try:
         writer_values = dict(values)
-        if getattr(args, "database_connection", None) is not None:
-            writer_values["_database_connection"] = args.database_connection
+        database_context = getattr(args, "database_connection", None)
+        if database_context is not None:
+            writer_values["_database_connection"] = database_context
         input_bytes = json.dumps(writer_values).encode()
         if len(input_bytes) > 65536:
             raise BackupError("input-too-large")
-        database_context = getattr(args, "database_connection", None)
         if database_context is None:
             result = run_native_writer(command, input_bytes, descriptors)
         else:
@@ -164,25 +165,25 @@ def native_settings(args, state, values, descriptors, actor=None, restore=False,
             try:
                 refusal = json.loads(result.stderr)
                 code = refusal.get("error") if isinstance(refusal, dict) else None
+                field = refusal.get("field") if isinstance(refusal, dict) else None
             except (ValueError, UnicodeDecodeError):
-                code = None
-            safe_refusals = {"config-changed", "credentials-unreadable", "credentials-invalid", "maintenance-probe-credentials-invalid",
-                "maintenance-probe-origin-mismatch", "maintenance-probe-origin-invalid", "installation-missing", "installation-mismatch",
-                "private-file-invalid", "private-root-invalid", "billing-settings-unreadable", "extension-uninstalled",
-                "database-connection-invalid", "database-pdo-driver-unavailable", "database-connection-failed", "database-driver-unsupported",
-                "database-tls-unsupported", "database-prefix-unsupported", "unsupported-database", "native-secret-row-refused",
-                "private-pipe-required", "application-unavailable",
-                "document-roots-invalid", "private-root-unavailable", "archive-key-change-busy"}
-            if code in safe_refusals and (finalize or code in {"database-connection-invalid", "database-driver-unsupported"}):
-                raise BackupError(code, detail={"writer_cause": cause})
-            failure_code = "config-write-failed" if code == "config-coordination-required" else "config-write-outcome-unknown"
-            raise BackupError(failure_code, detail={"writer_cause": cause})
+                code, field = None, None
+            if not isinstance(field, str) or not re.fullmatch(r"[a-z][a-z0-9_]{0,63}", field) or field not in DEFAULTS:
+                field = None
+            if cause == "command-not-registered":
+                raise BackupError("command-not-registered", detail={"writer_cause": cause})
+            if code in WRITER_REFUSAL_CODES and (finalize or code in {"database-connection-invalid", "database-driver-unsupported"}):
+                raise BackupError(code, field=field, detail={"writer_cause": cause})
+            raise BackupError("config-write-failed" if code == "config-coordination-required" else "config-write-outcome-unknown",
+                              field=field, detail={"writer_cause": cause})
         output = json.loads(result.stdout)
         if not isinstance(output, dict) or output.get("ok") is not True:
             raise ValueError()
         return output
-    except (OSError, ValueError, subprocess.TimeoutExpired):
-        raise BackupError("config-write-outcome-unknown") from None
+    except subprocess.TimeoutExpired:
+        raise BackupError("config-write-outcome-unknown", detail={"writer_cause": "writer-timeout"}) from None
+    except (OSError, ValueError):
+        raise BackupError("config-write-outcome-unknown", detail={"writer_cause": "writer-process-failed"}) from None
 
 
 def finish_config_save(state):
@@ -199,6 +200,23 @@ def finish_config_save(state):
         if intent is not None:
             restore_configuration_file(path, intent)
         raise
+
+
+def retain_writer_cause(path, cause):
+    cause = safe_writer_cause(cause, fields=DEFAULTS)
+    if cause is None or not path.exists():
+        return
+    try:
+        private_file(path)
+        pending = read_json(path)
+        if (not isinstance(pending, dict) or pending.get("schema_version") != 1
+                or type(pending.get("s3_requested")) is not bool or type(pending.get("site_requested")) is not bool):
+            return
+        pending["writer_cause"] = cause
+        atomic_json(path, pending)
+    except (BackupError, OSError):
+        # A diagnostic must not change whether the durable uncertainty guard remains.
+        return
 
 
 def configuration_file_snapshot(path):
@@ -263,7 +281,8 @@ def set_config(args, state, changes):
             if local == state.app or state.app in local.parents:
                 raise BackupError("destination-unsafe")
             state.guard_location(local, "destination-inside-docroot")
-        schedule_admission(state, envelope)
+        # Saving settings validates the proposed values only. Billing guards,
+        # windows and job locks are checked when queued work runs.
         secrets = credentials is not None or probe_credentials is not None
         merge = {"s3": credentials, "site": probe_credentials}
         if secrets:
@@ -312,23 +331,16 @@ def set_config(args, state, changes):
         except (BackupError, OSError) as error:
             failure = error if isinstance(error, BackupError) else BackupError("config-save-failed")
             writer_cause = failure.detail.get("writer_cause")
-            if writer_cause is not None and writer_cause not in WRITER_CAUSE_CODES:
-                writer_cause = "unrecognized"
 
             def partial(result):
-                if writer_cause is not None:
+                if isinstance(writer_cause, str):
                     result["writer_cause"] = writer_cause
+                    retain_writer_cause(pending_path, writer_cause)
+                if failure.field is not None:
+                    result["field"] = failure.field
                 return result
 
-            definite_credential_refusals = {"config-changed", "credentials-unreadable", "credentials-invalid", "maintenance-probe-credentials-invalid",
-                "maintenance-probe-origin-mismatch", "maintenance-probe-origin-invalid", "installation-missing", "installation-mismatch",
-                "private-file-invalid", "private-root-invalid", "billing-settings-unreadable", "extension-uninstalled",
-                "database-connection-invalid", "database-pdo-driver-unavailable", "database-connection-failed",
-                "database-driver-unsupported", "database-tls-unsupported", "database-prefix-unsupported",
-                "private-pipe-required", "application-unavailable",
-                "unsupported-database", "native-secret-row-refused", "document-roots-invalid",
-                "private-root-unavailable", "archive-key-change-busy"}
-            if failure.code == "config-write-outcome-unknown" or credentials_attempted and not committed_credentials and failure.code not in definite_credential_refusals:
+            if failure.code == "config-write-outcome-unknown" or credentials_attempted and not committed_credentials and failure.code not in WRITER_REFUSAL_CODES:
                 # A child may have committed before timing out or losing stdout.
                 # Keep the guard durable: workers refuse either possibly mixed
                 # pair until a later complete Save supplies the uncertain groups.
@@ -433,11 +445,17 @@ def dispatch(args):
         return {"initialized": True, "installation_uuid": state.uuid}
     if command == "overview":
         envelope, error = None, None
+        pending_save, pending_writer_cause = False, None
         if not args.offline:
             try:
                 with state.lock("config.lock", timeout=10, create=state.initialized):
                     envelope = bridge(args)
-                    pending_save = (state.root / "config-save.json").exists()
+                    pending_path = state.root / "config-save.json"
+                    pending_save = pending_path.exists()
+                    if pending_save:
+                        private_file(pending_path)
+                        pending_intent = read_json(pending_path)
+                        pending_writer_cause = safe_writer_cause(pending_intent.get("writer_cause"), fields=DEFAULTS)
                 envelope["settings"] = {**DEFAULTS, **envelope.get("settings", {})}
                 normalize(envelope["settings"])
             except BackupError as failure:
@@ -452,7 +470,7 @@ def dispatch(args):
                 if pending_save:
                     error = "config-save-outcome-unknown"
                     envelope["validation_error"] = {"field": None, "detail": {}}
-        return overview(state, envelope, error)
+        return overview(state, envelope, error, writer_cause=pending_writer_cause)
     if command == "artifact-stream":
         return stream_artifact(state, args)
     if command in ("status", "list"):
@@ -497,7 +515,6 @@ def dispatch(args):
             return check_config(args, state, args.command_input if args.command_input is not None else stdin_json())
         envelope = load(args)
         state.apply_policy(envelope["settings"])
-        schedule_admission(state, envelope)
         return {"valid": True}
     if command == "schedule":
         settings = load(args, credential_free=True)["settings"]
@@ -555,7 +572,8 @@ def dispatch(args):
             envelope["settings"]["mode"] = args.mode
         if not args.execute:
             return plan(state, envelope)
-        journal = capture(state, envelope, envelope_loader=lambda: load(args))
+        journal = capture(state, envelope, envelope_loader=lambda: load(args),
+                          database_context=args.database_connection)
         result = {"run_id": journal["run_id"], "local_complete": True, "archive_path": journal["archive_path"]}
         envelope = load(args)
         if envelope["settings"]["destination"] == "s3":
@@ -580,7 +598,8 @@ def dispatch(args):
     if command == "request-worker":
         if not args.execute:
             raise BackupError("execute-required")
-        return worker(state, envelope, args.request_id, envelope_loader=lambda: load(args))
+        return worker(state, envelope, args.request_id, envelope_loader=lambda: load(args),
+                      database_context=args.database_connection)
     if command == "tick":
         # sys.argv[0] is a release wrapper, preserving its isolated runtime paths.
         prefix = [envelope["tools"].get("python", sys.executable), "-I", str(pathlib.Path(sys.argv[0]).resolve()),
@@ -633,7 +652,6 @@ def check_config(args, state, changes):
         if local == state.app or state.app in local.parents:
             raise BackupError("destination-unsafe")
         state.guard_location(local, "destination-inside-docroot")
-    schedule_admission(state, envelope)
     return {"valid": True}
 
 

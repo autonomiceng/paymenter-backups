@@ -1,7 +1,9 @@
 """Private database context handoff used by the native Save path."""
 import json
+import os
 import pathlib
 import shutil
+import sys
 import subprocess
 import tempfile
 import unittest
@@ -36,6 +38,131 @@ MARIADB_CONTEXT = {
 
 
 class DatabaseContextTests(unittest.TestCase):
+    def test_native_writer_receives_context_before_artisan_boot(self):
+        args = SimpleNamespace(php="/usr/bin/php", database_connection=MARIADB_CONTEXT)
+        state = SimpleNamespace(app=pathlib.Path("/fixture/app"), root=pathlib.Path("/fixture/private"))
+        completed = SimpleNamespace(returncode=0, stdout=b'{"ok":true}', stderr=b"")
+        with patch.object(cli, "run_native_writer", return_value=completed) as writer:
+            cli.native_settings(args, state, {"dump": "/usr/bin/mariadb-dump"}, (11, 12))
+
+        self.assertEqual(writer.call_args.kwargs["database_context"], MARIADB_CONTEXT)
+        self.assertNotIn("fixture-password", " ".join(writer.call_args.args[0]))
+        self.assertEqual(json.loads(writer.call_args.args[1])["_database_connection"], MARIADB_CONTEXT)
+
+    def test_native_writer_missing_command_keeps_a_safe_cause(self):
+        args = SimpleNamespace(php="/usr/bin/php", database_connection=MARIADB_CONTEXT)
+        state = SimpleNamespace(app=pathlib.Path("/fixture/app"), root=pathlib.Path("/fixture/private"))
+        completed = SimpleNamespace(
+            returncode=1,
+            stdout=b"",
+            stderr=b'There are no commands defined in the "backups" namespace.\n',
+        )
+        with patch.object(cli, "run_native_writer", return_value=completed):
+            with self.assertRaises(BackupError) as raised:
+                cli.native_settings(args, state, {"dump": "/usr/bin/mariadb-dump"}, (11, 12))
+
+        self.assertEqual(raised.exception.code, "command-not-registered")
+        self.assertEqual(raised.exception.detail, {"writer_cause": "command-not-registered"})
+
+    def test_native_writer_uses_structured_php_reason_and_field(self):
+        args = SimpleNamespace(php="/usr/bin/php", database_connection=MARIADB_CONTEXT)
+        state = SimpleNamespace(app=pathlib.Path("/fixture/app"), root=pathlib.Path("/fixture/private"))
+        completed = SimpleNamespace(
+            returncode=1,
+            stdout=b"",
+            stderr=(b'{"error":"config-invalid","field":"retention_keep_full",'
+                    b'"detail":{"writer_cause":"validation:retention_keep_full:integer"}}'),
+        )
+        with patch.object(cli, "run_native_writer", return_value=completed):
+            with self.assertRaises(BackupError) as raised:
+                cli.native_settings(args, state, {"retention_keep_full": "seven"}, (11, 12), actor=9)
+
+        self.assertEqual(raised.exception.code, "config-write-outcome-unknown")
+        self.assertEqual(raised.exception.field, "retention_keep_full")
+        self.assertEqual(raised.exception.detail,
+                         {"writer_cause": "validation:retention_keep_full:integer"})
+
+    def test_native_writer_cause_redacts_connection_secrets(self):
+        cause = cli.native_writer_cause(
+            b"PDO error for fixture: password=fixture-password username=fixture-user",
+        )
+        self.assertNotIn("fixture-password", cause)
+        self.assertNotIn("fixture-user", cause)
+        self.assertEqual(cause, "unrecognized")
+
+    def test_native_writer_cause_accepts_only_known_validation_fields_and_rules(self):
+        self.assertEqual(cli.native_writer_cause(
+            b'{"error":"config-invalid","field":"retention_keep_full",'
+            b'"detail":{"writer_cause":"validation:retention_keep_full:integer"}}'),
+            "validation:retention_keep_full:integer")
+        self.assertEqual(cli.native_writer_cause(
+            b'{"error":"config-invalid","field":"schedule_timezone",'
+            b'"detail":{"writer_cause":"validation:schedule_timezone:timezone"}}'),
+            "validation:schedule_timezone:timezone")
+        self.assertEqual(cli.native_writer_cause(
+            b'{"error":"config-invalid","field":"retention_keep_full",'
+            b'"detail":{"writer_cause":"validation:password:integer"}}'),
+            "unrecognized")
+        self.assertEqual(cli.native_writer_cause(
+            b'{"error":"config-invalid","field":"retention_keep_full",'
+            b'"detail":{"writer_cause":"validation:retention_keep_full:secret-value"}}'),
+            "unrecognized")
+
+    def test_config_save_dispatch_runs_writer_with_context_from_private_stdin(self):
+        with tempfile.TemporaryDirectory(prefix="backups-save-writer-context-") as temporary:
+            root = pathlib.Path(temporary)
+            app = root / "app"
+            app.mkdir()
+            private = root / "private"
+            private.mkdir(mode=0o700)
+            artisan = app / "artisan"
+            artisan.write_text(
+                "import json, os, sys\n"
+                "data = json.load(sys.stdin)\n"
+                "expected = {'DB_CONNECTION': 'mariadb', 'DB_DATABASE': 'paymenter_fixture', 'DB_PASSWORD': 'fixture-password'}\n"
+                "actual = {key: os.environ.get(key) for key in expected}\n"
+                "extras = [key for key in os.environ if key.startswith('DB_') and key not in "
+                "('DB_CONNECTION','DB_URL','DB_HOST','DB_PORT','DB_DATABASE','DB_USERNAME','DB_PASSWORD','DB_SOCKET',"
+                "'DB_PREFIX','DB_CHARSET','DB_COLLATION','DB_STRICT','DB_ENGINE','DB_PREFIX_INDEXES')]\n"
+                "if actual != expected or extras or os.environ.get('AWS_SECRET_ACCESS_KEY') or os.environ.get('MYSQL_PWD') "
+                "or data['_database_connection']['connection']['driver'] != 'mariadb': sys.exit(31)\n"
+                "print(json.dumps({'ok': True, 'receipt': {}, 'snapshot': {}}))\n"
+            )
+            args = cli.parser().parse_args([
+                "--app", str(app), "--private-root", str(private), "--database-connection-stdin", "config", "set",
+            ])
+            args.php = sys.executable
+            state = SimpleNamespace(app=app, root=private)
+            request = {"settings": {}, "_database_connection": MARIADB_CONTEXT}
+            envelope = {"settings": dict(cli.DEFAULTS)}
+            config_fd = os.open(root / "config.lock", os.O_CREAT | os.O_RDWR, 0o600)
+            tick_fd = os.open(root / "tick.lock", os.O_CREAT | os.O_RDWR, 0o600)
+
+            def save(received_args, received_state, changes):
+                self.assertIs(received_args, args)
+                self.assertIs(received_state, state)
+                self.assertEqual(changes, {"settings": {}})
+                return cli.native_settings(received_args, received_state, {"dump": "/usr/bin/mariadb-dump"},
+                                           (config_fd, tick_fd))
+
+            parent_environment = {
+                "DB_CONNECTION": "sqlite", "DB_DATABASE": "wrong-parent-database",
+                "DB_PASSWORD": "parent-password", "AWS_SECRET_ACCESS_KEY": "parent-aws-secret",
+            }
+            try:
+                with patch.dict(os.environ, parent_environment, clear=True), \
+                        patch.object(cli, "clean_environment"), \
+                        patch.object(cli, "stdin_json", return_value=request), \
+                        patch.object(cli, "State", return_value=state), \
+                        patch.object(cli, "bridge", return_value=envelope), \
+                        patch.object(cli, "set_config", side_effect=save):
+                    result = cli.dispatch(args)
+            finally:
+                os.close(config_fd)
+                os.close(tick_fd)
+
+        self.assertEqual(result["ok"], True)
+
     def test_config_check_consumes_private_context_before_bridge_read(self):
         with tempfile.TemporaryDirectory(prefix="backups-db-context-") as temporary:
             root = pathlib.Path(temporary)
@@ -198,7 +325,6 @@ catch (\Throwable $error) { echo $error->getMessage(); }
                                         stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
                 self.assertEqual(result.returncode, 0, result.stderr.decode(errors="replace"))
                 self.assertEqual(result.stdout.decode(), "database-connection-invalid")
-
     def test_database_context_rejects_unsupported_driver_before_bridge_use(self):
         invalid = json.loads(json.dumps(MARIADB_CONTEXT))
         invalid["connection"]["driver"] = "sqlite"

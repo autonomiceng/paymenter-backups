@@ -79,10 +79,16 @@ trait SavesSettings
             $this->refuseSettings('private-root-move-refused');
             return;
         }
+        $privateRoot = ($changes['private_root'] ?? $this->engineValue('private_root', $stored['private_root'])) ?: null;
+        $docroots = $changes['extra_docroots'] ?? $this->engineValue('extra_docroots', $stored['extra_docroots']);
+        $problem = PrivateStore::problem(realpath(base_path()), $privateRoot, $docroots);
+        if ($problem !== null) {
+            $this->refusePrivateRootProblem($problem);
+            return;
+        }
         if (array_key_exists('private_root', $userChanges) || array_key_exists('extra_docroots', $userChanges)) {
             try {
-                $docroots = $changes['extra_docroots'] ?? $this->engineValue('extra_docroots', $stored['extra_docroots']);
-                PrivateStore::root(realpath(base_path()), ($changes['private_root'] ?? $this->engineValue('private_root', $stored['private_root'])) ?: null, false, $docroots);
+                PrivateStore::root(realpath(base_path()), $privateRoot, false, $docroots);
             } catch (\RuntimeException $error) {
                 $this->refuseSettings($error->getMessage());
                 return;
@@ -118,12 +124,25 @@ trait SavesSettings
             $this->storedForm = null;
             $this->overviewCache = null;
             $code = $error instanceof \RuntimeException ? $error->getMessage() : 'config-save-outcome-unknown';
-            if ($code === 'config-save-outcome-unknown') {
+            $cause = $error instanceof \Paymenter\Extensions\Others\Backups\EngineCommandException
+                ? Runtime::safeWriterCause($error->cause) : null;
+            $privateProblem = PrivateStore::problem(realpath(base_path()), $privateRoot, $docroots);
+            if ($privateProblem !== null) {
+                $this->refusePrivateRootProblem($privateProblem);
+                return;
+            }
+            if ($cause !== null) {
+                $this->overviewError = $code;
+                $this->overviewErrorCause = $cause;
+            }
+            if (in_array($code, ['config-save-outcome-unknown', 'config-write-outcome-unknown'], true)) {
                 Notification::make()->title('Save outcome unknown')->warning()
-                    ->body('Refresh and check the saved settings before trying again. Keys you entered were cleared.')->send();
+                    ->body(Messages::withWriterCause(
+                        'Refresh and check the saved settings before trying again. Keys you entered were cleared.', $cause
+                    ))->send();
             } else {
                 $field = $error instanceof \Paymenter\Extensions\Others\Backups\EngineCommandException ? $error->field : null;
-                $this->refuseSettings($code, false, $field);
+                $this->refuseSettings($code, false, $field, $cause);
             }
             return;
         } finally {
@@ -132,6 +151,7 @@ trait SavesSettings
         $this->storedForm = null;
         $this->overviewCache = null;
         $this->overviewError = null;
+        $this->overviewErrorCause = null;
         $this->settingsForm->fill($this->formValues());
         $this->publicDirectoriesRepairPin = in_array('extra_docroots', $this->malformedKeys, true)
             ? hash('sha256', serialize($this->storedRows)) : null;
@@ -146,12 +166,28 @@ trait SavesSettings
         if (($saved['credentials_updated'] ?? false) === true) { $this->secretsSaved['s3'] = true; }
         if (($saved['maintenance_probe_credentials_updated'] ?? false) === true) { $this->secretsSaved['site'] = true; }
         if (($saved['updated'] ?? false) !== true) {
+            $privateProblem = PrivateStore::problem(realpath(base_path()), $privateRoot, $docroots);
+            if ($privateProblem !== null) {
+                $this->refusePrivateRootProblem($privateProblem);
+                return;
+            }
+            $writerCause = Runtime::safeWriterCause($saved['writer_cause'] ?? null);
+            if ($writerCause !== null) {
+                $this->overviewError = is_string($saved['error'] ?? null) ? $saved['error'] : 'config-save-outcome-unknown';
+                $this->overviewErrorCause = $writerCause;
+            }
+            $field = is_string($saved['field'] ?? null) && array_key_exists($saved['field'], Settings::LABELS)
+                ? $saved['field'] : null;
+            if ($field !== null) {
+                $this->addError('settings.' . $field, Messages::error('config-invalid'));
+                $this->dispatch('form-validation-error', livewireId: $this->getId());
+            }
             Notification::make()->title('Save incomplete')->warning()
-                ->body(($saved['outcome_unknown'] ?? false)
+                ->body(Messages::withWriterCause((($saved['outcome_unknown'] ?? false)
                     ? 'The saved settings or keys could not be confirmed. Backup work is paused. Refresh, check settings and enter the replacement keys again to complete Save.'
                     : (($saved['concurrent_settings_preserved'] ?? false)
                         ? 'Concurrent settings changes were preserved. Keys you entered weren\'t saved. Refresh and check settings before trying again.'
-                        : 'Some settings could not be restored. Backup work is paused. Keys you entered weren\'t saved. Refresh, check settings and enter the replacement keys again to complete Save.'))->send();
+                        : 'Some settings could not be restored. Backup work is paused. Keys you entered weren\'t saved. Refresh, check settings and enter the replacement keys again to complete Save.')), $writerCause))->send();
             return;
         }
         $problems = [];
@@ -199,7 +235,7 @@ trait SavesSettings
         }
     }
 
-    private function refuseSettings(string $code, bool $environment = false, ?string $field = null): void
+    private function refuseSettings(string $code, bool $environment = false, ?string $field = null, ?string $cause = null): void
     {
         $field = $field !== null && array_key_exists($field, Settings::LABELS) ? $field : Messages::field($code);
         $message = $code === 'schedule-overlaps-billing' && ($window = $this->billingWindow())
@@ -210,7 +246,15 @@ trait SavesSettings
             // Opens a collapsed section and scrolls to the field, as for form validation.
             $this->dispatch('form-validation-error', livewireId: $this->getId());
         }
-        Notification::make()->title('Settings not saved')->danger()
-            ->body($environment ? $message . ' Fix Binary paths under Advanced, save, then save your other changes.' : $message)->send();
+        $body = $environment ? $message . ' Fix Binary paths under Advanced, save, then save your other changes.' : $message;
+        $body = Messages::withWriterCause($body, $cause, $code);
+        Notification::make()->title('Settings not saved')->danger()->body($body)->send();
+    }
+
+    private function refusePrivateRootProblem(array $problem): void
+    {
+        $message = Messages::privateRootProblem($problem);
+        $this->addError('settings.private_root', $message);
+        $this->dispatch('form-validation-error', livewireId: $this->getId());
     }
 }

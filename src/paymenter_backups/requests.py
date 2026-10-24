@@ -8,7 +8,7 @@ import pathlib
 import time
 import uuid
 
-from .common import BackupError, atomic_json, private_file, read_json
+from .common import BackupError, TRANSIENT_ERRORS, atomic_json, private_file, read_json
 from .process import detach, process_identity
 from .config import configured_timezone, schedule_settings
 
@@ -384,7 +384,7 @@ def _reconcile_coverage(state, envelope, cheap_only):
                 atomic_json(path(state, item["request_id"]), item)
 
 
-def worker(state, envelope, request_id, envelope_loader=None):
+def worker(state, envelope, request_id, envelope_loader=None, database_context=None):
     from .engine import capture, verify
     from .storage import delete_run, deliver, destination_test, retention, retrieve
     with state.lock("requests.lock"):
@@ -398,7 +398,8 @@ def worker(state, envelope, request_id, envelope_loader=None):
         if action == "run":
             if arguments.get("mode"):
                 envelope["settings"]["mode"] = arguments["mode"]
-            journal = capture(state, envelope, scheduled=bool(item.get("slot")), request_id=request_id, envelope_loader=envelope_loader)
+            journal = capture(state, envelope, scheduled=bool(item.get("slot")), request_id=request_id,
+                              envelope_loader=envelope_loader, database_context=database_context)
             reconcile_coverage(state, envelope)
             result = {"run_id": journal["run_id"], "local_complete": journal["local_complete"]}
             if envelope_loader is not None:
@@ -424,8 +425,7 @@ def worker(state, envelope, request_id, envelope_loader=None):
             apply_automatic_retention(state, envelope, result, envelope_loader=envelope_loader)
         item.update({"status": "complete", "result": result})
     except BackupError as error:
-        deferred = {"busy", "billing-guard-stale", "billing-window-protected", "job-lock-busy"}
-        item["status"] = "deferred" if error.code in deferred else "failed"
+        item["status"] = "deferred" if error.code in TRANSIENT_ERRORS else "failed"
         if error.code == "initial-maintenance-scheduled-skip":
             item["status"] = "skipped"
         item["error"] = error.code
