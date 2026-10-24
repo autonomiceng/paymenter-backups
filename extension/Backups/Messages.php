@@ -64,16 +64,16 @@ final class Messages
         's3-tls-required' => 'The endpoint must start with https://.',
         's3-endpoint-invalid' => 'Enter the provider\'s https:// API URL, without a username or query.',
         's3-prefix-invalid' => 'The folder in bucket can\'t contain "//", ".", ".." or "\\".',
-        'private-root-invalid' => 'The data directory must be a full path outside Paymenter and any public web folder, owned by the site user, with permissions 700. If a saved path no longer works, follow the terminal instructions to point Backups to its existing data directory.',
+        'private-root-invalid' => 'The data directory is not identified as Backups data. Choose a new, dedicated, empty folder for Backups data.',
         'private-root-inside-app' => 'The data directory must be outside Paymenter\'s folder.',
         'private-root-inside-docroot' => 'The data directory is inside a public web folder. Choose a folder that no site serves.',
         'private-root-unsafe' => 'The data directory can\'t be a symlink. Enter its real path.',
-        'private-root-unavailable' => 'The web server can\'t create or open the data directory. Check its owner and PHP\'s open_basedir.',
+        'private-root-unavailable' => 'The web server can\'t open the data directory. Choose a new, dedicated, empty folder for Backups data, or ask the server administrator to check PHP\'s open_basedir.',
         'document-roots-invalid' => 'The saved list of other public web folders is damaged. In Backups settings, enter every other public web folder, one full path per line, and confirm the complete list. Backups stay blocked until the list is corrected.',
-        'owner-mismatch' => 'The data directory and Paymenter must belong to the same user. Set the data directory\'s permissions to 700.',
-        'private-state-permissions' => 'A file in the data directory has the wrong owner or permissions. As the site user, set the data directory to 700 and its files to 600.',
-        'private-file-invalid' => 'A file in the data directory has the wrong owner or permissions. As the site user, set the data directory to 700 and its files to 600.',
-        'private-write-failed' => 'The data directory isn\'t writable. Check its owner and free disk space.',
+        'owner-mismatch' => 'Paymenter and its Backups data directory are owned by different users. Choose a new, dedicated, empty folder for Backups data.',
+        'private-state-permissions' => 'A Backups data file has an unsafe owner or mode. Ask the server administrator to inspect the data directory before changing it.',
+        'private-file-invalid' => 'A Backups data file has an unsafe owner or mode. Ask the server administrator to inspect the data directory before changing it.',
+        'private-write-failed' => 'The data directory isn\'t writable. Check free disk space or choose a new, dedicated, empty folder for Backups data.',
         'state-unreadable' => 'A file in the data directory couldn\'t be read. It may be damaged or incomplete.',
         'installation-mismatch' => 'This data directory belongs to another Paymenter installation. Use this site\'s original data directory.',
         'installation-missing' => 'Save settings once to finish setup.',
@@ -166,7 +166,7 @@ final class Messages
         'dump-empty' => 'The database export was empty. Check the database name and user in Paymenter\'s .env.',
         'disk-reserve-exceeded' => 'Disk is below the minimum free space. Free space, or lower the minimum in Settings, Storage.',
         'local-byte-budget-exceeded' => 'Backup space is full. Delete old backups or raise the limit in Settings, Storage.',
-        'destination-unsafe' => 'The backup directory must be owned by the site user, have permissions 700, and be outside Paymenter and any public web folder.',
+        'destination-unsafe' => 'The backup directory must be dedicated to this site, writable by the site user, and outside Paymenter and any public web folder.',
         'destination-inside-docroot' => 'The backup directory is inside a public web folder. Choose a folder that no site serves.',
         'private-root-move-refused' => 'The data directory can\'t be changed after setup. It holds your backup history and saved keys.',
 
@@ -298,17 +298,23 @@ final class Messages
         $path = self::displayPath($params['path'] ?? null);
         if ($path === '') { return self::error(is_string($code) ? $code : null); }
         if ($code === 'private-root-invalid') {
+            if (($params['identified'] ?? null) !== true) {
+                return 'Data directory ' . $path . ' isn\'t identified as a readable Backups data directory. Choose a new, dedicated, empty folder for Backups data.';
+            }
             return match ($params['reason'] ?? null) {
-                'owner' => 'Data directory ' . $path . ' isn\'t owned by the web user. Change its owner to the web user and set mode 0700. Backups keeps this folder selected until it can check for an installation.',
-                'mode' => 'Data directory ' . $path . ' must have mode 0700. Set its mode to 0700. Backups keeps this folder selected until it can check for an installation.',
+                'owner' => 'Backups data directory ' . $path . ' isn\'t owned by the web user. Change its owner to the web user and set mode 0700.',
+                'mode' => 'Backups data directory ' . $path . ' must have mode 0700. Set its mode to 0700.',
                 default => self::error($code),
             };
         }
         if ($code === 'private-root-unavailable') {
+            if (($params['path_exists'] ?? null) === true && ($params['identified'] ?? null) !== true) {
+                return 'Data directory ' . $path . ' isn\'t identified as a readable Backups data directory. Choose a new, dedicated, empty folder for Backups data.';
+            }
             $parent = self::displayPath($params['parent'] ?? null);
             if ($parent === '') { return self::error($code); }
             if (($params['parent_is_folder'] ?? null) === false) {
-                return 'Data directory ' . $path . ' can\'t be created: ' . $parent . ' isn\'t a folder. Choose a writable folder outside Paymenter.';
+                return 'Data directory ' . $path . ' can\'t be created: ' . $parent . ' isn\'t a folder. Choose a writable, dedicated, empty folder outside Paymenter.';
             }
             if (($params['parent_is_folder'] ?? null) === true) {
                 return 'Data directory ' . $path . ' can\'t be created: the web user can\'t write to ' . $parent . '. Create it for the web user with mode 0700, or choose another folder outside Paymenter.';

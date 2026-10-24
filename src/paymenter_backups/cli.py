@@ -20,6 +20,18 @@ from .native_writer import run as run_native_writer
 from .storage import clean_environment, delete_plan, delete_run, deliver, destination_test, retention, retrieve, retrieve_plan
 
 
+WRITER_REFUSAL_CODES = frozenset({
+    "application-unavailable", "archive-key-change-busy", "billing-settings-unreadable",
+    "config-changed", "credentials-invalid", "credentials-unreadable",
+    "database-connection-failed", "database-connection-invalid", "database-driver-unsupported",
+    "database-pdo-driver-unavailable", "database-prefix-unsupported", "database-tls-unsupported",
+    "document-roots-invalid", "extension-uninstalled", "installation-mismatch", "installation-missing",
+    "maintenance-probe-credentials-invalid", "maintenance-probe-origin-invalid",
+    "maintenance-probe-origin-mismatch", "native-secret-row-refused", "private-file-invalid",
+    "private-pipe-required", "private-root-invalid", "private-root-unavailable", "unsupported-database",
+})
+
+
 def native_writer_cause(stderr, stdout=b""):
     """Return a fixed cause for an Artisan writer failure, never raw output."""
     outputs = []
@@ -160,14 +172,7 @@ def native_settings(args, state, values, descriptors, actor=None, restore=False,
                 field = None
             if cause == "command-not-registered":
                 raise BackupError("command-not-registered", detail={"writer_cause": cause})
-            safe_refusals = {"config-changed", "credentials-unreadable", "credentials-invalid", "maintenance-probe-credentials-invalid",
-                "maintenance-probe-origin-mismatch", "maintenance-probe-origin-invalid", "installation-missing", "installation-mismatch",
-                "private-file-invalid", "private-root-invalid", "billing-settings-unreadable", "extension-uninstalled",
-                "database-connection-invalid", "database-pdo-driver-unavailable", "database-connection-failed", "database-driver-unsupported",
-                "database-tls-unsupported", "database-prefix-unsupported", "unsupported-database", "native-secret-row-refused",
-                "private-pipe-required", "application-unavailable", "document-roots-invalid", "private-root-unavailable",
-                "archive-key-change-busy"}
-            if code in safe_refusals and (finalize or code in {"database-connection-invalid", "database-driver-unsupported"}):
+            if code in WRITER_REFUSAL_CODES and (finalize or code in {"database-connection-invalid", "database-driver-unsupported"}):
                 raise BackupError(code, field=field, detail={"writer_cause": cause})
             raise BackupError("config-write-failed" if code == "config-coordination-required" else "config-write-outcome-unknown",
                               field=field, detail={"writer_cause": cause})
@@ -335,14 +340,7 @@ def set_config(args, state, changes):
                     result["field"] = failure.field
                 return result
 
-            definite_credential_refusals = {"config-changed", "credentials-unreadable", "credentials-invalid", "maintenance-probe-credentials-invalid",
-                "maintenance-probe-origin-mismatch", "maintenance-probe-origin-invalid", "installation-missing", "installation-mismatch",
-                "private-file-invalid", "private-root-invalid", "billing-settings-unreadable", "extension-uninstalled",
-                "database-connection-invalid", "database-pdo-driver-unavailable", "database-connection-failed",
-                "database-driver-unsupported", "database-tls-unsupported", "database-prefix-unsupported",
-                "private-pipe-required", "application-unavailable", "unsupported-database", "native-secret-row-refused",
-                "document-roots-invalid", "private-root-unavailable", "archive-key-change-busy"}
-            if failure.code == "config-write-outcome-unknown" or credentials_attempted and not committed_credentials and failure.code not in definite_credential_refusals:
+            if failure.code == "config-write-outcome-unknown" or credentials_attempted and not committed_credentials and failure.code not in WRITER_REFUSAL_CODES:
                 # A child may have committed before timing out or losing stdout.
                 # Keep the guard durable: workers refuse either possibly mixed
                 # pair until a later complete Save supplies the uncertain groups.

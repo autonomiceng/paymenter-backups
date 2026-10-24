@@ -34,7 +34,7 @@ final class PrivateStore
         }
         $canonical = realpath($cursor);
         if ($canonical === false || !is_dir($canonical)) {
-            return self::unavailable($path, $cursor);
+            return self::unavailable($path, $cursor, true);
         }
         $prospective = rtrim($canonical, '/') . ($suffix ? '/' . implode('/', $suffix) : '');
         if ($prospective === '') { $prospective = '/'; }
@@ -43,16 +43,17 @@ final class PrivateStore
         }
         if (file_exists($path)) {
             if (!is_dir($path) || !($root = realpath($path))) { return null; }
+            $identified = self::hasReadableInstallationMarker($root);
             if (fileowner($root) !== posix_geteuid()) {
-                return ['code' => 'private-root-invalid', 'params' => ['path' => self::displayPath($root), 'reason' => 'owner']];
+                return ['code' => 'private-root-invalid', 'params' => ['path' => self::displayPath($root), 'reason' => 'owner', 'identified' => $identified]];
             }
             if ((fileperms($root) & 07777) !== 0700) {
-                return ['code' => 'private-root-invalid', 'params' => ['path' => self::displayPath($root), 'reason' => 'mode']];
+                return ['code' => 'private-root-invalid', 'params' => ['path' => self::displayPath($root), 'reason' => 'mode', 'identified' => $identified]];
             }
             return null;
         }
         if (!is_writable($canonical) || !is_executable($canonical)) {
-            return self::unavailable($prospective, $canonical);
+            return self::unavailable($prospective, $canonical, false);
         }
         return null;
     }
@@ -78,15 +79,26 @@ final class PrivateStore
             && !is_executable($parent);
     }
 
-    private static function unavailable(string $path, string $parent): array
+    private static function hasReadableInstallationMarker(string $path): bool
     {
+        $marker = rtrim($path, '/') . '/installation.json';
+        clearstatcache(true, $marker);
+        $info = @lstat($marker);
+        return is_array($info) && (($info['mode'] & 0170000) === 0100000) && @is_readable($marker);
+    }
+
+    private static function unavailable(string $path, string $parent, bool $pathExists): array
+    {
+        $identified = $pathExists && self::hasReadableInstallationMarker($path);
         if (!is_dir($parent)) {
             return ['code' => 'private-root-unavailable', 'params' => [
                 'path' => self::displayPath($path), 'parent' => self::displayPath($parent), 'parent_is_folder' => false,
+                'path_exists' => $pathExists, 'identified' => $identified,
             ]];
         }
         return ['code' => 'private-root-unavailable', 'params' => [
             'path' => self::displayPath($path), 'parent' => self::displayPath($parent), 'parent_is_folder' => true,
+            'path_exists' => $pathExists, 'identified' => $identified,
         ]];
     }
 

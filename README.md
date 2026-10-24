@@ -72,8 +72,9 @@ first, following [the recovery guide](docs/RECOVERY.md).
 - **Tasks stay queued:** check the cron check-in and Paymenter's scheduler.
 - **S3 upload fails:** run Test storage and check the destination, credentials,
   GnuPG, and acknowledged recovery key. Failed delivery keeps its local source.
-- **Private storage is unavailable:** check ownership, mode, public-directory
-  overlap, quota, and PHP `open_basedir` using the installation guide.
+- **Private storage is unavailable:** open Backups settings for the path-specific
+  fix. For an unrecognized folder, choose a new, dedicated, empty folder instead
+  of changing a shared folder's owner or mode.
 - **A run needs recovery:** preserve its journal and follow the CLI recovery
   procedure before attempting another capture.
 
