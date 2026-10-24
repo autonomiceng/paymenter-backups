@@ -20,7 +20,7 @@ def _wait_for_group_exit(pgid, timeout=3):
     while group_members(group):
         remaining = deadline - time.monotonic()
         if remaining <= 0:
-            raise subprocess.TimeoutExpired(['process-group', str(pgid)], timeout)
+            raise subprocess.TimeoutExpired(['wait for writer process group', str(pgid)], timeout)
         time.sleep(min(0.02, remaining))
 
 
