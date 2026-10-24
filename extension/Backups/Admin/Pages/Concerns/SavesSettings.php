@@ -81,9 +81,8 @@ trait SavesSettings
         }
         $currentPrivateRoot = $this->engineValue('private_root', $stored['private_root']) ?: null;
         $privateRoot = ($changes['private_root'] ?? $currentPrivateRoot) ?: null;
-        $defaultPrivateRoot = PrivateStore::defaultPath(realpath(base_path()));
         $savedRoot = $privateRoot === $currentPrivateRoot
-            && ($currentPrivateRoot !== null || PrivateStore::hasInstallationMarker($privateRoot ?? $defaultPrivateRoot));
+            && PrivateStore::isSavedRoot(realpath(base_path()), $currentPrivateRoot);
         $docroots = $changes['extra_docroots'] ?? $this->engineValue('extra_docroots', $stored['extra_docroots']);
         $problem = PrivateStore::problem(realpath(base_path()), $privateRoot, $docroots, $savedRoot);
         if ($problem !== null) {

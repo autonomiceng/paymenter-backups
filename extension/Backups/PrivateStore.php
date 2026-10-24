@@ -11,6 +11,17 @@ final class PrivateStore
         return rtrim(dirname($app), '/') . '/paymenter-backups-private';
     }
 
+    /** Preserve saved paths, including older defaults whose marker cannot be inspected. */
+    public static function isSavedRoot(string $app, ?string $configured = null): bool
+    {
+        if ($configured !== null && $configured !== '') { return true; }
+        $path = self::defaultPath($app);
+        // Older installs kept the default setting blank before and after Save.
+        // An inaccessible default is ambiguous: require repair rather than replacement.
+        return self::hasInstallationMarker($path)
+            || (self::installedOrRequiresRepair($path) && (!is_readable($path) || !is_executable($path)));
+    }
+
     /** Check without creating the data directory; savedRoot marks the active persisted path. */
     public static function problem(string $app, ?string $configured = null, array $extraDocroots = [], bool $savedRoot = false): ?array
     {

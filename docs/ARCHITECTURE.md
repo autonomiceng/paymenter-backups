@@ -230,6 +230,12 @@ installation identity is written, only Backups' `identity.lock` and
 `billing-guard.json` may already exist; each must be a regular owner-private
 file. Any other entry, including saved credentials or backup sets without an
 installation identity, remains an orphaned-state refusal.
+Administrator repair guidance uses the persisted nonempty private-root pin even
+when the installation marker cannot be inspected. Older installations left the
+default pin blank both before and after Save, so an inaccessible default cannot
+be distinguished from unused storage. Treat that ambiguity as requiring repair
+before replacement. A readable, searchable default without an installation marker
+retains first-use guidance. Overview, Save and save errors share this decision.
 Malformed public-folder lists remain refusing until an administrator explicitly
 enters and confirms the complete list on Backups settings, including an
 intentional empty list. Bootstrap repair validates those folders before writing,

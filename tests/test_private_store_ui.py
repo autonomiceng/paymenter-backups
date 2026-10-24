@@ -13,6 +13,140 @@ PHP = os.environ.get("PAYMENTER_BACKUPS_TEST_PHP") or shutil.which("php")
 
 @unittest.skipUnless(PHP, "PHP required")
 class PrivateStoreUiTests(unittest.TestCase):
+    def page_guidance(self, app, configured="", action="inspect", failure="", **changes):
+        result = subprocess.run(
+            [PHP, str(ROOT / "tests/integration/private_root_guidance.php")],
+            input=json.dumps({"app": str(app), "configured": configured, "action": action,
+                              "failure": failure, "changes": changes}),
+            capture_output=True, text=True, timeout=10,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        return json.loads(result.stdout)
+
+    @unittest.skipIf(os.geteuid() == 0, "Search permissions require a non-root account")
+    def test_saved_default_without_search_permission_keeps_page_repair_guidance(self):
+        with tempfile.TemporaryDirectory(prefix="backups-default-guidance-") as temporary:
+            base = pathlib.Path(temporary)
+            app = base / "app"
+            app.mkdir()
+            private = base / "paymenter-backups-private"
+            private.mkdir(mode=0o700)
+            marker = private / "installation.json"
+            marker.write_text('{"installation_uuid":"fixture"}')
+            private.chmod(0o000)
+            try:
+                result = self.page_guidance(app)
+            finally:
+                private.chmod(0o700)
+            self.assertTrue(result["initialized"])
+            self.assertEqual(result["overview"]["configuration"]["error"], "private-root-invalid")
+            self.assertTrue(result["problem"]["params"].get("repair_required"))
+            self.assertFalse(result["problem"]["params"]["identified"])
+            self.assertIn("Set its mode to 0700", result["message"])
+            self.assertNotIn("Choose a new", result["message"])
+            self.assertEqual(marker.read_text(), '{"installation_uuid":"fixture"}')
+
+    @unittest.skipIf(os.geteuid() == 0, "Search permissions require a non-root account")
+    def test_save_repairs_inaccessible_saved_default_and_refuses_a_move(self):
+        with tempfile.TemporaryDirectory(prefix="backups-default-save-") as temporary:
+            base = pathlib.Path(temporary)
+            app = base / "app"
+            app.mkdir()
+            private = base / "paymenter-backups-private"
+            private.mkdir(mode=0o700)
+            marker = private / "installation.json"
+            marker.write_text('{"installation_uuid":"fixture"}')
+            private.chmod(0o000)
+            try:
+                for configured in ("", str(private)):
+                    with self.subTest(configured=configured):
+                        result = self.page_guidance(app, configured, "save", local_byte_budget=123)
+                        message = result["errors"]["settings.private_root"]
+                        self.assertIn("Set its mode to 0700", message)
+                        self.assertNotIn("Choose a new", message)
+                replacement = base / "replacement"
+                result = self.page_guidance(app, action="save", private_root=str(replacement))
+                self.assertIn("can't be changed after setup", result["errors"]["settings.private_root"])
+                self.assertFalse(replacement.exists())
+            finally:
+                private.chmod(0o700)
+            self.assertEqual(marker.read_text(), '{"installation_uuid":"fixture"}')
+
+    @unittest.skipIf(os.geteuid() == 0, "Search permissions require a non-root account")
+    def test_save_errors_keep_default_root_repair_guidance(self):
+        with tempfile.TemporaryDirectory(prefix="backups-default-save-error-") as temporary:
+            base = pathlib.Path(temporary)
+            app = base / "app"
+            app.mkdir()
+            private = base / "paymenter-backups-private"
+            private.mkdir(mode=0o700)
+            marker = private / "installation.json"
+            marker.write_text('{"installation_uuid":"fixture"}')
+            for failure in ("throw", "incomplete"):
+                with self.subTest(failure=failure):
+                    try:
+                        result = self.page_guidance(app, action="save", failure=failure, local_byte_budget=123)
+                        self.assertEqual(private.stat().st_mode & 0o777, 0)
+                        self.assertIn("Set its mode to 0700", result["errors"]["settings.private_root"])
+                        self.assertNotIn("Choose a new", result["errors"]["settings.private_root"])
+                    finally:
+                        private.chmod(0o700)
+            self.assertEqual(marker.read_text(), '{"installation_uuid":"fixture"}')
+
+    def test_readable_unsaved_default_keeps_new_folder_guidance(self):
+        with tempfile.TemporaryDirectory(prefix="backups-default-unsaved-") as temporary:
+            base = pathlib.Path(temporary)
+            app = base / "app"
+            app.mkdir()
+            private = base / "paymenter-backups-private"
+            self.assertIsNone(self.page_guidance(app)["problem"])
+            self.assertFalse(private.exists())
+            private.mkdir(mode=0o755)
+            private.chmod(0o755)
+            for action in ("inspect", "save"):
+                with self.subTest(action=action):
+                    result = self.page_guidance(app, action=action, local_byte_budget=123)
+                    self.assertNotIn("repair_required", result["problem"]["params"])
+                    self.assertIn("Choose a new, dedicated, empty folder", result["message"])
+                    if action == "save":
+                        self.assertEqual(result["errors"]["settings.private_root"], result["message"])
+            self.assertEqual(list(private.iterdir()), [])
+
+    @unittest.skipIf(os.geteuid() == 0, "Search permissions require a non-root account")
+    def test_proposed_inaccessible_unsaved_directory_keeps_new_folder_guidance(self):
+        with tempfile.TemporaryDirectory(prefix="backups-proposed-unsaved-") as temporary:
+            base = pathlib.Path(temporary)
+            app = base / "app"
+            app.mkdir()
+            private = base / "proposed"
+            private.mkdir(mode=0o700)
+            private.chmod(0o000)
+            try:
+                result = self.page_guidance(app, action="save", private_root=str(private))
+                message = result["errors"]["settings.private_root"]
+                self.assertIn("Choose a new, dedicated, empty folder", message)
+                self.assertNotIn("Set its mode", message)
+            finally:
+                private.chmod(0o700)
+            self.assertEqual(list(private.iterdir()), [])
+
+    @unittest.skipIf(os.geteuid() == 0, "Search permissions require a non-root account")
+    def test_inaccessible_legacy_default_with_unknown_identity_requires_repair(self):
+        with tempfile.TemporaryDirectory(prefix="backups-default-ambiguous-") as temporary:
+            base = pathlib.Path(temporary)
+            app = base / "app"
+            app.mkdir()
+            private = base / "paymenter-backups-private"
+            private.mkdir(mode=0o700)
+            private.chmod(0o000)
+            try:
+                result = self.page_guidance(app)
+                self.assertTrue(result["problem"]["params"].get("repair_required"))
+                self.assertIn("Set its mode to 0700", result["message"])
+            finally:
+                private.chmod(0o700)
+            self.assertEqual(list(private.iterdir()), [])
+
     def php(self, program, *arguments):
         program = ('if (!function_exists("posix_geteuid")) { function posix_geteuid() { return getmyuid(); } } '
                    + program)

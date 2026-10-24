@@ -48,8 +48,7 @@ trait LoadsOverview
             $application = realpath(base_path());
             if ($application === false) { return null; }
             $configuredRoot = is_string($configured) && $configured !== '' ? $configured : null;
-            $activeRoot = $configuredRoot ?? PrivateStore::defaultPath($application);
-            $savedRoot = $configuredRoot !== null || PrivateStore::hasInstallationMarker($activeRoot);
+            $savedRoot = PrivateStore::isSavedRoot($application, $configuredRoot);
             return PrivateStore::problem($application, $configuredRoot, $docroots, $savedRoot);
         } catch (\Throwable $error) {
             return null;
