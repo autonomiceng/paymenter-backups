@@ -4,6 +4,16 @@ namespace Paymenter\Extensions\Others\Backups;
 use RuntimeException;
 use Symfony\Component\Process\Process;
 
+require_once __DIR__ . '/DatabaseConnectionContext.php';
+
+final class EngineCommandException extends RuntimeException
+{
+    public function __construct(string $error, public readonly ?string $field = null, public readonly ?string $cause = null)
+    {
+        parent::__construct($error);
+    }
+}
+
 final class Runtime
 {
     /** Child startup excludes loader, resolver, TLS and application overrides. */
@@ -83,29 +93,83 @@ PYTHON;
     }
 
     /** Engine argv; the run ID or other public arguments follow the global flags. */
-    private static function engine(array $arguments): array
+    private static function engine(array $arguments, bool $databaseContext = false): array
     {
         $root = self::privateRoot();
         $binaries = self::binaries();
-        return [$binaries['python'], '-I', __DIR__ . '/runtime/cli.py', '--app', realpath(base_path()), '--private-root', $root, '--bridge', __DIR__ . '/bridge.php', '--php', $binaries['php'], ...$arguments];
+        return [$binaries['python'], '-I', __DIR__ . '/runtime/cli.py', '--app', realpath(base_path()), '--private-root', $root, '--bridge', __DIR__ . '/bridge.php', '--php', $binaries['php'], ...($databaseContext ? ['--database-connection-stdin'] : []), ...$arguments];
     }
 
-    /** Engine stderr carries only {"error": code}; anything else becomes a generic code. */
-    public static function errorCode(string $stderr, string $fallback = 'engine-unavailable'): string
+    /** The active request's resolved DB settings, kept off argv and the child environment. */
+    private static function databaseConnectionContext(): array
+    {
+        return DatabaseConnectionContext::capture();
+    }
+
+    /** Commands that load or validate the Paymenter database envelope. */
+    private static function needsDatabaseConnectionContext(array $arguments): bool
+    {
+        $command = $arguments[0] ?? '';
+        if ($command === 'config') { return in_array($arguments[1] ?? '', ['show', 'set', 'check', 'validate'], true); }
+        return in_array($command, ['init', 'tick', 'overview', 'plan', 'run', 'verify', 'export', 'delete', 'schedule',
+            'deliver', 'retention', 'retrieve', 'destination-test', 'request-worker'], true);
+    }
+
+    /** Keep only a fixed error code and a known setting field from engine stderr. */
+    public static function errorDetails(string $stderr, string $fallback = 'engine-unavailable'): array
     {
         $decoded = json_decode(trim($stderr), true);
         $code = is_array($decoded) ? ($decoded['error'] ?? null) : null;
-        return is_string($code) && preg_match('/^[a-z0-9][a-z0-9-]{0,63}$/D', $code) ? $code : $fallback;
+        if (!is_string($code) || !preg_match('/^[a-z0-9][a-z0-9-]{0,63}$/D', $code)) { $code = $fallback; }
+        $field = is_array($decoded) && is_string($decoded['field'] ?? null) ? $decoded['field'] : null;
+        if ($field === null || !array_key_exists($field, Settings::LABELS)) { $field = null; }
+        $detail = is_array($decoded) ? ($decoded['detail'] ?? null) : null;
+        $cause = self::safeWriterCause(is_array($detail) ? ($detail['writer_cause'] ?? null) : null);
+        return ['code' => $code, 'field' => $field, 'cause' => $cause];
+    }
+
+    /** Keep native writer diagnostics to known codes so output cannot carry secrets. */
+    public static function safeWriterCause(mixed $cause): ?string
+    {
+        if ($cause === null) { return null; }
+        $allowed = [
+            'unrecognized', 'command-not-registered', 'busy', 'config-invalid', 'config-coordination-required',
+            'config-save-incomplete', 'config-changed', 'config-save-outcome-unknown', 'config-write-failed',
+            'credentials-unreadable', 'credentials-invalid', 'maintenance-probe-credentials-invalid',
+            'maintenance-probe-origin-invalid', 'maintenance-probe-origin-mismatch', 'installation-missing',
+            'installation-mismatch', 'private-file-invalid', 'private-root-invalid', 'billing-settings-unreadable',
+            'extension-uninstalled', 'database-connection-invalid', 'database-pdo-driver-unavailable',
+            'database-connection-failed', 'private-pipe-required', 'application-unavailable',
+            'database-driver-unsupported', 'database-tls-unsupported',
+            'database-prefix-unsupported', 'unsupported-database', 'native-secret-row-refused',
+            'document-roots-invalid', 'private-root-unavailable', 'archive-key-change-busy',
+            'writer-timeout', 'writer-process-failed', 'writer-output-invalid', 'writer-failed',
+        ];
+        return is_string($cause) && in_array($cause, $allowed, true) ? $cause : 'unrecognized';
+    }
+
+    /** Compatibility helper for stream commands that only consume the fixed code. */
+    public static function errorCode(string $stderr, string $fallback = 'engine-unavailable'): string
+    {
+        return self::errorDetails($stderr, $fallback)['code'];
     }
 
     /** Public engine JSON only; runtime secrets are never returned to a browser. */
     public static function command(array $arguments, ?array $input = null, int $timeout = 10): array
     {
         if (in_array($arguments[0] ?? '', ['encryption-key', 'recovery-key', 'credentials-rewrap'], true)) { throw new RuntimeException('sensitive-command-refused'); }
-        $process = new Process(self::engine($arguments), base_path(), self::safeEnvironment(), $input === null ? null : json_encode($input === [] ? new \stdClass : $input, JSON_THROW_ON_ERROR));
+        $databaseContext = self::needsDatabaseConnectionContext($arguments);
+        if ($databaseContext) {
+            $input ??= [];
+            $input['_database_connection'] = self::databaseConnectionContext();
+        }
+        $process = new Process(self::engine($arguments, $databaseContext), base_path(), self::safeEnvironment(), $input === null ? null : json_encode($input === [] ? new \stdClass : $input, JSON_THROW_ON_ERROR));
         $process->setTimeout($timeout);
         $process->run();
-        if (!$process->isSuccessful()) { throw new RuntimeException(self::errorCode($process->getErrorOutput())); }
+        if (!$process->isSuccessful()) {
+            $failure = self::errorDetails($process->getErrorOutput());
+            throw new EngineCommandException($failure['code'], $failure['field'], $failure['cause']);
+        }
         return json_decode($process->getOutput(), true, 64, JSON_THROW_ON_ERROR);
     }
 
@@ -200,13 +264,14 @@ PYTHON;
     public static function saveConfiguration(array $settings, ?array $credentials = null): array
     {
         $input = ['settings' => $settings ?: new \stdClass];
+        $input['_database_connection'] = self::databaseConnectionContext();
         if ($credentials !== null) {
             $input['credentials'] = $credentials['s3'] ?? null;
             $input['maintenance_probe_credentials'] = $credentials['site'] ?? null;
         }
         $actor = \Illuminate\Support\Facades\Auth::id();
         if ($actor !== null) { $input['_actor'] = (int) $actor; }
-        $arguments = self::engine(['config', 'set']);
+        $arguments = self::engine(['config', 'set'], true);
         if (array_key_exists('private_root', $settings) && !is_file(self::privateRoot() . '/installation.json')) {
             // A first save may choose its private location before any identity exists.
             $index = array_search('--private-root', $arguments, true);
@@ -218,8 +283,13 @@ PYTHON;
         // status timeout. A killed writer is an unknown outcome, never "not saved".
         $process->setTimeout(300);
         try { $process->run(); }
-        catch (\Symfony\Component\Process\Exception\ProcessTimedOutException $error) { throw new RuntimeException('config-save-outcome-unknown'); }
-        if (!$process->isSuccessful()) { throw new RuntimeException(self::errorCode($process->getErrorOutput(), 'config-save-outcome-unknown')); }
+        catch (\Symfony\Component\Process\Exception\ProcessTimedOutException $error) {
+            throw new EngineCommandException('config-save-outcome-unknown', null, 'writer-timeout');
+        }
+        if (!$process->isSuccessful()) {
+            $failure = self::errorDetails($process->getErrorOutput(), 'config-save-outcome-unknown');
+            throw new EngineCommandException($failure['code'], $failure['field'], $failure['cause']);
+        }
         $result = json_decode($process->getOutput(), true, 32, JSON_THROW_ON_ERROR);
         if (!is_array($result) || !is_bool($result['updated'] ?? null)) { throw new RuntimeException('config-save-outcome-unknown'); }
         return $result;
@@ -230,8 +300,8 @@ PYTHON;
     {
         // Internal native finalizer owns both inherited flocks and native row
         // locks. Read committed rows in the cold child; it writes only secrets.
-        $process = new Process([PHP_BINARY, __DIR__ . '/bridge.php', 'credentials-merge', '--app', realpath(base_path()), '--private-root', $root],
-            base_path(), self::safeEnvironment(), json_encode($input, JSON_THROW_ON_ERROR));
+        $process = new Process([PHP_BINARY, __DIR__ . '/bridge.php', 'credentials-merge', '--database-connection-stdin', '--app', realpath(base_path()), '--private-root', $root],
+            base_path(), self::safeEnvironment(), json_encode(['database_connection' => self::databaseConnectionContext(), 'payload' => $input], JSON_THROW_ON_ERROR));
         $process->setTimeout(30);
         try { $process->run(); }
         catch (\Throwable $error) { throw new RuntimeException('config-save-outcome-unknown'); }
@@ -314,8 +384,8 @@ PYTHON;
         abort_unless(\Illuminate\Support\Facades\Auth::user()?->hasPermission('admin.extensions.update') ?? false, 403);
         $actor = \Illuminate\Support\Facades\Auth::id();
         $input['actor'] = $actor === null ? null : (int) $actor;
-        $process = new Process([self::php(), __DIR__ . '/bridge.php', $verb, '--app', realpath(base_path()), '--private-root', self::privateRoot()],
-            base_path(), self::safeEnvironment(), json_encode($input, JSON_THROW_ON_ERROR));
+        $process = new Process([self::php(), __DIR__ . '/bridge.php', $verb, '--database-connection-stdin', '--app', realpath(base_path()), '--private-root', self::privateRoot()],
+            base_path(), self::safeEnvironment(), json_encode(['database_connection' => self::databaseConnectionContext(), 'payload' => $input], JSON_THROW_ON_ERROR));
         // PBKDF2 and durable credential writes are bounded; this never starts a transfer.
         $process->setTimeout(10);
         $process->run();
@@ -328,7 +398,7 @@ PYTHON;
     public static function credentials(array $input, bool $maintenanceProbe = false): void
     {
         // Secrets never create private storage; Save settings does that first.
-        $process = new Process([self::php(), __DIR__ . '/bridge.php', $maintenanceProbe ? 'maintenance-probe-credentials-write' : 'credentials-write', '--app', realpath(base_path()), '--private-root', self::privateRoot()], base_path(), self::safeEnvironment(), json_encode($input, JSON_THROW_ON_ERROR));
+        $process = new Process([self::php(), __DIR__ . '/bridge.php', $maintenanceProbe ? 'maintenance-probe-credentials-write' : 'credentials-write', '--database-connection-stdin', '--app', realpath(base_path()), '--private-root', self::privateRoot()], base_path(), self::safeEnvironment(), json_encode(['database_connection' => self::databaseConnectionContext(), 'payload' => $input], JSON_THROW_ON_ERROR));
         $process->setTimeout(10);
         $process->run();
         if (!$process->isSuccessful()) {

@@ -160,15 +160,16 @@ class ProcessTests(unittest.TestCase):
             app.mkdir()
             state = State(app, pathlib.Path(temporary) / "private")
             receipt = pathlib.Path(temporary) / "receipt.json"
-            script = "import os,json,sys,time;targets=[os.readlink('/proc/self/fd/'+f) for f in os.listdir('/proc/self/fd') if os.path.exists('/proc/self/fd/'+f)];open(sys.argv[1],'w').write(json.dumps({'sid':os.getsid(0),'pid':os.getpid(),'targets':targets}));time.sleep(30)"
+            script = "import os,json,sys,time;payload=sys.stdin.buffer.read();targets=[os.readlink('/proc/self/fd/'+f) for f in os.listdir('/proc/self/fd') if os.path.exists('/proc/self/fd/'+f)];open(sys.argv[1],'w').write(json.dumps({'sid':os.getsid(0),'pid':os.getpid(),'targets':targets,'payload':payload.decode()}));time.sleep(30)"
             with state.lock():
-                pid = detach([sys.executable, "-I", "-c", script, str(receipt)])
+                pid = detach([sys.executable, "-I", "-c", script, str(receipt)], b"private-context")
                 try:
                     deadline = time.time() + 3
                     while not receipt.exists() and time.time() < deadline:
                         time.sleep(.02)
                     data = json.loads(receipt.read_text())
                     self.assertEqual(data["sid"], pid)
+                    self.assertEqual(data["payload"], "private-context")
                     self.assertNotIn(str(state.root / "run.lock"), data["targets"])
                 finally:
                     os.kill(pid, signal.SIGKILL)

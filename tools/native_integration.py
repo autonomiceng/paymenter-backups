@@ -15,13 +15,12 @@ import socket
 import subprocess
 import sys
 import tarfile
-import tempfile
 import time
 import urllib.request
 import urllib.parse
 
 from fetch_fixture import fetch
-from fixture_environment import child_environment
+from fixture_environment import child_environment, private_work_directory
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 
@@ -31,11 +30,33 @@ def fixture_http():
     return urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
 
+def require_maria_socket_path(socket_path):
+    if not isinstance(socket_path, str):
+        raise TypeError('MariaDB socket path must be a string')
+    return socket_path
+
+
 def execute(command, cwd=None, input=None, env=None, timeout=180):
     result = subprocess.run(list(map(str, command)), cwd=cwd, input=input, env=child_environment(env), stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout)
     if result.returncode:
         # Fixture uses only fake secrets; limit diagnostics to bounded test output.
         raise RuntimeError('command failed: ' + str(command[:3]) + '\n' + result.stdout.decode(errors='replace')[-4000:] + result.stderr.decode(errors='replace')[-4000:])
+    return result.stdout
+
+
+def execute_env_only_database_parent(command, database_environment, cwd=None, input=None, timeout=180):
+    """Launch a fresh PHP parent with DB settings absent from .env and cache."""
+    expected = {'DB_CONNECTION', 'DB_HOST', 'DB_PORT', 'DB_DATABASE', 'DB_USERNAME', 'DB_PASSWORD', 'DB_PREFIX'}
+    if set(database_environment) != expected:
+        raise ValueError('env-only database fixture has unexpected keys')
+    environment = child_environment()
+    environment.update(database_environment)
+    result = subprocess.run(list(map(str, command)), cwd=cwd, input=input, env=environment,
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout)
+    if result.returncode:
+        raise RuntimeError('env-only database command failed: ' + str(command[:3]) + '\n'
+                           + result.stdout.decode(errors='replace')[-4000:]
+                           + result.stderr.decode(errors='replace')[-4000:])
     return result.stdout
 
 
@@ -70,9 +91,10 @@ def maria(work):
     data = work / 'mariadb'
     data.mkdir(mode=0o700)
     sock = work / 'db.sock'
+    db_port = port()
     execute(['mariadb-install-db', '--no-defaults', '--datadir=' + str(data), '--auth-root-authentication-method=normal', '--skip-test-db'])
     log = (work / 'mariadb.log').open('wb')
-    command = [shutil.which('mariadbd') or '/usr/sbin/mariadbd', '--no-defaults', '--datadir=' + str(data), '--socket=' + str(sock), '--pid-file=' + str(work / 'db.pid'), '--skip-networking', '--log-error=' + str(work / 'server-error.log')]
+    command = [shutil.which('mariadbd') or '/usr/sbin/mariadbd', '--no-defaults', '--datadir=' + str(data), '--socket=' + str(sock), '--pid-file=' + str(work / 'db.pid'), '--bind-address=127.0.0.1', '--port=' + str(db_port), '--log-error=' + str(work / 'server-error.log')]
     if os.getuid() == 0:
         command.append('--user=root')
     process = subprocess.Popen(command, stdout=log, stderr=log, start_new_session=True, env=child_environment())
@@ -89,7 +111,7 @@ def maria(work):
             time.sleep(.1)
         else:
             raise RuntimeError('disposable MariaDB readiness timeout')
-        yield sock
+        yield require_maria_socket_path(str(sock)), db_port
     finally:
         process.terminate()
         try:
@@ -264,9 +286,8 @@ def main():
     args = parser.parse_args()
     if args.slow_step_delay < 0:
         parser.error('--slow-step-delay must be nonnegative')
-    workbase = ROOT / '.native-work'
-    workbase.mkdir(exist_ok=True)
-    work = pathlib.Path(tempfile.mkdtemp(prefix='native-integration-', dir=workbase))
+    workbase = private_work_directory('paymenter-backups-native-')
+    work = private_work_directory('native-integration-', workbase)
     # This regression runs every full drill under deliberately hostile parent
     # configuration. Its socket/cache paths are inside this disposable workroot,
     # so even a broken boundary cannot connect to an existing database or cache.
@@ -297,15 +318,16 @@ def main():
         original = hashes(app)
         private = work / 'private'
         private.mkdir(mode=0o700)
-        with maria(work) as sock:
-            execute(['mariadb', '--no-defaults', '--socket=' + str(sock), '-uroot', '-e', "CREATE DATABASE paymenter_fixture; CREATE DATABASE paymenter_restore; CREATE DATABASE paymenter_legacy_fixture; CREATE USER 'paymenter_fixture_user'@'localhost' IDENTIFIED BY 'paymenter-fixture-password'; GRANT SELECT,INSERT,UPDATE,DELETE,CREATE,ALTER,INDEX,DROP,REFERENCES ON paymenter_fixture.* TO 'paymenter_fixture_user'@'localhost'; GRANT SELECT,INSERT,UPDATE,DELETE,CREATE,ALTER,INDEX,DROP,REFERENCES ON paymenter_restore.* TO 'paymenter_fixture_user'@'localhost'; GRANT SELECT,INSERT,UPDATE,DELETE,CREATE,ALTER,INDEX,DROP,REFERENCES ON paymenter_legacy_fixture.* TO 'paymenter_fixture_user'@'localhost';"])
+        with maria(work) as (sock, db_port):
+            sock = require_maria_socket_path(sock)
+            execute(['mariadb', '--no-defaults', '--socket=' + sock, '-uroot', '-e', "CREATE DATABASE paymenter_fixture; CREATE DATABASE paymenter_restore; CREATE DATABASE paymenter_legacy_fixture; CREATE USER 'paymenter_fixture_user'@'localhost' IDENTIFIED BY 'paymenter-fixture-password'; CREATE USER 'paymenter_fixture_user'@'127.0.0.1' IDENTIFIED BY 'paymenter-fixture-password'; GRANT SELECT,INSERT,UPDATE,DELETE,CREATE,ALTER,INDEX,DROP,REFERENCES ON paymenter_fixture.* TO 'paymenter_fixture_user'@'localhost'; GRANT SELECT,INSERT,UPDATE,DELETE,CREATE,ALTER,INDEX,DROP,REFERENCES ON paymenter_fixture.* TO 'paymenter_fixture_user'@'127.0.0.1'; GRANT SELECT,INSERT,UPDATE,DELETE,CREATE,ALTER,INDEX,DROP,REFERENCES ON paymenter_restore.* TO 'paymenter_fixture_user'@'localhost'; GRANT SELECT,INSERT,UPDATE,DELETE,CREATE,ALTER,INDEX,DROP,REFERENCES ON paymenter_legacy_fixture.* TO 'paymenter_fixture_user'@'localhost';"])
             sys.path.insert(0, str(ROOT / 'tests/integration'))
             from database_visibility import check_visibility
             visibility = check_visibility(work, sock)
             http_port = port()
             native_url = 'http://127.0.0.1:' + str(http_port)
             app_key = 'base64:' + base64.b64encode(os.urandom(32)).decode()
-            env = {'APP_NAME': 'Fixture', 'APP_ENV': 'local', 'APP_KEY': app_key, 'APP_DEBUG': 'false', 'APP_URL': 'http://127.0.0.1:1', 'APP_TIMEZONE': 'America/New_York', 'APP_MAINTENANCE_DRIVER': 'file', 'DB_CONNECTION': 'mysql', 'DB_SOCKET': str(sock), 'DB_HOST': 'deliberately-unused.invalid', 'DB_DATABASE': 'deliberately_unused_database', 'DB_URL': 'mysql://paymenter_fixture_user:paymenter-fixture-password@localhost/paymenter_fixture?' + urllib.parse.urlencode({'unix_socket': str(sock)}), 'DB_USERNAME': 'root', 'DB_PASSWORD': '', 'DB_COLLATION': 'utf8mb4_unicode_ci', 'CACHE_STORE': 'file', 'QUEUE_CONNECTION': 'sync', 'SESSION_DRIVER': 'file', 'FILESYSTEM_DISK': 'local', 'MAIL_MAILER': 'log', 'TELEMETRY_ENABLED': 'false'}
+            env = {'APP_NAME': 'Fixture', 'APP_ENV': 'local', 'APP_KEY': app_key, 'APP_DEBUG': 'false', 'APP_URL': 'http://127.0.0.1:1', 'APP_TIMEZONE': 'America/New_York', 'APP_MAINTENANCE_DRIVER': 'file', 'DB_CONNECTION': 'mysql', 'DB_SOCKET': sock, 'DB_HOST': 'deliberately-unused.invalid', 'DB_DATABASE': 'deliberately_unused_database', 'DB_URL': 'mysql://paymenter_fixture_user:paymenter-fixture-password@localhost/paymenter_fixture?' + urllib.parse.urlencode({'unix_socket': sock}), 'DB_USERNAME': 'root', 'DB_PASSWORD': '', 'DB_COLLATION': 'utf8mb4_unicode_ci', 'CACHE_STORE': 'file', 'QUEUE_CONNECTION': 'sync', 'SESSION_DRIVER': 'file', 'FILESYSTEM_DISK': 'local', 'MAIL_MAILER': 'log', 'TELEMETRY_ENABLED': 'false'}
             # Direct removal precedes the first Laravel bootstrap.
             for cached in (app / 'bootstrap/cache').glob('*.php'):
                 if cached.name not in ('packages.php', 'services.php'):
@@ -355,7 +377,7 @@ def main():
             bridge = app / 'extensions/Others/Backups/bridge.php'
             cold = json.loads(execute([args.php, bridge, 'read', '--app', app, '--private-root', private]))
             expected_fp = hashlib.sha256(json.dumps(cold['billing'], sort_keys=True, separators=(',', ':')).encode()).hexdigest()
-            if cold['database']['name'] != 'paymenter_fixture' or cold['database']['host'] != 'localhost' or cold['database']['socket'] != str(sock):
+            if cold['database']['name'] != 'paymenter_fixture' or cold['database']['host'] != 'localhost' or cold['database']['socket'] != sock:
                 raise RuntimeError('cold DB_URL parser differs from native connection')
             before_tls = (app / '.env').read_text()
             (app / '.env').write_text(before_tls + 'MYSQL_ATTR_SSL_CA=/fixture/required-ca.pem\n')
@@ -376,6 +398,52 @@ def main():
                 raise RuntimeError('cold cached native overrides differ')
             (app / 'bootstrap/cache/config.php').unlink()
             cli = [sys.executable, '-I', '-B', app / 'extensions/Others/Backups/runtime/cli.py', '--app', app, '--private-root', private, '--bridge', bridge, '--php', args.php]
+            # Reproduce PHP-FPM/container-only DB settings: the fixture .env and
+            # Laravel config cache cannot supply or mask any database field.
+            dotenv_path = app / '.env'
+            original_dotenv = dotenv_path.read_text()
+            removed_db_lines = []
+            for line in original_dotenv.splitlines(keepends=True):
+                name = line.split('=', 1)[0].strip()
+                if name.startswith('DB_'):
+                    removed_db_lines.append(line)
+            if not removed_db_lines:
+                raise RuntimeError('env-only database fixture found no DB settings to remove')
+            env_directory = app / 'var'
+            env_directory.mkdir(exist_ok=True)
+            dotenv_target = env_directory / '.env'
+            dotenv_target.write_text('APP_KEY=' + app_key + '\n')
+            dotenv_target.chmod(0o644)
+            if os.geteuid() == 0:
+                os.chown(dotenv_target, 0, 0)
+            dotenv_path.unlink()
+            dotenv_path.symlink_to(dotenv_target)
+            if os.geteuid() == 0:
+                os.chown(dotenv_path, 0, 0, follow_symlinks=False)
+            if not dotenv_path.is_symlink() or dotenv_path.stat().st_mode & 0o777 != 0o644 or dotenv_target.stat().st_size != 60:
+                raise RuntimeError('symlinked minimal .env fixture differs')
+            if os.geteuid() == 0 and (dotenv_path.lstat().st_uid != 0 or dotenv_target.stat().st_uid != 0):
+                raise RuntimeError('symlinked minimal .env fixture ownership differs')
+            if any(line.split('=', 1)[0].strip().startswith('DB_') for line in dotenv_path.read_text().splitlines()):
+                raise RuntimeError('symlinked minimal .env fixture still contains DB settings')
+            config_cache = app / 'bootstrap/cache/config.php'
+            config_cache.unlink(missing_ok=True)
+            env_database = {
+                'DB_CONNECTION': 'mariadb', 'DB_HOST': '127.0.0.1', 'DB_PORT': str(db_port),
+                'DB_DATABASE': 'paymenter_fixture', 'DB_USERNAME': 'paymenter_fixture_user',
+                'DB_PASSWORD': 'paymenter-fixture-password', 'DB_PREFIX': '',
+            }
+            try:
+                result = json.loads(execute_env_only_database_parent(
+                    [args.php, checker, app, 'env-db-save'], env_database, cwd=app, timeout=420))
+                if result.get('env_only_mariadb_save') is not True:
+                    raise RuntimeError('env-only MariaDB save regression did not complete')
+            finally:
+                dotenv_path.unlink(missing_ok=True)
+                dotenv_target.unlink(missing_ok=True)
+                dotenv_path.write_text(original_dotenv)
+                config_cache.unlink(missing_ok=True)
+            results['env_only_mariadb_save'] = True
             # Exercise public JSON-stdin credentials and concurrent direct bridge
             # writers on one encrypted file, without touching host TLS/services.
             probe_url = 'https://fixture.example.invalid/billing'
@@ -597,7 +665,7 @@ def main():
                 restored = candidates[0].parent
             if hashlib.sha256((restored / 'isolated-restore-payload.bin').read_bytes()).hexdigest() != large_payload_sha256:
                 raise RuntimeError('large encrypted restore payload differs')
-            execute(['mariadb', '--no-defaults', '--socket=' + str(sock), '-uroot', 'paymenter_restore'], input=(payload / 'database.sql').read_bytes())
+            execute(['mariadb', '--no-defaults', '--socket=' + require_maria_socket_path(sock), '-uroot', 'paymenter_restore'], input=(payload / 'database.sql').read_bytes())
             restored_env = (restored / '.env').read_text().replace('DB_DATABASE=deliberately_unused_database', 'DB_DATABASE=paymenter_restore').replace('/paymenter_fixture?', '/paymenter_restore?')
             if 'APP_KEY=' + app_key not in restored_env:
                 raise RuntimeError('APP_KEY not preserved in archive')
@@ -620,7 +688,7 @@ def main():
             if (work / 'forbidden-config-cache.php').exists() or (work / 'forbidden-routes-cache.php').exists():
                 raise RuntimeError('inherited APP cache path was used')
             result = {'hostile_parent_environment_ignored': True, 'database_visibility': visibility, 'adapter_checks': results, 'open_basedir': open_basedir_results, 'restore': restored_results, 'encrypted_restore': encrypted_restore, 'full_artifact_sha256': hashlib.sha256(archive.read_bytes()).hexdigest(), 'release_sha256': release_sha256, 'native_login': True, 'native_migrations': 'no pending', 'native_source_unchanged': True}
-            (workbase / 'native-integration-last.json').write_text(json.dumps(result, indent=2) + '\n')
+            (work / 'native-integration-last.json').write_text(json.dumps(result, indent=2) + '\n')
             print(json.dumps(result))
     finally:
         for key, previous in previous_environment.items():
@@ -630,6 +698,7 @@ def main():
                 os.environ[key] = previous
         if not args.keep:
             shutil.rmtree(work)
+            shutil.rmtree(workbase)
 
 
 if __name__ == '__main__':

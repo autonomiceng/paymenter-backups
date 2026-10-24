@@ -207,6 +207,27 @@ payload={'status':503,'except':[],'secret':None,'redirect':None,'template':'fixt
             with self.assertRaisesRegex(BackupError, code):
                 inventory(self.envelope, defaults, 2, None)
 
+    def test_inventory_reports_unsupported_driver_separately_from_missing_name(self):
+        defaults = self.state.root / "dummy.cnf"
+        defaults.write_text("")
+        original = dict(self.envelope["database"])
+        self.envelope["database"] = {**original, "driver": "pgsql"}
+        with self.assertRaisesRegex(BackupError, "database-driver-unsupported"):
+            inventory(self.envelope, defaults, 2, None)
+        self.envelope["database"] = {**original, "driver": "mariadb", "name": ""}
+        with self.assertRaisesRegex(BackupError, "unsupported-database"):
+            inventory(self.envelope, defaults, 2, None)
+        self.envelope["database"] = original
+
+    def test_inventory_accepts_mariadb_driver(self):
+        defaults = self.state.root / "dummy.cnf"
+        defaults.write_text("")
+        self.envelope["database"]["driver"] = "mariadb"
+        self.envelope["tools"]["mysql"] = str(self.script(
+            "mariadb-inventory", "print('tables\\t0\\nroutines\\t0\\nevents\\t0\\ntriggers\\t0\\nGRANT SELECT')"))
+        result = inventory(self.envelope, defaults, 2, None)
+        self.assertEqual(result["counts"], {"tables": 0, "routines": 0, "events": 0, "triggers": 0})
+
     def test_inventory_omits_mariadb_authentication_hashes(self):
         defaults = self.state.root / "dummy.cnf"
         defaults.write_text("")

@@ -7,11 +7,10 @@ import math
 import pathlib
 import time
 import uuid
-from zoneinfo import ZoneInfo
 
 from .common import BackupError, atomic_json, private_file, read_json
 from .process import detach, process_identity
-from .config import schedule_settings
+from .config import configured_timezone, schedule_settings
 
 ACTIONS = ("run", "verify", "deliver", "retrieve", "retention", "destination-test", "delete")
 ACTIVE = ("pending", "deferred", "launching", "running")
@@ -97,7 +96,7 @@ def due_slots(settings, now=None, since=None, window_seconds=None, kind=None):
     if settings["schedule_frequency"] == "off":
         return
     now = time.time() if now is None else now
-    zone = ZoneInfo(settings["schedule_timezone"])
+    zone = configured_timezone(settings.get("schedule_timezone"))
     # Enumerating real UTC minutes handles local gaps naturally; repeated wall
     # slots share a single durable identifier and therefore execute once.
     window = min(settings["request_max_age"], 172800) if window_seconds is None else min(window_seconds, 8 * 86400)
@@ -132,7 +131,7 @@ def next_slot(settings, now=None, horizon=8 * 86400, kind=None):
     if settings["schedule_frequency"] == "off":
         return None
     now = time.time() if now is None else now
-    zone = ZoneInfo(settings["schedule_timezone"])
+    zone = configured_timezone(settings.get("schedule_timezone"))
     start = int(now // 60) + 1
     seen = {slot for slot, _ in due_slots(settings, now, window_seconds=86400)} if settings.get("settings_version", 1) == 2 else set()
     for minute in range(start, start + horizon // 60):
@@ -192,7 +191,7 @@ def sync_schedule(state, settings, now=None, settings_loader=None):
         return _sync_schedule(state, settings, time.time() if now is None else now)
 
 
-def tick(state, envelope, command_prefix, envelope_loader=None):
+def tick(state, envelope, command_prefix, envelope_loader=None, database_context=None):
     from .maintenance import recover
     # Independently usable recovery is called by the CLI before bridge reads too.
     if (state.app / "storage/framework/down").exists():
@@ -273,7 +272,11 @@ def tick(state, envelope, command_prefix, envelope_loader=None):
                 item = eligible[0]
                 item.update(status="launching", attempts=item["attempts"] + 1, last_attempt_at=now)
                 atomic_json(path(state, item["request_id"]), item)
-                pid = detach(command_prefix + ["request-worker", item["request_id"], "--execute"])
+                worker_command = command_prefix + ["request-worker", item["request_id"], "--execute"]
+                worker_input = None
+                if database_context is not None:
+                    worker_input = json.dumps({"_database_connection": database_context}).encode()
+                pid = detach(worker_command, worker_input)
                 item["worker"] = process_identity(pid)
                 atomic_json(path(state, item["request_id"]), item)
                 launched.append(item["request_id"])

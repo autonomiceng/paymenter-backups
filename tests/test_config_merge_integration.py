@@ -9,7 +9,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from paymenter_backups import config, key_cli, tools
+from paymenter_backups import config, engine, key_cli, tools
 from paymenter_backups.common import BackupError, State
 import test_archive_keys as archive_keys
 
@@ -40,10 +40,18 @@ class MergedBridgeTests(unittest.TestCase):
                                   "if (getenv('FIXTURE_REFUSE_ENCRYPTER')) { throw new RuntimeException('encrypter-constructed'); }\n}")
         prelude = (
             "$base = $identity['app'] ?? $argv[1];\n"
-            "$db = ['driver' => 'mysql', 'database' => 'fixture', 'username' => 'fixture', 'password' => 'fake-db-secret'];\n"
+            "$db = ['driver' => getenv('FIXTURE_DB_DRIVER') ?: 'mysql', 'host' => '127.0.0.1', 'port' => 3306, 'unix_socket' => '', 'database' => 'fixture', 'username' => 'fixture', 'password' => 'fake-db-secret'];\n"
             "$settings = json_decode(" + json.dumps(json.dumps(config.DEFAULTS)) + ", true);\n"
             "$extension = ['enabled' => true];\n"
             "$prefix = '';\n"
+            "$readPayload = static function (string $errorCode = 'credentials-invalid'): array {\n"
+            "    $bytes = stream_get_contents(STDIN, 65537);\n"
+            "    if (strlen($bytes) > 65536) { throw new RuntimeException($errorCode); }\n"
+            "    try { $value = json_decode($bytes === '' ? '{}' : $bytes, true, 16, JSON_THROW_ON_ERROR); }\n"
+            "    catch (Throwable $error) { throw new RuntimeException($errorCode); }\n"
+            "    if (!is_array($value)) { throw new RuntimeException($errorCode); }\n"
+            "    return $value;\n"
+            "};\n"
             "$pdo = new class {\n"
             "    public function query(string $query): object {\n"
             "        return new class {\n"
@@ -68,6 +76,21 @@ class MergedBridgeTests(unittest.TestCase):
 
     def saved(self):
         return self.call('fixture-read')
+
+    def test_mariadb_bridge_envelope_reaches_inventory(self):
+        environment = dict(os.environ, FIXTURE_DB_DRIVER='mariadb')
+        envelope = self.call('read-settings', env=environment)
+        self.assertEqual(envelope['database'], {
+            'driver': 'mariadb', 'host': '127.0.0.1', 'port': 3306,
+            'socket': '', 'name': 'fixture', 'user': 'fixture', 'password': 'fake-db-secret',
+        })
+        defaults = self.base / 'mariadb-client.cnf'
+        engine.defaults_file(defaults, envelope['database'])
+        output = b'tables\t0\nroutines\t0\nevents\t0\ntriggers\t0\nGRANT SELECT'
+        with patch.object(engine, 'run_tool', return_value=output) as run_tool:
+            result = engine.inventory(envelope, defaults, 5, None)
+        self.assertEqual(result['counts'], {'tables': 0, 'routines': 0, 'events': 0, 'triggers': 0})
+        self.assertEqual(run_tool.call_args.args[1][-1], 'fixture')
 
     def test_recovery_key_export_and_key_lifecycle_do_not_require_billing_row(self):
         from paymenter_backups.cli import parser
@@ -190,6 +213,10 @@ class MergedRuntimeTests(unittest.TestCase):
             private = base / 'private'
             private.mkdir(mode=0o700)
             source = archive_keys.PHP_RUNTIME.replace(
+                "namespace Illuminate\\Support\\Facades {",
+                "namespace Paymenter\\Extensions\\Others\\Backups { function posix_geteuid() { return getmyuid(); } }\n"
+                "namespace Illuminate\\Support\\Facades {")
+            source = source.replace(
                 "public static function where(...$args) { return new self; }",
                 "public static function __callStatic($name, $args) { return new self; }")
             source = source.replace(
@@ -203,13 +230,16 @@ class MergedRuntimeTests(unittest.TestCase):
     ]);
     $result['combined'] = array_values(array_filter(\Symfony\Component\Process\Process::$calls,
         static fn ($entry) => array_slice($entry[0], -2) === ['config', 'set']));
+    \Symfony\Component\Process\Process::$response = ['settings_version' => 2];
+    $result['schedule'] = \Paymenter\Extensions\Others\Backups\Runtime::command(['schedule', 'show']);
+    $result['schedule-call'] = end(\Symfony\Component\Process\Process::$calls);
 '''
             source = source.replace('    echo json_encode($result);', combined + '    echo json_encode($result);')
             script = base / 'runtime.php'
             script.write_text(source)
             process = subprocess.run([PHP, str(script), str(ROOT), str(app), str(private)],
                                      capture_output=True, timeout=10)
-            self.assertEqual(process.returncode, 0, process.stderr.decode())
+            self.assertEqual(process.returncode, 0, process.stderr.decode() + process.stdout.decode())
             result = json.loads(process.stdout)
             self.assertEqual(result['generated']['state'], 'pending')
             self.assertEqual(result['generic-command'], 'sensitive-command-refused')
@@ -219,6 +249,10 @@ class MergedRuntimeTests(unittest.TestCase):
             self.assertEqual(combined_input['credentials'], {'access_key': 'fake', 'secret_key': ' fake secret '})
             self.assertIsNone(combined_input['maintenance_probe_credentials'])
             self.assertEqual(combined_input['_actor'], 42)
+            self.assertEqual(combined_input['_database_connection']['connection']['driver'], 'mysql')
+            self.assertEqual(result['schedule'], {'settings_version': 2})
+            self.assertIn('--database-connection-stdin', result['schedule-call'][0])
+            self.assertEqual(json.loads(result['schedule-call'][1])['_database_connection']['connection']['driver'], 'mysql')
 
 
 class MergedConfigurationTests(unittest.TestCase):

@@ -1,9 +1,11 @@
 import json
+import math
 import pathlib
 import os
 import re
 import shutil
 import subprocess
+import datetime
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from .common import BackupError
@@ -39,11 +41,47 @@ LEGACY_KEYS = {'enabled', 'destination', 'schedule_frequency', 'schedule_time', 
                'retention_keep', 's3_retention_policy', 's3_retention_keep', 's3_retention_days',
                'cooperative_writers_acknowledged', 'external_state_acknowledged'}
 
+BRIDGE_ERROR_CODES = frozenset({
+    "private-pipe-required", "application-unavailable", "database-connection-invalid",
+    "database-pdo-driver-unavailable", "database-connection-failed", "database-driver-unsupported",
+    "database-tls-unsupported", "database-prefix-unsupported", "unsupported-database",
+    "extension-uninstalled", "native-secret-row-refused", "private-root-invalid",
+    "document-roots-invalid", "private-root-unavailable", "billing-settings-unreadable",
+    "installation-mismatch", "installation-missing", "credentials-unreadable", "credentials-invalid",
+    "bridge-command-invalid", "private-file-invalid", "private-write-failed",
+    "maintenance-probe-credentials-invalid", "maintenance-probe-origin-invalid",
+    "maintenance-probe-origin-mismatch", "archive-key-invalid", "archive-key-mismatch",
+    "archive-key-required", "archive-key-change-busy", "archive-key-pending-exists",
+    "archive-key-already-exists", "archive-key-limit", "archive-key-audit-failed",
+    "bridge-unavailable", "config-invalid", "archive-key-save-required", "archive-key-unavailable",
+    "archive-encryption-tool-missing", "archive-encryption-tool-unusable", "archive-encryption-failed",
+    "archive-decryption-failed", "archive-integrity-failed", "private-root-inside-docroot",
+    "maintenance-probe-http-saved",
+})
+
 
 def billing_fingerprint(billing):
     import hashlib
     value = {"daily_time": billing.get("daily_time"), "timezone": billing.get("timezone")}
     return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
+def configured_timezone(value, field="schedule_timezone"):
+    """Return a schedule zone, keeping UTC independent of installed tzdata."""
+    if not isinstance(value, str) or not value:
+        raise BackupError("config-invalid", field)
+    if value == "UTC":
+        return datetime.timezone.utc
+    try:
+        return ZoneInfo(value)
+    except ZoneInfoNotFoundError:
+        try:
+            ZoneInfo("UTC")
+        except ZoneInfoNotFoundError:
+            raise BackupError("timezone-data-unavailable", field, {"timezone": value}) from None
+        raise BackupError("config-invalid", field) from None
+    except (ValueError, OSError):
+        raise BackupError("config-invalid", field) from None
 
 
 def redact(value):
@@ -55,34 +93,102 @@ def redact(value):
     return value
 
 
+def validate_database_context(context):
+    """Check the short-lived Laravel connection snapshot before forwarding it."""
+    fields = {"driver", "host", "port", "unix_socket", "database", "username", "password", "prefix",
+              "options", "charset", "collation", "strict", "engine", "prefix_indexes"}
+    if (not isinstance(context, dict) or set(context) != {"schema_version", "default", "connection"}
+            or type(context["schema_version"]) is not int or context["schema_version"] != 1
+            or not isinstance(context["default"], str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", context["default"])
+            or not isinstance(context["connection"], dict) or set(context["connection"]) != fields):
+        raise BackupError("database-connection-invalid")
+    connection = context["connection"]
+    if connection.get("options") == []:
+        connection["options"] = {}
+    limits = {"driver": 64, "host": 1024, "unix_socket": 4096, "database": 256,
+              "username": 1024, "password": 8192, "prefix": 128, "charset": 64, "collation": 128}
+    for field, limit in limits.items():
+        value = connection[field]
+        if not isinstance(value, str) or len(value.encode()) > limit or "\0" in value:
+            raise BackupError("database-connection-invalid")
+    port = connection["port"]
+    valid_port = (isinstance(port, int) and not isinstance(port, bool)
+                  or isinstance(port, str) and re.fullmatch(r"[0-9]{1,5}", port))
+    if (not re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]{0,63}", connection["driver"])
+            or ";" in connection["host"] or ";" in connection["unix_socket"] or ";" in connection["database"]
+            or not valid_port
+            or not 1 <= int(port) <= 65535 or not isinstance(connection["options"], dict)
+            or len(connection["options"]) > 128 or not isinstance(connection["strict"], bool)
+            or not isinstance(connection["prefix_indexes"], bool)
+            or not (connection["engine"] is None or isinstance(connection["engine"], str)
+                    and len(connection["engine"].encode()) <= 128 and "\0" not in connection["engine"])):
+        raise BackupError("database-connection-invalid")
+    if connection["driver"] not in {"mysql", "mariadb"}:
+        raise BackupError("database-driver-unsupported")
+    for key, value in connection["options"].items():
+        if (not (isinstance(key, (int, str)) and not isinstance(key, bool))
+                or isinstance(key, str) and len(key.encode()) > 128
+                or not (isinstance(value, (bool, int, str, float)) and not isinstance(value, float) or isinstance(value, float) and math.isfinite(value))
+                or isinstance(value, str) and (len(value.encode()) > 4096 or "\0" in value)):
+            raise BackupError("database-connection-invalid")
+    try:
+        if len(json.dumps(context, separators=(",", ":"), ensure_ascii=False, allow_nan=False).encode()) > 32768:
+            raise BackupError("database-connection-invalid")
+    except (TypeError, ValueError, UnicodeError):
+        raise BackupError("database-connection-invalid") from None
+    return context
+
+
+def database_connection_environment(context):
+    """Return only the validated Laravel database variables for Artisan."""
+    context = validate_database_context(context)
+    connection = context["connection"]
+    return {
+        "DB_CONNECTION": context["default"],
+        # Prevent a .env DB_URL from overriding the captured active connection.
+        "DB_URL": "null",
+        "DB_HOST": connection["host"],
+        "DB_PORT": str(connection["port"]),
+        "DB_DATABASE": connection["database"],
+        "DB_USERNAME": connection["username"],
+        "DB_PASSWORD": connection["password"],
+        "DB_SOCKET": connection["unix_socket"],
+        "DB_PREFIX": connection["prefix"],
+        "DB_CHARSET": connection["charset"],
+        "DB_COLLATION": connection["collation"],
+        "DB_STRICT": "true" if connection["strict"] else "false",
+        "DB_ENGINE": "null" if connection["engine"] is None else connection["engine"],
+        "DB_PREFIX_INDEXES": "true" if connection["prefix_indexes"] else "false",
+    }
+
+
 def bridge(args, verb="read", payload=None):
     from .process import safe_environment
     if not args.bridge:
         raise BackupError("bridge-required")
     command = [args.php, args.bridge, verb, "--app", str(args.app), "--private-root", str(args.private_root)]
+    database_context = getattr(args, "database_connection", None)
+    if database_context is not None:
+        database_context = validate_database_context(database_context)
+        command.append("--database-connection-stdin")
+        payload = {"database_connection": database_context, "payload": payload}
+    input_bytes = json.dumps(payload).encode() if payload is not None else None
+    if input_bytes is not None and len(input_bytes) > 65536:
+        raise BackupError("input-too-large")
     try:
-        result = subprocess.run(command, input=json.dumps(payload).encode() if payload is not None else None,
+        result = subprocess.run(command, input=input_bytes,
                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30, close_fds=True, env=safe_environment())
-        if result.returncode:
+        for output in (result.stderr, result.stdout):
             try:
-                error = json.loads(result.stderr).get("error")
-            except (ValueError, AttributeError):
-                error = None
-            if error in {"credentials-unreadable", "database-tls-unsupported", "database-driver-unsupported",
-                         "database-prefix-unsupported", "native-secret-row-refused", "billing-settings-unreadable",
-                         "installation-mismatch", "private-root-invalid", "private-file-invalid",
-                         "private-root-inside-docroot", "private-pipe-required", "application-unavailable",
-                         "archive-key-invalid", "archive-key-mismatch", "archive-key-required", "archive-key-change-busy",
-                         "archive-key-pending-exists", "archive-key-already-exists", "archive-key-limit", "archive-key-audit-failed", "installation-missing",
-                         "archive-key-save-required", "archive-key-unavailable", "archive-encryption-tool-missing",
-                         "archive-encryption-tool-unusable", "archive-encryption-failed", "archive-decryption-failed", "archive-integrity-failed",
-                         "extension-uninstalled", "credentials-invalid", "private-write-failed", "maintenance-probe-credentials-invalid", "maintenance-probe-origin-mismatch",
-                         "maintenance-probe-origin-invalid", "maintenance-probe-http-saved", "document-roots-invalid"}:
-                raise BackupError(error)
+                value = json.loads(output)
+            except (ValueError, TypeError):
+                continue
+            if isinstance(value, dict) and "error" in value:
+                error = value["error"]
+                raise BackupError(error if isinstance(error, str) and error in BRIDGE_ERROR_CODES else "bridge-failed")
+        if result.returncode:
             raise BackupError("bridge-failed")
         value = json.loads(result.stdout)
-        if isinstance(value, dict) and value.get("error"):
-            raise BackupError(value["error"] if value["error"] in ("credentials-unreadable", "config-invalid") else "bridge-failed")
         return value
     except (OSError, ValueError, subprocess.TimeoutExpired):
         raise BackupError("bridge-failed") from None
@@ -175,7 +281,7 @@ def normalize(settings, adapt=True):
                     raise ValueError()
                 settings[key] = value
         except (TypeError, ValueError):
-            raise BackupError("config-invalid") from None
+            raise BackupError("config-invalid", key) from None
     if settings["settings_version"] == 1 and adapt:
         settings.update(from_legacy(settings))
     elif settings["settings_version"] == 2:
@@ -225,7 +331,7 @@ def schedule_settings(settings, kind):
 def validate(envelope):
     settings = envelope["settings"]
     if settings["settings_version"] not in (1, 2):
-        raise BackupError("config-invalid")
+        raise BackupError("config-invalid", "settings_version")
     if settings["settings_version"] == 2:
         if not settings["keep_local"] and not settings["upload_s3"]:
             raise BackupError("storage-required", "keep_local")
@@ -238,45 +344,55 @@ def validate(envelope):
             if any(type(day) is not int or day not in range(7) for day in days) or (settings[kind + "_schedule"] == "weekly" and not days):
                 raise BackupError("config-invalid", kind + "_weekdays")
             if settings["s3_retention_policy_" + kind] not in ("local-count", "count", "age", "keep-all"):
-                raise BackupError("config-invalid")
+                raise BackupError("config-invalid", "s3_retention_policy_" + kind)
             for key in ("retention_keep_" + kind, "s3_retention_keep_" + kind, "s3_retention_days_" + kind):
                 if settings[key] <= 0:
                     raise BackupError("config-invalid", key)
         if settings["database_schedule"] == "hourly" and (settings["database_every_hours"] not in (1, 2, 3, 4, 6, 8, 12) or not 0 <= settings["database_minute"] <= 59):
-            raise BackupError("config-invalid", "database_every_hours")
-    if settings["mode"] not in ("full-quiesced", "database-online") or settings["destination"] not in ("local", "s3"):
-        raise BackupError("config-invalid")
+            raise BackupError("config-invalid", "database_every_hours" if settings["database_every_hours"] not in (1, 2, 3, 4, 6, 8, 12) else "database_minute")
+    if settings["mode"] not in ("full-quiesced", "database-online"):
+        raise BackupError("config-invalid", "mode")
+    if settings["destination"] not in ("local", "s3"):
+        raise BackupError("config-invalid", "destination")
     if settings["schedule_frequency"] not in ("daily", "weekly"):
-        raise BackupError("config-invalid")
+        raise BackupError("config-invalid", "schedule_frequency")
     if settings["s3_retention_policy"] not in ("local-count", "count", "age", "keep-all"):
-        raise BackupError("config-invalid")
+        raise BackupError("config-invalid", "s3_retention_policy")
     try:
         hour, minute = settings["schedule_time"].split(":")
-        if len(hour) != 2 or len(minute) != 2 or not 0 <= int(hour) < 24 or not 0 <= int(minute) < 60:
-            raise ValueError()
-        ZoneInfo(settings["schedule_timezone"])
-        if any(type(day) is not int or day not in range(7) for day in settings["schedule_weekdays"]):
-            raise ValueError()
-        if settings["enabled"] and settings["schedule_frequency"] == "weekly" and not settings["schedule_weekdays"]:
-            raise ValueError()
-        for key in ("local_byte_budget", "capture_timeout", "billing_guard_max_age", "request_max_age", "s3_timeout", "s3_retries", "retention_keep", "s3_retention_keep", "s3_retention_days"):
+        valid_time = len(hour) == 2 and len(minute) == 2 and 0 <= int(hour) < 24 and 0 <= int(minute) < 60
+    except (KeyError, TypeError, ValueError):
+        raise BackupError("config-invalid", "schedule_time") from None
+    if not valid_time:
+        raise BackupError("config-invalid", "schedule_time")
+    configured_timezone(settings.get("schedule_timezone"))
+    days = settings.get("schedule_weekdays")
+    if not isinstance(days, list) or any(type(day) is not int or day not in range(7) for day in days):
+        raise BackupError("config-invalid", "schedule_weekdays")
+    if settings["enabled"] and settings["schedule_frequency"] == "weekly" and not days:
+        raise BackupError("config-invalid", "schedule_weekdays")
+    for key in ("local_byte_budget", "capture_timeout", "billing_guard_max_age", "request_max_age", "s3_timeout", "s3_retries", "retention_keep", "s3_retention_keep", "s3_retention_days"):
+        try:
             if isinstance(settings[key], bool) or int(settings[key]) <= 0:
-                raise ValueError()
-        for key in ("minimum_free_bytes", "drain_seconds", "lock_timeout", "billing_margin_seconds"):
+                raise BackupError("config-invalid", key)
+        except (KeyError, TypeError, ValueError, OverflowError):
+            raise BackupError("config-invalid", key) from None
+    for key in ("minimum_free_bytes", "drain_seconds", "lock_timeout", "billing_margin_seconds"):
+        try:
             if isinstance(settings[key], bool) or int(settings[key]) < 0:
-                raise ValueError()
-    except (KeyError, TypeError, ValueError, ZoneInfoNotFoundError):
-        raise BackupError("config-invalid") from None
+                raise BackupError("config-invalid", key)
+        except (KeyError, TypeError, ValueError, OverflowError):
+            raise BackupError("config-invalid", key) from None
     if not isinstance(settings["job_lock_paths"], list) or any(not isinstance(item, str) or not item.startswith("/") or "\0" in item for item in settings["job_lock_paths"]):
-        raise BackupError("config-invalid")
+        raise BackupError("config-invalid", "job_lock_paths")
     if not isinstance(settings["extra_docroots"], list) or any(not isinstance(item, str) or not item.startswith("/") or "\0" in item for item in settings["extra_docroots"]):
-        raise BackupError("config-invalid")
+        raise BackupError("config-invalid", "extra_docroots")
     if not isinstance(settings["local_path"], str) or (settings["local_path"] and not settings["local_path"].startswith("/")):
-        raise BackupError("config-invalid")
+        raise BackupError("config-invalid", "local_path")
     # Same rule as storage.prefix, the native editor and the admin form.
     prefix = settings["s3_prefix"].strip("/")
     if "\\" in prefix or any(part in ("", ".", "..") for part in prefix.split("/")):
-        raise BackupError("s3-prefix-invalid")
+        raise BackupError("s3-prefix-invalid", "s3_prefix")
     if settings["destination"] == "s3":
         if (settings["settings_version"] == 1 or not settings["s3_encryption"]) and not settings["plaintext_offsite_acknowledged"]:
             raise BackupError("plaintext-offsite-acknowledgement-required")

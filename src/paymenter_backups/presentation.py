@@ -195,6 +195,13 @@ def configuration(state, envelope, error=None, encryption_key_status=None):
         return {"available": False, "valid": False, "error": code(error) or "unknown"}
     settings = envelope["settings"]
     v2 = settings.get("settings_version", 1) == 2
+    from .tools import checks
+    tool_reports = envelope.get("tool_checks")
+    # Validation can stop before emitting tool reports. Resolve capabilities for
+    # the overview in that case so configuration errors do not become false
+    # "tool not found" diagnostics.
+    if not isinstance(tool_reports, dict):
+        tool_reports = checks(envelope, capabilities=error is not None)
     local_path = settings.get("local_path") or str(state.root / "backups" if v2 else state.default_destination())
     result = {"available": True, "valid": error is None, "error": code(error),
               "extension_enabled": bool(settings.get("extension_enabled", True)),
@@ -218,6 +225,10 @@ def configuration(state, envelope, error=None, encryption_key_status=None):
               "app_origin": origin((envelope.get("framework") or {}).get("app_url")),
               "billing": {"time": (envelope.get("billing") or {}).get("daily_time"), "timezone": (envelope.get("billing") or {}).get("timezone")},
               "admission": {}}
+    validation = envelope.get("validation_error")
+    field = validation.get("field") if isinstance(validation, dict) else None
+    if isinstance(field, str) and field in settings:
+        result["error_field"] = field
     from . import encryption
     namespace = envelope.get("archive_encryption_credentials") or {}
     records = namespace.get("keys") or {}
@@ -250,7 +261,6 @@ def configuration(state, envelope, error=None, encryption_key_status=None):
                                "probe_base": current_origin + urllib.parse.urlsplit(app_url).path if current_origin else None}
     from .discovery import cached, suggestions
     from .readiness import state_for, stores
-    from .tools import checks
     result['settings_version'] = settings.get('settings_version', 1)
     result['schedules'] = {'timezone': settings['schedule_timezone']}
     for kind in ('full', 'database'):
@@ -265,7 +275,7 @@ def configuration(state, envelope, error=None, encryption_key_status=None):
                 result['schedules'][kind]['next_at'] = next_slot(settings, kind=kind)
             elif kind == selected and settings['enabled']:
                 result['schedules'][kind]['next_at'] = next_slot(settings)
-        except (KeyError, ValueError):
+        except (BackupError, KeyError, ValueError):
             pass
     result['storage'] = {'keep_local': bool(settings['keep_local']), 'upload_s3': bool(settings['upload_s3']),
                          'local_path': local_path, 'default_local_path': str(state.root / 'backups'),
@@ -284,7 +294,7 @@ def configuration(state, envelope, error=None, encryption_key_status=None):
         user = str(os.getuid())
     result['checks'] = {'jobs': {key: jobs.get(key) for key in ('checked_at', 'state', 'error', 'items')} |
                        {'suggestions': suggestions(state, envelope), 'crontab_user': user},
-                       'stores': stores(envelope), 'tools': envelope.get('tool_checks') or checks(envelope),
+                       'stores': stores(envelope), 'tools': tool_reports,
                        'billing': billing_window(settings, envelope.get('billing', {}))}
     # Use the encryption module's delivery probe for the shared tool diagnostics.
     result['checks']['tools']['gpg'] = {
@@ -294,7 +304,7 @@ def configuration(state, envelope, error=None, encryption_key_status=None):
     if settings['enabled'] and error is None and not v2:
         result['schedule']['next_at'] = next_slot(settings)
     for mode in ('full-quiesced', 'database-online'):
-        proposed = dict(envelope, settings=dict(settings, mode=mode))
+        proposed = dict(envelope, settings=dict(settings, mode=mode), tool_checks=tool_reports)
         try:
             proposed_plan = plan(state, proposed, jobs, encryption_key_status={'code': result['encryption']['readiness_code']})
             items = proposed_plan['readiness_items']

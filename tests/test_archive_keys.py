@@ -63,6 +63,14 @@ $root = $argv[2];
 $verb = $argv[3];
 $identity = file_exists($root . '/installation.json') ? PrivateStore::read($root . '/installation.json') : ['installation_uuid' => '11111111-2222-4333-8444-555555555555'];
 $billingRows = ['app_url' => 'https://example.test'];
+$readPayload = static function (string $errorCode = 'credentials-invalid'): array {
+    $bytes = stream_get_contents(STDIN, 65537);
+    if (strlen($bytes) > 65536) { throw new RuntimeException($errorCode); }
+    try { $value = json_decode($bytes === '' ? '{}' : $bytes, true, 16, JSON_THROW_ON_ERROR); }
+    catch (Throwable $error) { throw new RuntimeException($errorCode); }
+    if (!is_array($value)) { throw new RuntimeException($errorCode); }
+    return $value;
+};
 if (str_starts_with($verb, 'fixture-')) {
     try { $input = json_decode(stream_get_contents(STDIN), true, 8, JSON_THROW_ON_ERROR); }
     catch (Throwable $error) { if ($verb === 'fixture-secret') { echo '{"valid":false}'; exit; } throw $error; }
@@ -462,6 +470,11 @@ namespace Illuminate\Support\Facades {
         }
     }
 }
+namespace Illuminate\Database {
+    class ConfigurationUrlParser {
+        public function parseConfiguration(array $connection): array { return $connection; }
+    }
+}
 namespace Filament { class Panel {} }
 namespace Filament\Support\Facades { class FilamentView { public static function spaUrlExceptions($urls) {} } }
 namespace App\Models {
@@ -518,6 +531,19 @@ namespace Symfony\Component\HttpFoundation {
 }
 namespace {
     umask(0077);
+    final class FixtureConfig {
+        public function get(string $name, mixed $fallback = null): mixed {
+            return match ($name) {
+                'database.default' => 'mysql',
+                'database.connections.mysql' => ['driver' => 'mysql', 'host' => '127.0.0.1', 'port' => 3306,
+                    'database' => 'fixture', 'username' => 'fixture', 'password' => 'fixture-secret', 'prefix' => '',
+                    'unix_socket' => '', 'options' => [], 'charset' => 'utf8mb4', 'collation' => 'utf8mb4_unicode_ci',
+                    'strict' => true, 'engine' => null, 'prefix_indexes' => true],
+                default => $fallback,
+            };
+        }
+    }
+    function app($name) { return new FixtureConfig; }
     function base_path() { return $GLOBALS['app']; }
     function abort_unless($condition, $code) { if (!$condition) { throw new \RuntimeException('denied-' . $code); } }
     function now() { return new class { public function addMinutes($minutes) { return $minutes * 60; } }; }
@@ -529,7 +555,7 @@ namespace {
     $result = [];
     \Symfony\Component\Process\Process::$response = ['fingerprint'=>$fp,'short'=>substr($fp,0,16),'state'=>'pending'];
     $result['generated'] = \Paymenter\Extensions\Others\Backups\Runtime::encryptionKey('generate');
-    $result['actor'] = json_decode(end(\Symfony\Component\Process\Process::$calls)[1],true)['actor'];
+    $result['actor'] = json_decode(end(\Symfony\Component\Process\Process::$calls)[1],true)['payload']['actor'];
     $result['url'] = \Paymenter\Extensions\Others\Backups\Runtime::recoveryKeyUrl();
     $result['signed'] = \Illuminate\Support\Facades\URL::$signed;
     foreach (['reveal','export'] as $action) {
@@ -594,7 +620,8 @@ class RecoveryKeyHttpTests(unittest.TestCase):
         self.assertEqual(result['generic-command'], 'sensitive-command-refused')
         self.assertEqual(result['selected'], 'a' * 64)
         self.assertEqual(result['revealed'], 'a' * 64)
-        self.assertEqual(result['reveal-input'], {'fingerprint': 'a' * 64, 'actor': 42})
+        self.assertEqual(result['reveal-input']['payload'], {'fingerprint': 'a' * 64, 'actor': 42})
+        self.assertEqual(result['reveal-input']['database_connection']['connection']['driver'], 'mysql')
         self.assertEqual(result['replacement'], 'archive-key-mismatch')
         self.assertEqual(result['denied'], 'denied-403')
         self.assertTrue(result['denied-before-child'])

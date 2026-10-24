@@ -3,10 +3,24 @@
 try {
     $base = realpath($argv[1] ?? '');
     $work = $base ? dirname($base) : '';
+    $workbase = $work ? dirname($work) : '';
+    $temporary = realpath(getenv('TMPDIR') ?: sys_get_temp_dir());
+    $temporaryInfo = $temporary ? stat($temporary) : false;
     $metadataPath = $work . '/ui-fixture.json';
     if (!$base || basename($base) !== 'app' || !str_starts_with(basename($work), 'ui-')
-        || basename(dirname($work)) !== '.native-work' || !is_file($metadataPath)) {
+        || !str_starts_with(basename($workbase), 'paymenter-backups-ui-') || dirname($workbase) !== $temporary
+        || !is_array($temporaryInfo) || ($temporaryInfo['mode'] & 0170000) !== 0040000
+        || !in_array($temporaryInfo['uid'], [0, posix_geteuid()], true)
+        || (($temporaryInfo['mode'] & 0022) !== 0 && ($temporaryInfo['mode'] & 01000) === 0)
+        || !is_file($metadataPath)) {
         throw new RuntimeException('A disposable ui- fixture is required');
+    }
+    foreach ([$workbase, $work] as $directory) {
+        $info = lstat($directory);
+        if (!is_array($info) || ($info['mode'] & 0170000) !== 0040000 || $info['uid'] !== posix_geteuid()
+            || ($info['mode'] & 0077) !== 0) {
+            throw new RuntimeException('Fixture directories must be owner-private');
+        }
     }
     $metadata = json_decode(file_get_contents($metadataPath), true, 32, JSON_THROW_ON_ERROR);
     if (($metadata['fixture_only'] ?? null) !== true || ($metadata['app'] ?? null) !== $base

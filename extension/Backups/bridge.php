@@ -4,6 +4,7 @@ use Illuminate\Encryption\Encrypter;
 use Illuminate\Foundation\Application;
 use Illuminate\Foundation\Bootstrap\LoadConfiguration;
 use Illuminate\Foundation\Bootstrap\LoadEnvironmentVariables;
+use Paymenter\Extensions\Others\Backups\DatabaseConnectionContext;
 use Paymenter\Extensions\Others\Backups\PrivateStore;
 
 umask(0077);
@@ -13,6 +14,7 @@ require_once __DIR__ . '/ProbeCredentials.php';
 require_once __DIR__ . '/ArchiveEncryption.php';
 require_once __DIR__ . '/CredentialInput.php';
 require_once __DIR__ . '/FrameworkStores.php';
+require_once __DIR__ . '/DatabaseConnectionContext.php';
 try {
     $outputStat = fstat(STDOUT);
     if (PHP_SAPI !== 'cli' || !$outputStat || !in_array($outputStat['mode'] & 0170000, [0010000, 0140000], true)) {
@@ -20,23 +22,71 @@ try {
     }
     $verb = $argv[1] ?? '';
     $arguments = [];
-    for ($i = 2; $i < count($argv); $i += 2) {
-        $arguments[$argv[$i]] = $argv[$i + 1] ?? '';
+    $databaseContextStdin = false;
+    for ($i = 2; $i < count($argv); $i++) {
+        if ($argv[$i] === '--database-connection-stdin') { $databaseContextStdin = true; continue; }
+        $key = $argv[$i];
+        if (!str_starts_with($key, '--') || !isset($argv[$i + 1])) { throw new RuntimeException('bridge-command-invalid'); }
+        $arguments[$key] = $argv[++$i];
     }
+    $databaseContext = null;
+    $stdinPayload = null;
+    $stdinPayloadRead = false;
+    if ($databaseContextStdin) {
+        $bytes = stream_get_contents(STDIN, 65537);
+        if (strlen($bytes) > 65536) { throw new RuntimeException('database-connection-invalid'); }
+        try { $request = json_decode($bytes, true, 16, JSON_THROW_ON_ERROR); }
+        catch (Throwable $error) { throw new RuntimeException('database-connection-invalid'); }
+        if (!is_array($request) || count($request) !== 2 || array_diff(array_keys($request), ['database_connection', 'payload'])
+            || !array_key_exists('database_connection', $request) || !array_key_exists('payload', $request)) {
+            throw new RuntimeException('database-connection-invalid');
+        }
+        $databaseContext = DatabaseConnectionContext::validate($request['database_connection']);
+        $stdinPayload = $request['payload'];
+    }
+    $readPayload = static function (string $errorCode = 'credentials-invalid') use (&$stdinPayloadRead, $databaseContextStdin, $stdinPayload) {
+        if ($stdinPayloadRead) { throw new RuntimeException($errorCode); }
+        $stdinPayloadRead = true;
+        if ($databaseContextStdin) {
+            if (!is_array($stdinPayload)) { throw new RuntimeException($errorCode); }
+            return $stdinPayload;
+        }
+        $bytes = stream_get_contents(STDIN, 65537);
+        if (strlen($bytes) > 65536) { throw new RuntimeException($errorCode); }
+        try { $value = json_decode($bytes === '' ? '{}' : $bytes, true, 16, JSON_THROW_ON_ERROR); }
+        catch (Throwable $error) { throw new RuntimeException($errorCode); }
+        if (!is_array($value)) { throw new RuntimeException($errorCode); }
+        return $value;
+    };
     $base = realpath($arguments['--app'] ?? '');
     if (!$base || !is_file($base . '/vendor/autoload.php')) { throw new RuntimeException('application-unavailable'); }
     require $base . '/vendor/autoload.php';
     $app = new Application($base);
     $app->bootstrapWith([LoadEnvironmentVariables::class, LoadConfiguration::class]);
     $config = $app->make('config');
-    $db = (new \Illuminate\Database\ConfigurationUrlParser)->parseConfiguration($config->get('database.connections.' . $config->get('database.default')));
+    if ($databaseContext !== null) {
+        $dbName = $databaseContext['default'];
+        $existing = $config->get('database.connections.' . $dbName, []);
+        $db = array_replace(is_array($existing) ? $existing : [], $databaseContext['connection']);
+    } else {
+        $dbName = $config->get('database.default');
+        $db = (new \Illuminate\Database\ConfigurationUrlParser)->parseConfiguration($config->get('database.connections.' . $dbName));
+    }
+    if (!class_exists(PDO::class) || !in_array('mysql', PDO::getAvailableDrivers(), true)) { throw new RuntimeException('database-pdo-driver-unavailable'); }
     $tlsOptions = [PDO::MYSQL_ATTR_SSL_CA, PDO::MYSQL_ATTR_SSL_CAPATH, PDO::MYSQL_ATTR_SSL_CERT, PDO::MYSQL_ATTR_SSL_KEY, PDO::MYSQL_ATTR_SSL_CIPHER, PDO::MYSQL_ATTR_SSL_VERIFY_SERVER_CERT];
     if (array_intersect(array_keys($db['options'] ?? []), $tlsOptions)) { throw new RuntimeException('database-tls-unsupported'); }
     if (!in_array($db['driver'] ?? '', ['mysql', 'mariadb'], true)) { throw new RuntimeException('database-driver-unsupported'); }
-    $dsn = !empty($db['unix_socket']) ? 'mysql:unix_socket=' . $db['unix_socket'] : 'mysql:host=' . $db['host'] . ';port=' . ($db['port'] ?? 3306);
-    $pdo = new PDO($dsn . ';dbname=' . $db['database'] . ';charset=utf8mb4', $db['username'], $db['password'], array_replace($db['options'] ?? [], [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION]));
+    $databaseName = $db['database'] ?? '';
+    if (!is_string($databaseName) || $databaseName === '') { throw new RuntimeException('unsupported-database'); }
     $prefix = $db['prefix'] ?? '';
-    if (!preg_match('/^[a-zA-Z0-9_]*$/D', $prefix)) { throw new RuntimeException('database-prefix-unsupported'); }
+    if (!is_string($prefix) || !preg_match('/^[a-zA-Z0-9_]*$/D', $prefix)) { throw new RuntimeException('database-prefix-unsupported'); }
+    $host = is_string($db['host'] ?? null) && $db['host'] !== '' ? $db['host'] : 'localhost';
+    $dsn = !empty($db['unix_socket']) ? 'mysql:unix_socket=' . $db['unix_socket'] : 'mysql:host=' . $host . ';port=' . ($db['port'] ?? 3306);
+    try {
+        $pdo = new PDO($dsn . ';dbname=' . $databaseName . ';charset=utf8mb4', $db['username'] ?? '', $db['password'] ?? '', array_replace($db['options'] ?? [], [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION]));
+    } catch (PDOException $error) {
+        throw new RuntimeException('database-connection-failed');
+    }
     $statement = $pdo->query("SELECT id, enabled FROM {$prefix}extensions WHERE extension='Backups' AND type='other' AND deleted_at IS NULL ORDER BY id DESC LIMIT 1");
     $extension = $statement->fetch(PDO::FETCH_ASSOC);
     if (!$extension) { throw new RuntimeException('extension-uninstalled'); }
@@ -91,10 +141,7 @@ try {
         exit;
     }
     if ($verb === 'credentials-check') {
-        $bytes = stream_get_contents(STDIN, 65537);
-        if (strlen($bytes) > 65536) { throw new RuntimeException('credentials-invalid'); }
-        $input = json_decode($bytes, true, 16, JSON_THROW_ON_ERROR);
-        if (!is_array($input)) { throw new RuntimeException('credentials-invalid'); }
+        $input = $readPayload('credentials-invalid');
         \Paymenter\Extensions\Others\Backups\CredentialInput::merge([], $input, $billingRows['app_url'] ?? $config->get('app.url', ''));
         echo json_encode(['valid' => true]) . "\n"; exit;
     }
@@ -135,11 +182,8 @@ try {
         } catch (Throwable $error) { throw new RuntimeException('credentials-unreadable'); }
     }
     if ($archiveAction !== null || $verb === 'credentials-rewrap') {
-        $input = stream_get_contents(STDIN, 65537);
-        if (strlen($input) > 65536) { throw new RuntimeException('archive-key-invalid'); }
-        try { $new = json_decode($input === '' ? '{}' : $input, true, 8, JSON_THROW_ON_ERROR); }
-        catch (Throwable $error) { throw new RuntimeException('archive-key-invalid'); }
-        if (!is_array($new) || array_diff(array_keys($new), ['actor', 'passphrase', 'fingerprint'])
+        $new = $readPayload('archive-key-invalid');
+        if (array_diff(array_keys($new), ['actor', 'passphrase', 'fingerprint'])
             || (isset($new['actor']) && (!is_int($new['actor']) || $new['actor'] < 0))) { throw new RuntimeException('archive-key-invalid'); }
         if (isset($credentials['archive_encryption']) && !is_array($credentials['archive_encryption'])) { throw new RuntimeException('archive-key-invalid'); }
         if ($verb === 'credentials-rewrap') {
@@ -170,10 +214,7 @@ try {
     }
     if (in_array($verb, ['credentials-write', 'maintenance-probe-credentials-write', 'credentials-merge'], true)) {
         if (!$identity['installation_uuid']) { throw new RuntimeException('installation-missing'); }
-        $input = stream_get_contents(STDIN, 65537);
-        if (strlen($input) > 65536) { throw new RuntimeException('credentials-invalid'); }
-        $new = json_decode($input, true, 8, JSON_THROW_ON_ERROR);
-        if (!is_array($new)) { throw new RuntimeException('credentials-invalid'); }
+        $new = $readPayload('credentials-invalid');
         if ($verb === 'credentials-merge') {
             $credentials = \Paymenter\Extensions\Others\Backups\CredentialInput::merge($credentials, $new, $billingRows['app_url'] ?? $config->get('app.url', ''));
         } elseif ($verb === 'credentials-write' && $new === ['clear' => true]) {
@@ -195,7 +236,7 @@ try {
     if ($verb !== 'read') { throw new RuntimeException('bridge-command-invalid'); }
     echo json_encode($readEnvelope($credentials), JSON_THROW_ON_ERROR | JSON_UNESCAPED_SLASHES) . "\n";
 } catch (Throwable $error) {
-    $safe = ['private-pipe-required', 'application-unavailable', 'database-driver-unsupported', 'database-tls-unsupported', 'database-prefix-unsupported', 'extension-uninstalled', 'native-secret-row-refused', 'private-root-invalid', 'document-roots-invalid', 'private-root-unavailable', 'billing-settings-unreadable', 'installation-mismatch', 'installation-missing', 'credentials-unreadable', 'credentials-invalid', 'bridge-command-invalid', 'private-file-invalid', 'private-write-failed', 'maintenance-probe-credentials-invalid', 'maintenance-probe-origin-invalid', 'maintenance-probe-origin-mismatch', 'archive-key-invalid', 'archive-key-mismatch', 'archive-key-required', 'archive-key-change-busy', 'archive-key-pending-exists', 'archive-key-already-exists', 'archive-key-limit', 'archive-key-audit-failed'];
+    $safe = ['private-pipe-required', 'application-unavailable', 'database-connection-invalid', 'database-pdo-driver-unavailable', 'database-connection-failed', 'database-driver-unsupported', 'database-tls-unsupported', 'database-prefix-unsupported', 'unsupported-database', 'extension-uninstalled', 'native-secret-row-refused', 'private-root-invalid', 'document-roots-invalid', 'private-root-unavailable', 'billing-settings-unreadable', 'installation-mismatch', 'installation-missing', 'credentials-unreadable', 'credentials-invalid', 'bridge-command-invalid', 'private-file-invalid', 'private-write-failed', 'maintenance-probe-credentials-invalid', 'maintenance-probe-origin-invalid', 'maintenance-probe-origin-mismatch', 'archive-key-invalid', 'archive-key-mismatch', 'archive-key-required', 'archive-key-change-busy', 'archive-key-pending-exists', 'archive-key-already-exists', 'archive-key-limit', 'archive-key-audit-failed'];
     $code = in_array($error->getMessage(), $safe, true) ? $error->getMessage() : 'bridge-unavailable';
     fwrite(STDERR, json_encode(['error' => $code]) . "\n"); exit(1);
 }

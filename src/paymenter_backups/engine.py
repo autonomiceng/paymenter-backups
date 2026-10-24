@@ -147,7 +147,12 @@ def plan(state, envelope, discovery_inventory=None, probe_locks=True, encryption
         errors.append(code)
         items.append({"code": code, "field": field, "detail": detail or {}})
     for name in ("php", "dump", "mysql", "tar", "gzip"):
-        binary = envelope.get("tools", {}).get(name)
+        report = (envelope.get("tool_checks") or {}).get(name)
+        binary = report.get("resolved") if isinstance(report, dict) and report.get("ok") else envelope.get("tools", {}).get(name)
+        if isinstance(report, dict) and not report.get("ok"):
+            add(report.get("code") or "tool-unavailable", name,
+                {"tool": name, "path": report.get("resolved") or report.get("configured")})
+            continue
         if not binary or not pathlib.Path(binary).is_file() or not os.access(binary, os.X_OK):
             add("tool-unavailable", name, {"tool": name, "path": binary})
     if not state.initialized:
@@ -264,7 +269,9 @@ def run_tool(name, command, timeout, **kwargs):
 
 def inventory(envelope, defaults, timeout, register):
     database = envelope["database"]
-    if database.get("driver") not in ("mysql", "mariadb") or not database.get("name"):
+    if database.get("driver") not in ("mysql", "mariadb"):
+        raise BackupError("database-driver-unsupported")
+    if not database.get("name"):
         raise BackupError("unsupported-database")
     # Database name never interpolates into SQL: DATABASE() reflects CLI selection.
     query = """SELECT 'tables', COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA=DATABASE() AND (TABLE_TYPE!='BASE TABLE' OR ENGINE!='InnoDB');

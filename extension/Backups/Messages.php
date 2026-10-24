@@ -16,7 +16,7 @@ final class Messages
         'billing-guard-stale' => 'Full backups need Paymenter\'s cron job to have run in the last few minutes, so they can avoid the daily billing run. Check the cron job on the Backups tab.',
         'billing-window-protected' => 'Waiting until Paymenter\'s daily billing run is over.',
         'schedule-overlaps-billing' => 'This time is too close to Paymenter\'s daily billing run. Pick a time outside the window shown under the time.',
-        'schedule-field-invalid' => 'A schedule setting is invalid. Open Settings and save.',
+        'schedule-field-invalid' => 'A schedule setting is invalid. Review the schedule settings and try again.',
         'schedule-kind-required' => 'Name the schedule: add --kind full or --kind database.',
         'scheduler-missing' => 'No cron job runs Paymenter\'s scheduler. Add the cron job shown on the Backups tab.',
         'job-lock-busy' => 'A Paymenter cron job was still running. The backup will try again next minute.',
@@ -50,7 +50,9 @@ final class Messages
         'request-not-launchable' => 'This task is no longer waiting to start. Refresh the task list before trying again.',
 
         // Configuration
-        'config-invalid' => 'A saved setting is invalid. Open Settings and save.',
+        'config-invalid' => 'A saved setting is invalid. Review the settings and try again.',
+        'timezone-data-unavailable' => 'The time zone database is unavailable. Install the tzdata package.',
+        'gzip-busybox' => 'gzip on this server is BusyBox; Backups needs GNU gzip',
         'storage-required' => 'Keep backups on this server, upload them to S3, or enable both under Storage.',
         'storage-untested' => 'Test storage with the current settings and recovery key before enabling automatic uploads.',
         'config-write-failed' => 'Paymenter couldn\'t save settings to its database. Check the database connection and try again.',
@@ -77,8 +79,11 @@ final class Messages
         'extension-uninstalled' => 'The Backups extension isn\'t installed.',
         'native-secret-row-refused' => 'A Backups setting in Paymenter\'s database looks like a secret. Ask your server administrator to remove that setting. Enter keys in Backups settings only.',
         'billing-settings-unreadable' => 'Paymenter\'s daily billing time isn\'t set. Save "Cron Job Time" in Paymenter\'s settings.',
+        'database-connection-invalid' => 'Paymenter\'s active database connection could not be read.',
+        'database-pdo-driver-unavailable' => 'The configured PHP CLI needs the PDO MySQL driver to read Paymenter\'s database.',
+        'database-connection-failed' => 'The configured PHP CLI could not connect to Paymenter\'s database. Check the active database settings and network access.',
         'database-tls-unsupported' => 'Databases that require TLS aren\'t supported yet.',
-        'database-driver-unsupported' => 'Only MySQL and MariaDB databases are supported.',
+        'database-driver-unsupported' => 'The active database driver must be MySQL or MariaDB.',
         'database-prefix-unsupported' => 'The database table prefix contains unsupported characters.',
         'application-unavailable' => 'Backups couldn\'t load Paymenter. Check that the site user can read Paymenter\'s folder.',
         'python-binary-invalid' => 'Python 3.10 or newer wasn\'t found at the configured path. Fix it under Advanced, Binary paths.',
@@ -145,7 +150,7 @@ final class Messages
         'external-durable-state-unsupported' => 'Paymenter keeps data outside its database and files, for example in Redis. Full backups need file or database storage. The Backups tab lists the .env changes.',
         'external-symlink-target' => 'Paymenter\'s folder has a symlink to a file outside the folder. Full backups can\'t include it.',
         'unsupported-db-objects' => 'The database has views, triggers, routines, events or non-InnoDB tables. These backups support InnoDB tables only.',
-        'unsupported-database' => 'Only MySQL and MariaDB databases are supported.',
+        'unsupported-database' => 'The active database connection has no database name.',
         'database-inventory-failed' => 'The database couldn\'t be inspected. Check the database user\'s permissions.',
         'database-changed-during-capture' => 'The database changed during the full backup. Something outside Paymenter\'s cron jobs wrote to it.',
         'capture-timeout' => 'The backup took longer than the backup time limit. Raise it under Advanced, Time limits.',
@@ -288,6 +293,7 @@ final class Messages
     {
         return [
             'schedule-overlaps-billing' => 'full_time', 's3-tls-required' => 's3_endpoint', 's3-endpoint-invalid' => 's3_endpoint',
+            'timezone-data-unavailable' => 'schedule_timezone', 'gzip-busybox' => 'gzip',
             's3-prefix-invalid' => 's3_prefix', 'plaintext-offsite-acknowledgement-required' => 'plaintext_offsite_acknowledged',
             'remote-configuration-required' => 's3_bucket',
             'private-root-invalid' => 'private_root', 'private-root-inside-docroot' => 'private_root',
@@ -469,6 +475,7 @@ final class Messages
      */
     public static function readinessItem(string $code, array $detail, array $context = []): array
     {
+        $field = is_string($context['field'] ?? null) ? $context['field'] : null;
         $suggest = $context['suggestions'] ?? [];
         $user = $context['crontab_user'] ?? null;
         $cronLead = 'Add this line to the crontab of ' . ($user ?: 'the site user') . ' with crontab -e. If a schedule:run line is already there, replace it.';
@@ -572,6 +579,10 @@ final class Messages
                 $name = self::TOOLS[$tool] ?? 'A required binary';
                 $path = is_string($detail['path'] ?? null) && $detail['path'] !== '' ? $detail['path'] : null;
                 return $item($name . ' not found', ($path ? 'Nothing usable at ' . $path . '. ' : '') . 'Fix the path under Binary paths, or leave it empty to detect it.', [], $settings('Go to Binary paths', 'advanced'));
+            case 'gzip-busybox':
+                return $item('Install GNU gzip', self::error($code), [], $settings('Go to Binary paths', 'advanced'));
+            case 'timezone-data-unavailable':
+                return $item('Install time zone data', self::error($code), [], $settings('Go to Settings', 'settings'));
             case 'billing-settings-unreadable':
                 return $item('Set Paymenter\'s billing time', 'Full backups avoid Paymenter\'s daily billing run and need its time. Save "Cron Job Time" in Paymenter\'s settings.');
             case 'recovery-required':
@@ -595,7 +606,6 @@ final class Messages
             case 'schedule-field-invalid':
                 return $item('Check your settings', self::error($code), [], $settings('Go to Settings', 'settings'));
         }
-        $field = is_string($context['field'] ?? null) ? $context['field'] : null;
         return $item(self::known($code) ? 'Needs attention' : 'Backups can\'t start', self::error($code), [], $field ? $settings('Go to Settings', 'settings') : null);
     }
 }

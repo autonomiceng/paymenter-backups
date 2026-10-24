@@ -25,10 +25,9 @@ def main():
     parser.add_argument('--gpg-reader', default='/usr/bin/gpg')
     args = parser.parse_args()
     os.umask(0o077)
-    work = pathlib.Path(args.work).resolve(strict=True)
-    root = pathlib.Path(__file__).resolve().parents[1]
-    if work.parent != root / '.native-work' or not work.name.startswith('native-integration-'):
-        raise RuntimeError('disposable native integration fixture required')
+    sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+    from fixture_environment import require_private_workroot
+    work = require_private_workroot(args.work, 'native-integration-', 'paymenter-backups-native-')
     app, private = work / 'app', work / 'private'
     runtime = app / 'extensions/Others/Backups/runtime'
     sys.path[:0] = [str(runtime / 'src'), str(runtime / 'sdk')]

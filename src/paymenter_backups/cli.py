@@ -10,13 +10,51 @@ import uuid
 from . import __version__
 from .artifacts import journal as artifact_journal, stream
 from .common import BackupError, State, atomic_json, read_json, private_file
-from .config import DEFAULTS, bridge, load, load_policy, normalize, redact, validate
+from .config import DEFAULTS, bridge, load, load_policy, normalize, redact, validate, validate_database_context
 from .engine import capture, export, plan, verify
 from .maintenance import recover, schedule_admission
 from .presentation import overview
 from .requests import cancel, create, list_requests, tick, worker
 from .native_writer import run as run_native_writer
 from .storage import clean_environment, delete_plan, delete_run, deliver, destination_test, retention, retrieve, retrieve_plan
+
+
+WRITER_CAUSE_CODES = frozenset({
+    "unrecognized", "command-not-registered", "busy", "config-invalid", "config-coordination-required",
+    "config-save-incomplete", "config-changed", "config-save-outcome-unknown", "config-write-failed",
+    "credentials-unreadable", "credentials-invalid", "maintenance-probe-credentials-invalid",
+    "maintenance-probe-origin-invalid", "maintenance-probe-origin-mismatch", "installation-missing",
+    "installation-mismatch", "private-file-invalid", "private-root-invalid", "billing-settings-unreadable",
+    "extension-uninstalled", "database-connection-invalid", "database-pdo-driver-unavailable",
+    "database-connection-failed", "private-pipe-required", "application-unavailable",
+    "database-driver-unsupported", "database-tls-unsupported",
+    "database-prefix-unsupported", "unsupported-database", "native-secret-row-refused",
+    "document-roots-invalid", "private-root-unavailable", "archive-key-change-busy",
+    "writer-timeout", "writer-process-failed", "writer-output-invalid", "writer-failed",
+})
+
+
+def native_writer_cause(stderr, stdout=b""):
+    """Return a fixed writer code for diagnostics without forwarding raw output."""
+    for value in (stderr, stdout):
+        if isinstance(value, bytes):
+            value = value.decode("utf-8", errors="replace")
+        if not isinstance(value, str) or not value:
+            continue
+        try:
+            refusal = json.loads(value)
+        except ValueError:
+            continue
+        if not isinstance(refusal, dict):
+            continue
+        detail = refusal.get("detail")
+        cause = detail.get("writer_cause") if isinstance(detail, dict) else None
+        if isinstance(cause, str) and cause in WRITER_CAUSE_CODES:
+            return cause
+        code = refusal.get("error")
+        if isinstance(code, str) and code in WRITER_CAUSE_CODES:
+            return code
+    return "unrecognized"
 
 
 def stdin_json():
@@ -41,6 +79,7 @@ def parser():
     result.add_argument("--private-root")
     result.add_argument("--bridge")
     result.add_argument("--php", default="/usr/bin/php")
+    result.add_argument("--database-connection-stdin", action="store_true", help=argparse.SUPPRESS)
     commands = result.add_subparsers(dest="command", required=True)
     for name, verbs in (("config", ("show", "set", "validate", "check")), ("schedule", ("show", "set", "enable", "disable"))):
         sub = commands.add_parser(name)
@@ -109,8 +148,19 @@ def native_settings(args, state, values, descriptors, actor=None, restore=False,
     if actor is not None:
         command.append("--actor=" + str(actor))
     try:
-        result = run_native_writer(command, json.dumps(values).encode(), descriptors)
+        writer_values = dict(values)
+        if getattr(args, "database_connection", None) is not None:
+            writer_values["_database_connection"] = args.database_connection
+        input_bytes = json.dumps(writer_values).encode()
+        if len(input_bytes) > 65536:
+            raise BackupError("input-too-large")
+        database_context = getattr(args, "database_connection", None)
+        if database_context is None:
+            result = run_native_writer(command, input_bytes, descriptors)
+        else:
+            result = run_native_writer(command, input_bytes, descriptors, database_context=database_context)
         if result.returncode:
+            cause = native_writer_cause(result.stderr, result.stdout)
             try:
                 refusal = json.loads(result.stderr)
                 code = refusal.get("error") if isinstance(refusal, dict) else None
@@ -118,10 +168,15 @@ def native_settings(args, state, values, descriptors, actor=None, restore=False,
                 code = None
             safe_refusals = {"config-changed", "credentials-unreadable", "credentials-invalid", "maintenance-probe-credentials-invalid",
                 "maintenance-probe-origin-mismatch", "maintenance-probe-origin-invalid", "installation-missing", "installation-mismatch",
-                "private-file-invalid", "private-root-invalid", "billing-settings-unreadable", "extension-uninstalled"}
-            if finalize and code in safe_refusals:
-                raise BackupError(code)
-            raise BackupError("config-write-failed" if code == "config-coordination-required" else "config-write-outcome-unknown")
+                "private-file-invalid", "private-root-invalid", "billing-settings-unreadable", "extension-uninstalled",
+                "database-connection-invalid", "database-pdo-driver-unavailable", "database-connection-failed", "database-driver-unsupported",
+                "database-tls-unsupported", "database-prefix-unsupported", "unsupported-database", "native-secret-row-refused",
+                "private-pipe-required", "application-unavailable",
+                "document-roots-invalid", "private-root-unavailable", "archive-key-change-busy"}
+            if code in safe_refusals and (finalize or code in {"database-connection-invalid", "database-driver-unsupported"}):
+                raise BackupError(code, detail={"writer_cause": cause})
+            failure_code = "config-write-failed" if code == "config-coordination-required" else "config-write-outcome-unknown"
+            raise BackupError(failure_code, detail={"writer_cause": cause})
         output = json.loads(result.stdout)
         if not isinstance(output, dict) or output.get("ok") is not True:
             raise ValueError()
@@ -256,27 +311,41 @@ def set_config(args, state, changes):
             finish_config_save(state)
         except (BackupError, OSError) as error:
             failure = error if isinstance(error, BackupError) else BackupError("config-save-failed")
+            writer_cause = failure.detail.get("writer_cause")
+            if writer_cause is not None and writer_cause not in WRITER_CAUSE_CODES:
+                writer_cause = "unrecognized"
+
+            def partial(result):
+                if writer_cause is not None:
+                    result["writer_cause"] = writer_cause
+                return result
+
             definite_credential_refusals = {"config-changed", "credentials-unreadable", "credentials-invalid", "maintenance-probe-credentials-invalid",
                 "maintenance-probe-origin-mismatch", "maintenance-probe-origin-invalid", "installation-missing", "installation-mismatch",
-                "private-file-invalid", "private-root-invalid", "billing-settings-unreadable", "extension-uninstalled"}
+                "private-file-invalid", "private-root-invalid", "billing-settings-unreadable", "extension-uninstalled",
+                "database-connection-invalid", "database-pdo-driver-unavailable", "database-connection-failed",
+                "database-driver-unsupported", "database-tls-unsupported", "database-prefix-unsupported",
+                "private-pipe-required", "application-unavailable",
+                "unsupported-database", "native-secret-row-refused", "document-roots-invalid",
+                "private-root-unavailable", "archive-key-change-busy"}
             if failure.code == "config-write-outcome-unknown" or credentials_attempted and not committed_credentials and failure.code not in definite_credential_refusals:
                 # A child may have committed before timing out or losing stdout.
                 # Keep the guard durable: workers refuse either possibly mixed
                 # pair until a later complete Save supplies the uncertain groups.
-                return {"updated": False, "credentials_updated": False, "maintenance_probe_credentials_updated": False,
-                        "partial": True, "error": "config-save-outcome-unknown", "settings_restored": False, "outcome_unknown": True}
+                return partial({"updated": False, "credentials_updated": False, "maintenance_probe_credentials_updated": False,
+                                "partial": True, "error": "config-save-outcome-unknown", "settings_restored": False, "outcome_unknown": True})
             if committed_credentials:
                 # Credentials are durably committed. Restoring destination rows
                 # would publish an old destination/new-key pair instead.
                 try:
                     finish_config_save(state)
                 except OSError:
-                    return {"updated": True, "credentials_updated": credentials is not None,
-                            "maintenance_probe_credentials_updated": probe_credentials is not None,
-                            "partial": True, "error": "config-save-outcome-unknown", "outcome_unknown": True}
-                return {"updated": True, "credentials_updated": credentials is not None,
-                        "maintenance_probe_credentials_updated": probe_credentials is not None,
-                        "partial": True, "error": failure.code, "settings_restored": False}
+                    return partial({"updated": True, "credentials_updated": credentials is not None,
+                                    "maintenance_probe_credentials_updated": probe_credentials is not None,
+                                    "partial": True, "error": "config-save-outcome-unknown", "outcome_unknown": True})
+                return partial({"updated": True, "credentials_updated": credentials is not None,
+                                "maintenance_probe_credentials_updated": probe_credentials is not None,
+                                "partial": True, "error": failure.code, "settings_restored": False})
             try:
                 # Cleanup may unlink the intent before directory fsync fails.
                 # Reestablish it before rollback, which can itself fail.
@@ -307,13 +376,13 @@ def set_config(args, state, changes):
                     if not pending_path.exists():
                         restore_configuration_file(pending_path, previous_intent or current_intent)
                 except OSError:
-                    return {"updated": False, "credentials_updated": False, "maintenance_probe_credentials_updated": False,
-                            "partial": True, "error": "config-save-outcome-unknown", "settings_restored": False, "outcome_unknown": True}
-                return {"updated": False, "credentials_updated": False, "maintenance_probe_credentials_updated": False,
-                        "partial": True, "error": failure.code, "settings_restored": False}
+                    return partial({"updated": False, "credentials_updated": False, "maintenance_probe_credentials_updated": False,
+                                    "partial": True, "error": "config-save-outcome-unknown", "settings_restored": False, "outcome_unknown": True})
+                return partial({"updated": False, "credentials_updated": False, "maintenance_probe_credentials_updated": False,
+                                "partial": True, "error": failure.code, "settings_restored": False})
             if skipped:
-                return {"updated": False, "credentials_updated": False, "maintenance_probe_credentials_updated": False,
-                        "partial": True, "error": failure.code, "settings_restored": False, "concurrent_settings_preserved": True}
+                return partial({"updated": False, "credentials_updated": False, "maintenance_probe_credentials_updated": False,
+                                "partial": True, "error": failure.code, "settings_restored": False, "concurrent_settings_preserved": True})
             raise failure
     return {"updated": True, "credentials_updated": credentials is not None,
             "maintenance_probe_credentials_updated": probe_credentials is not None}
@@ -325,6 +394,15 @@ def dispatch(args):
     args.private_root = args.private_root or str(pathlib.Path(args.app).parent / "paymenter-backups-private")
     args.bridge = args.bridge or str(pathlib.Path(args.app) / "extensions/Others/Backups/bridge.php")
     command = args.command
+    args.database_connection = None
+    args.command_input = None
+    if getattr(args, "database_connection_stdin", False):
+        request = stdin_json()
+        context = request.pop("_database_connection", None)
+        if context is None:
+            raise BackupError("database-connection-invalid")
+        args.database_connection = validate_database_context(context)
+        args.command_input = request
     initialize = command == "init" or command == "config" and args.verb == "set" or command == "schedule" and args.verb != "show" or command == "run" and args.execute
     preliminary = bridge(args, "read-settings") if initialize else None
     if preliminary:
@@ -409,14 +487,14 @@ def dispatch(args):
             return cancel(state, args.request_id)
         if not state.initialized:
             raise BackupError("installation-not-initialized")
-        return create(state, args.action, stdin_json())
+        return create(state, args.action, args.command_input if args.command_input is not None else stdin_json())
     if command == "config":
         if args.verb == "show":
             return redact(bridge(args))
         if args.verb == "set":
-            return set_config(args, state, stdin_json())
+            return set_config(args, state, args.command_input if args.command_input is not None else stdin_json())
         if args.verb == "check":
-            return check_config(args, state, stdin_json())
+            return check_config(args, state, args.command_input if args.command_input is not None else stdin_json())
         envelope = load(args)
         state.apply_policy(envelope["settings"])
         schedule_admission(state, envelope)
@@ -429,7 +507,7 @@ def dispatch(args):
                 raise BackupError("schedule-kind-required")
             if args.verb == "show":
                 return {key: value for key, value in settings.items() if key.startswith("schedule_") or key == "enabled"}
-            changes = stdin_json() if args.verb == "set" else {"enabled": args.verb == "enable"}
+            changes = (args.command_input if args.command_input is not None else stdin_json()) if args.verb == "set" else {"enabled": args.verb == "enable"}
             if set(changes) - {key for key in DEFAULTS if key.startswith("schedule_")} - {"enabled"}:
                 raise BackupError("schedule-field-invalid")
         else:
@@ -449,7 +527,7 @@ def dispatch(args):
             elif args.verb == "enable":
                 changes = {kind + "_schedule": settings[kind + "_schedule"] if settings[kind + "_schedule"] != "off" else ("daily" if kind == "full" else "hourly")}
             else:
-                values = stdin_json()
+                values = args.command_input if args.command_input is not None else stdin_json()
                 mapping = {"frequency": kind + "_schedule", "time": kind + "_time", "weekdays": kind + "_weekdays",
                            "timezone": "schedule_timezone"}
                 if kind == "database":
@@ -507,7 +585,10 @@ def dispatch(args):
         # sys.argv[0] is a release wrapper, preserving its isolated runtime paths.
         prefix = [envelope["tools"].get("python", sys.executable), "-I", str(pathlib.Path(sys.argv[0]).resolve()),
                   "--app", args.app, "--private-root", args.private_root, "--bridge", args.bridge, "--php", args.php]
-        return tick(state, envelope, prefix, envelope_loader=lambda: load(args, coordinated=False))
+        database_context = args.database_connection
+        if database_context is not None:
+            prefix.append("--database-connection-stdin")
+        return tick(state, envelope, prefix, envelope_loader=lambda: load(args, coordinated=False), database_context=database_context)
     raise BackupError("command-invalid")
 
 

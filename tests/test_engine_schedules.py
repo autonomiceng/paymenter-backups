@@ -1082,7 +1082,162 @@ class ReadinessTests(PrivateFixture):
             self.assertEqual(set(report), {'configured', 'resolved', 'ok', 'code'})
 
 
+class TimezoneDataTests(PrivateFixture):
+    def setUp(self):
+        super().setUp()
+        self.settings.update(settings_version=1, enabled=True, schedule_frequency='daily',
+                             schedule_time='02:00', schedule_timezone='UTC')
+        config.normalize(self.settings)
+        self.envelope['settings'] = self.settings
+        self.envelope['tools'] = {name: sys.executable for name in tools.CANDIDATES}
+
+    def valid_toolchain(self):
+        bindir = self.base / 'valid-tools'
+        bindir.mkdir()
+        (bindir / 'python3').symlink_to(sys.executable)
+        programs = {
+            'php': "printf 'cli 8.3.35\\n'",
+            'mariadb-dump': "printf 'mariadb-dump 11.8.9\\n'",
+            'mariadb': "printf 'mariadb 11.8.9\\n'",
+            'tar': "printf 'tar (GNU tar) 1.35\\n'",
+            'gzip': "printf 'gzip 1.12\\nCopyright (C) 2025 Free Software Foundation, Inc.\\n'",
+        }
+        for name, output in programs.items():
+            binary = bindir / name
+            binary.write_text('#!/bin/sh\n' + output + '\n')
+            binary.chmod(0o700)
+        self.envelope['tools'] = {name: str(bindir / binary) for name, binary in {
+            'python': 'python3', 'php': 'php', 'dump': 'mariadb-dump', 'mysql': 'mariadb',
+            'tar': 'tar', 'gzip': 'gzip', 'gpg': 'missing-gpg',
+        }.items()}
+
+    def without_timezone_data(self):
+        import zoneinfo
+        empty = self.base / 'empty-zoneinfo'
+        empty.mkdir()
+        previous = zoneinfo.TZPATH
+        zoneinfo.reset_tzpath([str(empty)])
+        zoneinfo.ZoneInfo.clear_cache()
+        find_tzfile = patch.object(zoneinfo._tzpath, 'find_tzfile', return_value=None)
+        load_tzdata = patch.object(zoneinfo._common, 'load_tzdata', side_effect=zoneinfo.ZoneInfoNotFoundError)
+        find_tzfile.start()
+        load_tzdata.start()
+
+        def restore():
+            load_tzdata.stop()
+            find_tzfile.stop()
+            zoneinfo.reset_tzpath(previous)
+            zoneinfo.ZoneInfo.clear_cache()
+
+        self.addCleanup(restore)
+
+    def test_utc_configuration_and_next_slot_work_without_timezone_data(self):
+        self.without_timezone_data()
+        self.valid_toolchain()
+        config.validate(self.envelope)
+        self.assertIsInstance(requests.next_slot(self.settings, now=instant('2026-10-23T00:00:00+00:00')), int)
+        self.assertTrue(list(requests.due_slots(self.settings, now=instant('2026-10-23T02:00:10+00:00'))))
+
+    def test_other_zones_report_missing_timezone_data_and_field(self):
+        self.without_timezone_data()
+        self.settings['schedule_timezone'] = 'Europe/Berlin'
+        with self.assertRaises(BackupError) as refused:
+            config.validate(self.envelope)
+        self.assertEqual((refused.exception.code, refused.exception.field),
+                         ('timezone-data-unavailable', 'schedule_timezone'))
+
+    def test_invalid_single_schedule_value_names_its_field(self):
+        self.settings['schedule_time'] = 'not-a-time'
+        with self.assertRaises(BackupError) as refused:
+            config.validate(self.envelope)
+        self.assertEqual((refused.exception.code, refused.exception.field), ('config-invalid', 'schedule_time'))
+
+    def test_bad_timezone_key_errors_are_field_specific_and_overview_survives(self):
+        self.settings['schedule_timezone'] = 'Europe/Berlin'
+        for failure in (ValueError('invalid zone key'), OSError('zone file unreadable')):
+            with self.subTest(error=type(failure).__name__), patch.object(config, 'ZoneInfo', side_effect=failure):
+                with patch.object(cli, 'bridge', return_value=copy.deepcopy(self.envelope)):
+                    args = SimpleNamespace(app=str(self.app), private_root=str(self.state.root), bridge='fixture',
+                                           command='overview', offline=False)
+                    result = cli.dispatch(args)
+                self.assertFalse(result['configuration']['valid'])
+                self.assertEqual(result['configuration']['error_field'], 'schedule_timezone')
+
+    def test_overview_uses_detected_tools_when_a_setting_stops_validation(self):
+        bindir = self.base / 'tools'
+        bindir.mkdir()
+        (bindir / 'python3').symlink_to(sys.executable)
+        programs = {
+            'php': "printf 'cli 8.3.35\\n'",
+            'mariadb-dump': "printf 'mariadb-dump 11.8.9\\n'",
+            'mariadb': "printf 'mariadb 11.8.9\\n'",
+            'tar': "printf 'tar (GNU tar) 1.35\\n'",
+            'gzip': "printf 'gzip 1.12\\nCopyright (C) 2025 Free Software Foundation, Inc.\\n'",
+        }
+        for name, output in programs.items():
+            binary = bindir / name
+            binary.write_text('#!/bin/sh\n' + output + '\n')
+            binary.chmod(0o700)
+        self.envelope['tools'] = {name: '' for name in tools.CANDIDATES}
+        self.settings['schedule_time'] = 'not-a-time'
+        with patch.object(tools, 'TRUSTED_PATH', str(bindir)):
+            try:
+                config.validate(self.envelope)
+            except BackupError as error:
+                self.envelope['validation_error'] = {'field': error.field, 'detail': error.detail}
+                result = presentation.overview(self.state, self.envelope, error.code)
+            else:
+                self.fail('the malformed saved setting must stop validation before tool discovery')
+        configuration = result['configuration']
+        reports = configuration['checks']['tools']
+        for name in ('dump', 'mysql', 'tar', 'gzip'):
+            with self.subTest(tool=name):
+                self.assertTrue(reports[name]['ok'], reports[name])
+                self.assertTrue(reports[name]['resolved'], reports[name])
+                self.assertNotIn('tool-unavailable', configuration['admission']['database-online'])
+        self.assertTrue(any(item['code'] == 'config-invalid' and item['field'] == 'schedule_time'
+                            for item in configuration['readiness']['database-online']['items']))
+
+    def test_busybox_gzip_is_reported_as_unsupported_in_overview(self):
+        bindir = self.base / 'busybox-tools'
+        bindir.mkdir()
+        (bindir / 'python3').symlink_to(sys.executable)
+        programs = {
+            'php': "printf 'cli 8.3.35\\n'",
+            'mariadb-dump': "printf 'mariadb-dump 11.8.9\\n'",
+            'mariadb': "printf 'mariadb 11.8.9\\n'",
+            'tar': "printf 'tar (GNU tar) 1.35\\n'",
+            'gzip': "if [ \"$1\" = '--version' ]; then printf 'gzip: unrecognized option: version\\n' >&2; exit 1; fi; printf 'BusyBox v1.35.0\\n' >&2; exit 1",
+        }
+        for name, output in programs.items():
+            binary = bindir / name
+            binary.write_text('#!/bin/sh\n' + output + '\n')
+            binary.chmod(0o700)
+        self.envelope['tools'] = {name: '' for name in tools.CANDIDATES}
+        self.settings['schedule_time'] = 'not-a-time'
+        with patch.object(tools, 'TRUSTED_PATH', str(bindir)):
+            try:
+                config.validate(self.envelope)
+            except BackupError as error:
+                self.assertEqual((error.code, error.field), ('config-invalid', 'schedule_time'))
+                self.envelope['validation_error'] = {'field': error.field, 'detail': error.detail}
+                result = presentation.overview(self.state, self.envelope, error.code)
+            else:
+                self.fail('the invalid saved setting must reproduce the early validation stop')
+        configuration = result['configuration']
+        self.assertEqual(configuration['checks']['tools']['gzip']['code'], 'gzip-busybox')
+        self.assertIn('gzip-busybox', configuration['admission']['database-online'])
+        self.assertTrue(any(item['code'] == 'gzip-busybox' and item['field'] == 'gzip'
+                            for item in configuration['readiness']['database-online']['items']))
+
+
 class ToolTests(PrivateFixture):
+    def test_gzip_rejects_non_gnu_non_busybox_binary(self):
+        binary = pathlib.Path(self.script('lookalike-gzip', "print('gzip 1.14')"))
+        result = tools.inspect('gzip', str(binary))
+        self.assertFalse(result['ok'])
+        self.assertEqual(result['code'], 'tool-capability-unsupported')
+
     def test_trusted_detection_ignores_path_cwd_and_preserves_explicit_pin(self):
         hostile = self.script('python3', 'raise SystemExit("secret-canary")')
         with patch.dict(os.environ, {'PATH': str(self.base)}):

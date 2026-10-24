@@ -3,7 +3,7 @@
 
 No native scheduler is launched. All accounts and database credentials are fake.
 The owning process closes HTTP/MariaDB on SIGTERM, SIGINT, parent death or TTL.
-State and logs remain under ignored .native-work for inspection after cleanup.
+State and logs remain under a private random directory beneath TMPDIR.
 """
 import argparse
 import base64
@@ -20,11 +20,12 @@ import subprocess
 import stat
 import sys
 import tarfile
-import tempfile
 import time
 
-from native_integration import ROOT, execute, fetch, hashes, fixture_http, maria, port
-from fixture_environment import child_environment
+from native_integration import (
+    ROOT, execute, fetch, hashes, fixture_http, maria, port, require_maria_socket_path,
+)
+from fixture_environment import child_environment, private_work_directory, require_private_workroot
 
 
 @contextlib.contextmanager
@@ -102,9 +103,7 @@ def command_prefix(metadata):
 
 
 def controlled_metadata(work):
-    work = pathlib.Path(work).resolve()
-    if work.parent != (ROOT / '.native-work').resolve() or not work.name.startswith('ui-'):
-        raise RuntimeError('UI controls require a disposable ui- workroot')
+    work = require_private_workroot(work, 'ui-', 'paymenter-backups-ui-')
     metadata = json.loads((work / 'ui-fixture.json').read_text())
     if metadata['work'] != str(work) or metadata['app'] != str(work / 'app') or metadata['private_root'] != str(work / 'private'):
         raise RuntimeError('fixture identity mismatch')
@@ -117,9 +116,7 @@ def controlled_metadata(work):
 def resume(args):
     """Restart a closed UI owner's same fake datadir without changing its rows."""
     os.umask(0o077)
-    work = pathlib.Path(args.work).resolve()
-    if work.parent != (ROOT / '.native-work').resolve() or not work.name.startswith('ui-'):
-        raise RuntimeError('resume requires a disposable ui- workroot')
+    work = require_private_workroot(args.work, 'ui-', 'paymenter-backups-ui-')
     metadata = json.loads((work / 'ui-fixture.json').read_text())
     if metadata['work'] != str(work) or metadata['app'] != str(work / 'app') or metadata['private_root'] != str(work / 'private') or metadata['socket'] != str(work / 'db.sock') or metadata['fixture_only'] is not True or metadata['native_scheduler_started'] is not False:
         raise RuntimeError('resume fixture identity mismatch')
@@ -136,7 +133,7 @@ def resume(args):
             raise RuntimeError('resume owner-private paths required')
     # Compare immutable native source directly to the pinned official archive.
     from fetch_fixture import SHA256
-    archive = ROOT / '.native-work/paymenter-v1.5.9.tar.gz'
+    archive = work.parent / 'paymenter-v1.5.9.tar.gz'
     if hashlib.sha256(archive.read_bytes()).hexdigest() != SHA256:
         raise RuntimeError('resume official release pin')
     original = hashes(app)
@@ -290,16 +287,16 @@ def serve(args):
         shutdown = True
     signal.signal(signal.SIGTERM, stop)
     signal.signal(signal.SIGINT, stop)
-    workbase = ROOT / '.native-work'
-    workbase.mkdir(exist_ok=True)
-    work = pathlib.Path(tempfile.mkdtemp(prefix='ui-', dir=workbase))
+    workbase = private_work_directory('paymenter-backups-ui-')
+    work = private_work_directory('ui-', workbase)
     print(json.dumps({'preparing': str(work)}), flush=True)
     app = fetch(work / 'app', workbase / 'paymenter-v1.5.9.tar.gz')
     original = hashes(app)
     private = work / 'private'
     private.mkdir(mode=0o700)
-    with maria(work) as sock:
-        execute(['mariadb', '--no-defaults', '--socket=' + str(sock), '-uroot', '-e',
+    with maria(work) as (sock, _db_port):
+        socket_path = require_maria_socket_path(sock)
+        execute(['mariadb', '--no-defaults', '--socket=' + socket_path, '-uroot', '-e',
                  "CREATE DATABASE paymenter_fixture; CREATE USER 'paymenter_fixture_user'@'localhost' IDENTIFIED BY 'paymenter-fixture-password'; GRANT SELECT,INSERT,UPDATE,DELETE,CREATE,ALTER,INDEX,DROP,REFERENCES ON paymenter_fixture.* TO 'paymenter_fixture_user'@'localhost';"])
         http_port = args.port or port()
         import ipaddress
@@ -315,7 +312,7 @@ def serve(args):
                'APP_KEY': 'base64:' + base64.b64encode(os.urandom(32)).decode(),
                'APP_DEBUG': 'false', 'APP_URL': url, 'APP_TIMEZONE': 'UTC',
                'APP_MAINTENANCE_DRIVER': 'file', 'DB_CONNECTION': 'mysql',
-               'DB_SOCKET': str(sock), 'DB_HOST': 'localhost',
+               'DB_SOCKET': socket_path, 'DB_HOST': 'localhost',
                'DB_DATABASE': 'paymenter_fixture', 'DB_USERNAME': 'paymenter_fixture_user',
                'DB_PASSWORD': 'paymenter-fixture-password', 'DB_COLLATION': 'utf8mb4_unicode_ci',
                'CACHE_STORE': 'file', 'QUEUE_CONNECTION': 'sync', 'SESSION_DRIVER': 'file',
@@ -328,7 +325,7 @@ def serve(args):
         execute([args.php, 'artisan', 'passport:keys', '--force'], cwd=app)
         execute([args.php, php_helper(work), app, 'users', url])
         metadata = {'work': str(work), 'app': str(app), 'private_root': str(private),
-                    'socket': str(sock), 'php': args.php, 'owner_pid': os.getpid(),
+                    'socket': socket_path, 'php': args.php, 'owner_pid': os.getpid(),
                     'url': url, 'admin_url': url + '/admin/backups',
                     'login_url': url + '/login',
                     'admin_email': 'ui-admin@example.invalid', 'limited_email': 'ui-limited@example.invalid',
