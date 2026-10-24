@@ -216,6 +216,52 @@ def record(line, app, source, label, working=None, continuous=False):
     return item
 
 
+def systemd_inventory(manager, read, verb, kind):
+    flags = ['--all'] if verb != 'list-unit-files' else []
+    if verb != 'list-timers':
+        flags += ['--type=service']
+    try:
+        value = json.loads(read(manager + [verb, *flags, '--output=json', '--no-pager']))
+        if not isinstance(value, list):
+            raise ValueError()
+        return value
+    except (ValueError, BackupError) as failure:
+        if isinstance(failure, BackupError) and failure.code != 'child-failed':
+            raise
+        table = read(manager + [verb, *flags, '--no-legend', '--plain', '--full', '--no-pager'])
+        value = []
+        for line in table.splitlines():
+            words = line.split()
+            if not words:
+                continue
+            if kind == 'timer':
+                if len(words) < 2 or not words[-2].endswith('.timer') or not UNIT_NAME.fullmatch(words[-1]):
+                    raise ValueError()
+                value.append({'activates': words[-1]})
+            elif kind == 'service':
+                if len(words) < 4 or not UNIT_NAME.fullmatch(words[0]):
+                    raise ValueError()
+                value.append({'unit': words[0], 'active': words[2]})
+            else:
+                if len(words) < 2 or not UNIT_NAME.fullmatch(words[0]):
+                    raise ValueError()
+                value.append({'unit_file': words[0], 'state': words[1]})
+        return value
+
+
+def systemd_service_units(manager, read):
+    """Read standalone services that can run, including enabled inactive units."""
+    services = systemd_inventory(manager, read, 'list-units', 'service')
+    files = systemd_inventory(manager, read, 'list-unit-files', 'file')
+    if any(len(rows) > 1000 or any(not isinstance(row, dict) for row in rows) for rows in (services, files)):
+        raise ValueError()
+    units = [row['unit'] for row in services if row.get('active') in ('active', 'activating')]
+    units.extend(row.get('unit_file', row.get('unit')) for row in files if row.get('state') in ('enabled', 'enabled-runtime', 'static'))
+    if any(not isinstance(unit, str) or not UNIT_NAME.fullmatch(unit) for unit in units) or len(set(units)) > 1000:
+        raise ValueError()
+    return set(units)
+
+
 def systemd(app, tools):
     executable = tools.get('systemctl', '/usr/bin/systemctl')
     # No system manager on a cron-only host. An expected but unreadable manager
@@ -232,49 +278,15 @@ def systemd(app, tools):
         if remaining <= 0:
             raise BackupError('job-discovery-incomplete')
         return run(command, remaining).decode()
-    def inventory(manager, verb, kind):
-        flags = ['--all'] if verb != 'list-unit-files' else []
-        if verb != 'list-timers':
-            flags += ['--type=service']
-        try:
-            value = json.loads(read(manager + [verb, *flags, '--output=json', '--no-pager']))
-            if not isinstance(value, list):
-                raise ValueError()
-            return value
-        except (ValueError, BackupError) as failure:
-            if isinstance(failure, BackupError) and failure.code != 'child-failed':
-                raise
-            table = read(manager + [verb, *flags, '--no-legend', '--plain', '--full', '--no-pager'])
-            value = []
-            for line in table.splitlines():
-                words = line.split()
-                if not words:
-                    continue
-                if kind == 'timer':
-                    if len(words) < 2 or not words[-2].endswith('.timer') or not UNIT_NAME.fullmatch(words[-1]):
-                        raise ValueError()
-                    value.append({'activates': words[-1]})
-                elif kind == 'service':
-                    if len(words) < 4 or not UNIT_NAME.fullmatch(words[0]):
-                        raise ValueError()
-                    value.append({'unit': words[0], 'active': words[2]})
-                else:
-                    if len(words) < 2 or not UNIT_NAME.fullmatch(words[0]):
-                        raise ValueError()
-                    value.append({'unit_file': words[0], 'state': words[1]})
-            return value
     result = []
     for manager in managers:
         # Include standalone enabled/running services, not just timer targets.
         try:
-            timers = inventory(manager, 'list-timers', 'timer')
-            services = inventory(manager, 'list-units', 'service')
-            files = inventory(manager, 'list-unit-files', 'file')
-            if any(not isinstance(rows, list) or len(rows) > 1000 for rows in (timers, services, files)):
+            timers = systemd_inventory(manager, read, 'list-timers', 'timer')
+            if len(timers) > 1000:
                 raise ValueError()
             units = {row['activates'] for row in timers}
-            units.update(row['unit'] for row in services if row.get('active') in ('active', 'activating'))
-            units.update(row.get('unit_file', row.get('unit')) for row in files if row.get('state') in ('enabled', 'enabled-runtime', 'static'))
+            units.update(systemd_service_units(manager, read))
             if len(units) > 1000 or any(not isinstance(unit, str) or not UNIT_NAME.fullmatch(unit) for unit in units):
                 raise ValueError()
             if not units:
