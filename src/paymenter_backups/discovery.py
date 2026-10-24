@@ -20,7 +20,7 @@ from .process import run, probe
 PHP_NAME = re.compile(r'(?:php(?:[0-9]+(?:\.[0-9]+)?)?|php-cli|ea-php[0-9]+|lsphp[0-9]+)')
 UNIT_NAME = re.compile(r'(?:[A-Za-z0-9_]|\\x[0-9A-Fa-f]{2})(?:[A-Za-z0-9_.@:-]|\\x[0-9A-Fa-f]{2}){0,199}\.service')
 KINDS = {'schedule:run': 'scheduler', 'queue:work': 'queue-worker', 'queue:listen': 'queue-worker', 'horizon': 'queue-worker', 'schedule:work': 'scheduler'}
-PARSER_VERSION = 2
+PARSER_VERSION = 3
 
 
 def cron_quote(value):
@@ -47,11 +47,20 @@ def cron_command(line):
     return ''.join(result)
 
 
-def suggestions(state, envelope):
+def suggestions(state, envelope, inventory=None):
     php = envelope.get('tools', {}).get('php') or '/usr/bin/php'
     prefix = '* * * * * /usr/bin/flock -n '
     suffix = ' ' + cron_quote(php) + ' ' + cron_quote(str(state.app / 'artisan'))
-    return {'scheduler': prefix + cron_quote(str(state.root / 'scheduler.lock')) + suffix + ' schedule:run >/dev/null 2>&1',
+    scheduler = prefix + cron_quote(str(state.root / 'scheduler.lock')) + suffix + ' schedule:run >/dev/null 2>&1'
+    for item in (inventory or {}).get('items', []):
+        try:
+            parsed = parse(item['command'], state.app, cron=False)
+        except (BackupError, KeyError):
+            continue
+        if parsed['command'].endswith(' /usr/local/bin/php /opt/beco/scheduler.php'):
+            scheduler = '* * * * * ' + ' '.join(cron_quote(word) for word in shlex.split(parsed['command'])) + ' >/dev/null 2>&1'
+            break
+    return {'scheduler': scheduler,
             'queue': prefix + cron_quote(str(state.root / 'queue.lock')) + suffix + ' queue:work --stop-when-empty --max-time=50 >/dev/null 2>&1'}
 
 
@@ -99,6 +108,12 @@ def parse(line, app, cron=True, working=None):
             if not lock.startswith('/') or '\0' in lock or pathlib.Path(lock).as_posix() != lock or any(part in ('.', '..') for part in lock.split('/')):
                 raise ValueError()
         php = tokens.pop(0)
+        if tokens == ['/opt/beco/scheduler.php']:
+            if str(app) != '/app' or php != '/usr/local/bin/php' or not lock:
+                raise ValueError()
+            display = ['/usr/bin/flock', '-n', lock, php, '/opt/beco/scheduler.php']
+            return {'kind': 'scheduler', 'coordination': 'coordinated', 'command': shlex.join(display),
+                    'lock': lock, 'reason': None}
         if not PHP_NAME.fullmatch(pathlib.Path(php).name):
             raise ValueError()
         # PHP ini options can contain credentials. Validate but never display them.
@@ -138,6 +153,9 @@ def parse(line, app, cron=True, working=None):
 
 
 def relevant(line, app, working=None, cron=True):
+    # Include malformed guarded launchers so they refuse rather than disappear.
+    if str(app) == '/app' and 'scheduler.php' in line:
+        return True
     if not any(word in line for word in KINDS):
         return False
     try:

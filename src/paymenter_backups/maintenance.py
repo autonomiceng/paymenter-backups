@@ -233,7 +233,7 @@ def coordination(state, envelope):
                 if error.code != "child-failed":
                     raise
                 crontab = ""
-            jobs = [line for line in crontab.splitlines() if line.strip() and not line.lstrip().startswith("#") and any(word in line for word in ("schedule:run", "queue:work"))]
+            jobs = [line for line in crontab.splitlines() if line.strip() and not line.lstrip().startswith("#") and (any(word in line for word in ("schedule:run", "queue:work")) or (str(state.app) == '/app' and 'scheduler.php' in line))]
             verified = set()
             for line in jobs:
                 verified.add(_legacy_cron_lock(line, state.app, paths))
@@ -284,7 +284,15 @@ def cron_lock(line, app, paths):
 
 def _legacy_cron_lock(line, app, paths, cron=True):
     """Support explicit path-based flock invocations; ambiguous shell refuses."""
-    from .discovery import cron_command
+    from .discovery import cron_command, parse
+    if 'scheduler.php' in line:
+        try:
+            item = parse(line, app, cron=cron)
+            if item['coordination'] == 'coordinated' and item['lock'] in paths:
+                return item['lock']
+        except BackupError:
+            pass
+        raise BackupError('job-locks-unverified')
     try:
         if cron:
             line = cron_command(line)
@@ -402,7 +410,8 @@ def systemd_locks(app, paths, tools):
                 execution = props.get("ExecStart", "")
                 working = props.get("WorkingDirectory", "")
                 relevant = working == str(app) or re.search(re.escape(str(app)) + r"(?:/|[\s;'\"]|$)", execution)
-                if not relevant or not any(word in execution for word in ("schedule:run", "queue:work")):
+                guarded = str(app) == '/app' and 'scheduler.php' in execution
+                if not guarded and (not relevant or not any(word in execution for word in ("schedule:run", "queue:work"))):
                     continue
                 owner = props.get("User", "")
                 try:

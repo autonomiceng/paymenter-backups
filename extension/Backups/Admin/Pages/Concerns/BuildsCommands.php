@@ -40,6 +40,17 @@ trait BuildsCommands
     {
         $line = $this->checks()['jobs']['suggestions']['scheduler'] ?? null;
         if (is_string($line) && $line !== '') { return $line; }
+        if (base_path() === '/app') {
+            foreach ($this->checks()['jobs']['items'] ?? [] as $job) {
+                $command = $job['command'] ?? null;
+                $lock = $job['lock'] ?? null;
+                if (($job['kind'] ?? null) === 'scheduler' && ($job['coordination'] ?? null) === 'coordinated'
+                    && is_string($lock) && $lock !== ''
+                    && is_string($command) && str_ends_with($command, ' /usr/local/bin/php /opt/beco/scheduler.php')) {
+                    return '* * * * * /usr/bin/flock -n ' . self::cronShell($lock) . ' /usr/local/bin/php /opt/beco/scheduler.php >/dev/null 2>&1';
+                }
+            }
+        }
         $root = $this->safePrivateRoot() ?? '/path/to/paymenter-backups-private';
         return '* * * * * /usr/bin/flock -n ' . self::cronShell($root . '/scheduler.lock') . ' ' . self::cronShell($this->binary('php', PHP_BINDIR . '/php')) . ' ' . self::cronShell(base_path('artisan')) . ' schedule:run >/dev/null 2>&1';
     }

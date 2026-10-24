@@ -534,7 +534,7 @@ final class Messages
         $field = is_string($context['field'] ?? null) ? $context['field'] : null;
         $suggest = $context['suggestions'] ?? [];
         $user = $context['crontab_user'] ?? null;
-        $cronLead = 'Add this line to the crontab of ' . ($user ?: 'the site user') . ' with crontab -e. If a schedule:run line is already there, replace it.';
+        $cronLead = 'Add this line to the crontab of ' . ($user ?: 'the site user') . ' with crontab -e. If a scheduler entry is already there, replace it.';
         $scheduler = filled($suggest['scheduler'] ?? null) ? [['lead' => $cronLead, 'code' => $suggest['scheduler']]] : [];
         $settings = static fn (string $label, string $target) => ['kind' => 'settings', 'label' => $label, 'target' => $target];
         $item = static fn (string $title, string $text, array $fixes = [], ?array $action = null, string $tone = 'warning') => compact('title', 'text', 'fixes', 'action', 'tone');

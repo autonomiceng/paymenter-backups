@@ -398,7 +398,7 @@ active/enabled standalone services, with bounded reads and plain-table fallback.
 Cron suggestions escape every `%` as `\%`. Discovery decodes that cron escape
 before shell parsing, preserves literal backslashes and refuses an unescaped
 `%` because cron would turn the remainder into stdin. Shell and systemd parsing
-remain separate from this cron preprocessing. Discovery parser version 2
+remain separate from this cron preprocessing. Discovery parser version 3
 invalidates older cached interpretations and requires rediscovery.
 No scheduler, failed/incomplete discovery, unsupported/uncoordinated jobs,
 continuous workers, unsafe/missing locks and explicit-list mismatch refuse.
@@ -417,6 +417,12 @@ bounded `detail["activates"]` diagnostic. A null entry does not bypass lock
 verification for other timers.
 The parser accepts documented /dev/null redirection tails, common PHP/Artisan
 flags and hosting PHP basenames, with shell expansion/wrappers refused.
+For an application at `/app`, it also accepts exactly
+`/usr/local/bin/php /opt/beco/scheduler.php` behind the same explicit flock and
+owner-private lock checks. This guarded scheduler takes no interpreter or script
+arguments. Other interpreters, script paths and application roots refuse.
+Normalized commands, cached diagnostics and replacement suggestions preserve
+the guarded launcher and its lock, rather than replacing it with Artisan.
 Commands are reconstructed from recognized nonsecret tokens; ini values, raw
 cron/service/process text and process identities never enter discovery records.
 
