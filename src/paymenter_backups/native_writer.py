@@ -9,6 +9,19 @@ import pathlib
 import signal
 import subprocess
 import sys
+import time
+
+
+def _wait_for_group_exit(pgid, timeout=3):
+    from .process import boot_id, group_members
+
+    group = {'pgid': pgid, 'boot_id': boot_id()}
+    deadline = time.monotonic() + timeout
+    while group_members(group):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise subprocess.TimeoutExpired(['process-group', str(pgid)], timeout)
+        time.sleep(min(0.02, remaining))
 
 
 def run(command, input_bytes, descriptors, timeout=35, database_context=None):
@@ -24,6 +37,7 @@ def run(command, input_bytes, descriptors, timeout=35, database_context=None):
                                env=environment)
     try:
         output, error = process.communicate(input_bytes, timeout=timeout)
+        _wait_for_group_exit(process.pid)
         return subprocess.CompletedProcess(command, process.returncode, output, error)
     except BaseException:
         # The unreaped session leader still owns this group ID. Kill every
@@ -32,7 +46,11 @@ def run(command, input_bytes, descriptors, timeout=35, database_context=None):
             os.killpg(process.pid, signal.SIGKILL)
         except ProcessLookupError:
             pass
-        process.communicate(timeout=3)
+        try:
+            process.communicate(timeout=3)
+        except subprocess.TimeoutExpired:
+            pass
+        _wait_for_group_exit(process.pid)
         raise
     finally:
         for pipe in (process.stdin, process.stdout, process.stderr):

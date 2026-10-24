@@ -853,7 +853,12 @@ proc_close($process);
             with (self.state.root / 'config.lock').open('r+b') as observer:
                 with self.assertRaises(BlockingIOError):
                     fcntl.flock(observer, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        time.sleep(1.2)
+        commit_deadline = time.monotonic() + 1.2
+        while time.monotonic() < commit_deadline:
+            self.assertFalse(self.sentinel.exists(), 'Timed-out credential grandchild committed after Save unlocked')
+            remaining = commit_deadline - time.monotonic()
+            if remaining > 0:
+                time.sleep(min(0.02, remaining))
         self.assertFalse(self.sentinel.exists(), 'Timed-out credential grandchild committed after Save unlocked')
 
     def test_python_owner_death_kills_native_and_bridge_before_coordinator_unlock(self):
