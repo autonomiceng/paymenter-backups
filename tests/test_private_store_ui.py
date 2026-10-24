@@ -13,6 +13,59 @@ PHP = os.environ.get("PAYMENTER_BACKUPS_TEST_PHP") or shutil.which("php")
 
 @unittest.skipUnless(PHP, "PHP required")
 class PrivateStoreUiTests(unittest.TestCase):
+    def conditional_saved_guidance(self, path):
+        return (f"Backups can't confirm that saved data directory {path} holds Backups data. "
+                "If it does, restore the web user's ownership and access with mode 0700 before changing it; "
+                "otherwise choose a new, dedicated, empty folder.")
+
+    def test_private_root_guidance_matches_saved_and_identified_state(self):
+        path = "/private/backups"
+        new_folder = (f"Data directory {path} isn't identified as a readable Backups data directory. "
+                      "Choose a new, dedicated, empty folder for Backups data.")
+        cases = [
+            ("private-root-invalid", "owner",
+             f"Backups data directory {path} isn't owned by the web user. Change its owner to the web user and set mode 0700."),
+            ("private-root-invalid", "mode",
+             f"Backups data directory {path} must have mode 0700. Set its mode to 0700."),
+            ("private-root-unavailable", None,
+             f"Saved data directory {path} needs repair. Restore the web user's access before changing or replacing it."),
+        ]
+        for code, reason, direct_repair in cases:
+            for saved, identified, expected in (
+                (True, False, self.conditional_saved_guidance(path)),
+                (True, True, direct_repair),
+                (False, False, new_folder),
+            ):
+                with self.subTest(code=code, reason=reason, saved=saved, identified=identified):
+                    problem = {"code": code, "params": {
+                        "path": path, "reason": reason, "repair_required": saved,
+                        "identified": identified, "path_exists": True,
+                    }}
+                    message = self.php(
+                        'require $argv[1]; echo Paymenter\\Extensions\\Others\\Backups\\Messages::privateRootProblem('
+                        'json_decode($argv[2], true, 16, JSON_THROW_ON_ERROR));',
+                        ROOT / "extension/Backups/Messages.php", json.dumps(problem),
+                    )
+                    self.assertEqual(message, expected)
+
+    def test_pinned_unmarked_root_has_conditional_repair_guidance(self):
+        with tempfile.TemporaryDirectory(prefix="backups-pinned-unmarked-") as temporary:
+            base = pathlib.Path(temporary)
+            app = base / "app"
+            app.mkdir()
+            private = base / "private"
+            private.mkdir(mode=0o755)
+            private.chmod(0o755)
+            for action in ("inspect", "save"):
+                with self.subTest(action=action):
+                    result = self.page_guidance(app, str(private), action, local_byte_budget=123)
+                    self.assertTrue(result["problem"]["params"]["repair_required"])
+                    self.assertFalse(result["problem"]["params"]["identified"])
+                    self.assertEqual(result["message"], self.conditional_saved_guidance(private))
+                    if action == "save":
+                        self.assertEqual(result["errors"]["settings.private_root"], result["message"])
+            self.assertEqual(list(private.iterdir()), [])
+
     def page_guidance(self, app, configured="", action="inspect", failure="", **changes):
         result = subprocess.run(
             [PHP, str(ROOT / "tests/integration/private_root_guidance.php")],
@@ -42,8 +95,7 @@ class PrivateStoreUiTests(unittest.TestCase):
             self.assertEqual(result["overview"]["configuration"]["error"], "private-root-invalid")
             self.assertTrue(result["problem"]["params"].get("repair_required"))
             self.assertFalse(result["problem"]["params"]["identified"])
-            self.assertIn("Set its mode to 0700", result["message"])
-            self.assertNotIn("Choose a new", result["message"])
+            self.assertEqual(result["message"], self.conditional_saved_guidance(private))
             self.assertEqual(marker.read_text(), '{"installation_uuid":"fixture"}')
 
     @unittest.skipIf(os.geteuid() == 0, "Search permissions require a non-root account")
@@ -62,8 +114,7 @@ class PrivateStoreUiTests(unittest.TestCase):
                     with self.subTest(configured=configured):
                         result = self.page_guidance(app, configured, "save", local_byte_budget=123)
                         message = result["errors"]["settings.private_root"]
-                        self.assertIn("Set its mode to 0700", message)
-                        self.assertNotIn("Choose a new", message)
+                        self.assertEqual(message, self.conditional_saved_guidance(private))
                 replacement = base / "replacement"
                 result = self.page_guidance(app, action="save", private_root=str(replacement))
                 self.assertIn("can't be changed after setup", result["errors"]["settings.private_root"])
@@ -87,8 +138,7 @@ class PrivateStoreUiTests(unittest.TestCase):
                     try:
                         result = self.page_guidance(app, action="save", failure=failure, local_byte_budget=123)
                         self.assertEqual(private.stat().st_mode & 0o777, 0)
-                        self.assertIn("Set its mode to 0700", result["errors"]["settings.private_root"])
-                        self.assertNotIn("Choose a new", result["errors"]["settings.private_root"])
+                        self.assertEqual(result["errors"]["settings.private_root"], self.conditional_saved_guidance(private))
                     finally:
                         private.chmod(0o700)
             self.assertEqual(marker.read_text(), '{"installation_uuid":"fixture"}')
@@ -142,7 +192,7 @@ class PrivateStoreUiTests(unittest.TestCase):
             try:
                 result = self.page_guidance(app)
                 self.assertTrue(result["problem"]["params"].get("repair_required"))
-                self.assertIn("Set its mode to 0700", result["message"])
+                self.assertEqual(result["message"], self.conditional_saved_guidance(private))
             finally:
                 private.chmod(0o700)
             self.assertEqual(list(private.iterdir()), [])
@@ -394,8 +444,7 @@ class PrivateStoreUiTests(unittest.TestCase):
             self.assertEqual(result["problem"]["code"], "private-root-invalid")
             self.assertFalse(result["problem"]["params"]["identified"])
             self.assertTrue(result["problem"]["params"]["repair_required"])
-            self.assertIn("Set its mode to 0700", result["message"])
-            self.assertNotIn("Choose a new, dedicated, empty folder", result["message"])
+            self.assertEqual(result["message"], self.conditional_saved_guidance(private))
 
     def test_saved_unavailable_root_with_unreadable_marker_keeps_repair_guidance(self):
         with tempfile.TemporaryDirectory(prefix="backups-private-store-saved-unavailable-") as temporary:
@@ -421,8 +470,7 @@ class PrivateStoreUiTests(unittest.TestCase):
             self.assertTrue(result["problem"]["params"]["path_exists"])
             self.assertFalse(result["problem"]["params"]["identified"])
             self.assertTrue(result["problem"]["params"]["repair_required"])
-            self.assertIn("needs repair", result["message"])
-            self.assertNotIn("Choose a new, dedicated, empty folder", result["message"])
+            self.assertEqual(result["message"], self.conditional_saved_guidance(private))
 
     def test_unreadable_unidentified_directory_prompts_for_a_new_folder(self):
         with tempfile.TemporaryDirectory(prefix="backups-private-store-unreadable-") as temporary:

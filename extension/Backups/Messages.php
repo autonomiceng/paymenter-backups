@@ -298,6 +298,12 @@ final class Messages
         $path = self::displayPath($params['path'] ?? null);
         $repairRequired = ($params['repair_required'] ?? null) === true;
         if ($path === '') { return self::error(is_string($code) ? $code : null); }
+        if ($repairRequired && ($params['identified'] ?? null) !== true
+            && in_array($code, ['private-root-invalid', 'private-root-unavailable'], true)) {
+            return 'Backups can\'t confirm that saved data directory ' . $path . ' holds Backups data. '
+                . 'If it does, restore the web user\'s ownership and access with mode 0700 before changing it; '
+                . 'otherwise choose a new, dedicated, empty folder.';
+        }
         if ($code === 'private-root-invalid') {
             if (!$repairRequired && ($params['identified'] ?? null) !== true) {
                 return 'Data directory ' . $path . ' isn\'t identified as a readable Backups data directory. Choose a new, dedicated, empty folder for Backups data.';
