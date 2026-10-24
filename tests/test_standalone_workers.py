@@ -2,6 +2,7 @@
 import json
 import os
 import pathlib
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -35,7 +36,7 @@ args = sys.argv[1:]
 with pathlib.Path({str(self.calls)!r}).open('a') as output:
     output.write(json.dumps(args) + '\\n')
 value = json.loads(pathlib.Path({str(self.fixture)!r}).read_text())
-unit = {self.unit!r}
+unit = value.get('unit', {self.unit!r})
 if '--user' in args:
     print('[]')
 elif value['plain'] and '--output=json' in args:
@@ -47,8 +48,13 @@ elif 'list-timers' in args:
 elif 'list-units' in args:
     print(unit + ' loaded ' + value['active'] + ' running worker' if value['plain'] else json.dumps([{{'unit': unit, 'active': value['active']}}]))
 elif 'list-unit-files' in args:
-    print(unit + ' ' + value['state'] + ' enabled' if value['plain'] else json.dumps([{{'unit_file': unit, 'state': value['state']}}]))
+    files = [{{'unit_file': unit, 'state': value['state']}}] + value.get('templates', [])
+    print('\\n'.join(row['unit_file'] + ' ' + row['state'] + ' enabled' for row in files) if value['plain'] else json.dumps(files))
 elif 'show' in args:
+    for name in args[args.index('--') + 1:]:
+        if name.endswith('@.service'):
+            print('Failed to get properties: Unit name ' + name + ' is neither a valid invocation ID nor unit name.', file=sys.stderr)
+            sys.exit(1)
     assert args[args.index('--') + 1:] == [unit]
     print('Id=' + unit)
     print('User={os.getuid()}\\nWorkingDirectory={self.app}\\nDynamicUser=no\\nLoadState=loaded')
@@ -75,6 +81,44 @@ else:
         with self.assertRaisesRegex(BackupError, 'job-locks-unverified'):
             with coordination(self.state, self.envelope):
                 pass
+
+    def test_templates_do_not_block_admission_in_both_settings_versions(self):
+        templates = [{'unit_file': 'getty@.service', 'state': 'enabled'},
+                     {'unit_file': 'user@.service', 'state': 'static'}]
+        for version in (1, 2):
+            self.envelope['settings']['settings_version'] = version
+            for plain in (False, True):
+                with self.subTest(version=version, plain=plain):
+                    self.configure(templates=templates, restart='no', plain=plain)
+                    for template in templates:
+                        name = template['unit_file']
+                        result = subprocess.run([self.envelope['tools']['systemctl'], 'show', '--', name],
+                                                capture_output=True, text=True, check=False)
+                        self.assertEqual(result.returncode, 1)
+                        self.assertEqual(result.stderr, 'Failed to get properties: Unit name ' + name
+                                         + ' is neither a valid invocation ID nor unit name.\n')
+                    self.calls.write_text('')
+                    with coordination(self.state, self.envelope):
+                        pass
+                    calls = [json.loads(line) for line in self.calls.read_text().splitlines()]
+                    shown = [call[call.index('--') + 1:] for call in calls if 'show' in call]
+                    self.assertEqual(shown, [[self.unit]])
+
+    def test_running_template_instance_is_still_checked(self):
+        for version in (1, 2):
+            self.envelope['settings']['settings_version'] = version
+            for plain in (False, True):
+                with self.subTest(version=version, plain=plain):
+                    # Disabled unit files leave list-units as the only source.
+                    self.configure(unit='x@1.service', state='disabled', plain=plain)
+                    self.calls.write_text('')
+                    code = 'job-locks-unverified' if version == 1 else 'continuous-worker-present'
+                    with self.assertRaisesRegex(BackupError, code):
+                        with coordination(self.state, self.envelope):
+                            pass
+                    calls = [json.loads(line) for line in self.calls.read_text().splitlines()]
+                    shown = [call[call.index('--') + 1:] for call in calls if 'show' in call]
+                    self.assertEqual(shown, [['x@1.service']])
 
     def test_timer_and_standalone_service_states_in_both_settings_versions(self):
         cases = (

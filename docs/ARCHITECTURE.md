@@ -422,7 +422,9 @@ Legacy coordination also reads active or activating services and enabled,
 enabled-runtime or static service files through the same standalone inventory
 as v2 discovery. A relevant restarting queue worker refuses even without a
 timer or a currently running worker process. A disabled, inactive service with
-no timer target does not enter that inventory.
+no timer target does not enter that inventory. Uninstantiated templates from
+`list-unit-files` are excluded before querying service properties. Running
+instances from `list-units` remain in the inventory.
 The parser accepts documented /dev/null redirection tails, common PHP/Artisan
 flags and hosting PHP basenames, with shell expansion/wrappers refused.
 For an application at `/app`, it also accepts exactly

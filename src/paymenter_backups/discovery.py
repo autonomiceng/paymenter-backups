@@ -256,9 +256,11 @@ def systemd_service_units(manager, read):
     if any(len(rows) > 1000 or any(not isinstance(row, dict) for row in rows) for rows in (services, files)):
         raise ValueError()
     units = [row['unit'] for row in services if row.get('active') in ('active', 'activating')]
-    units.extend(row.get('unit_file', row.get('unit')) for row in files if row.get('state') in ('enabled', 'enabled-runtime', 'static'))
-    if any(not isinstance(unit, str) or not UNIT_NAME.fullmatch(unit) for unit in units) or len(set(units)) > 1000:
+    file_units = [row.get('unit_file', row.get('unit')) for row in files if row.get('state') in ('enabled', 'enabled-runtime', 'static')]
+    if any(not isinstance(unit, str) or not UNIT_NAME.fullmatch(unit) for unit in units + file_units) or len(set(units + file_units)) > 1000:
         raise ValueError()
+    # Templates cannot be queried with show; list-units supplies running instances.
+    units.extend(unit for unit in file_units if not unit.endswith('@.service'))
     return set(units)
 
 
