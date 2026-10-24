@@ -56,8 +56,13 @@ class PrivateWorkDirectoryTests(unittest.TestCase):
             unsafe = pathlib.Path(temporary) / "replaceable"
             parent = unsafe / "private-tmp"
             parent.mkdir(parents=True, mode=0o700)
-            unsafe.chmod(0o770)
+            unsafe.chmod(0o700)
             with patch.dict(os.environ, {"TMPDIR": str(parent)}):
+                accepted = private_work_directory("fixture-")
+                self.assertEqual(accepted.parent, parent)
+                self.assertEqual(stat.S_IMODE(accepted.stat().st_mode), 0o700)
+                accepted.rmdir()
+                unsafe.chmod(0o770)
                 with self.assertRaisesRegex(RuntimeError, "group-writable without sticky bit"):
                     private_work_directory("fixture-")
             self.assertEqual(list(parent.iterdir()), [])
@@ -117,12 +122,14 @@ class PrivateWorkDirectoryTests(unittest.TestCase):
             ancestor = pathlib.Path(temporary)
             parent = ancestor / "private-tmp"
             parent.mkdir(mode=0o700)
+            ancestor.chmod(0o700)
             cache_root = ancestor.parent
             safe_mode = stat.S_IFDIR | 0o755
             with self.parent_stat_with_mode(cache_root, safe_mode):
                 with patch.dict(os.environ, {"TMPDIR": str(parent)}):
                     base = private_work_directory("paymenter-backups-ui-")
                     work = private_work_directory("ui-", base)
+                    self.assertEqual(require_private_workroot(work, "ui-", "paymenter-backups-ui-"), work)
                     ancestor.chmod(0o770)
                     with self.assertRaisesRegex(RuntimeError, "group-writable without sticky bit"):
                         require_private_workroot(work, "ui-", "paymenter-backups-ui-")

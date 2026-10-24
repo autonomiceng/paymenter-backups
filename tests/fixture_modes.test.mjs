@@ -26,6 +26,8 @@ test('rejects a private temporary directory below a group-writable ancestor', as
     const ancestor = path.join(root, 'replaceable');
     const temporary = path.join(ancestor, 'private-tmp');
     await mkdir(temporary, {recursive: true, mode: 0o700});
+    await chmod(ancestor, 0o700);
+    assert.equal(await hasSafeTemporaryAncestors(temporary), true);
     await chmod(ancestor, 0o770);
     assert.equal(await hasSafeTemporaryAncestors(temporary), false);
   } finally {
