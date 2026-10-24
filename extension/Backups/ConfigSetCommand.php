@@ -129,7 +129,7 @@ final class ConfigSetCommand extends Command
                 'unsupported-database', 'native-secret-row-refused', 'document-roots-invalid',
                 'private-pipe-required', 'application-unavailable', 'private-root-unavailable',
                 'archive-key-change-busy'], true) ? $error->getMessage() : 'config-invalid';
-            $writerCause ??= self::exceptionCause($error);
+            $writerCause ??= $code !== 'config-invalid' ? $code : self::exceptionCause($error);
             if ($this->option('defer-init')) {
                 // Artisan's styled error() writes to its console output stream.
                 // Internal callers consume a fixed code and bounded cause.

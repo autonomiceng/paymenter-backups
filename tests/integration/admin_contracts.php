@@ -184,7 +184,7 @@ try {
                 && !file_exists($blockedRoot), 'Save did not show the Data directory cause and fix by its field');
             $record->settings()->where('key', 'private_root')->update(['value' => $blockedRoot]);
             $overviewPage = Livewire\Livewire::test($class);
-            $overviewHtml = $overviewPage->html();
+            $overviewHtml = html_entity_decode($overviewPage->html(), ENT_QUOTES);
             testCheck(str_contains($overviewHtml, 'Fix the Data directory')
                 && str_contains($overviewHtml, $blockedRoot)
                 && str_contains($overviewHtml, 'can\'t write to ' . $blockedParent)
@@ -239,6 +239,21 @@ try {
         testCheck(!is_file($freshRoot . '/credentials.json'), 'First-use save invented credentials');
         testCheck(glob($freshRoot . '/requests/*.json') === [], 'First-use save queued work');
         testCheck(glob($freshRoot . '/runs/*/journal.json') === [], 'First-use save captured a backup');
+        $installedIdentity = file_get_contents($freshRoot . '/installation.json');
+        chmod($freshRoot, 0750);
+        try {
+            $repairOnlyPage = Livewire\Livewire::test($class);
+            testCheck(!str_contains(html_entity_decode($repairOnlyPage->html(), ENT_QUOTES), 'First-time setup'),
+                'An existing Data directory with invalid permissions re-entered first-time setup');
+            $moveRefusal = submitSettings($class, ['private_root' => $freshRoot . '-moved']);
+            $moveMessage = $moveRefusal->instance()->getErrorBag()->getMessages()['settings.private_root'][0] ?? '';
+            testCheck($moveMessage === Paymenter\Extensions\Others\Backups\Messages::error('private-root-move-refused')
+                && $record->settings()->where('key', 'private_root')->value('value') === $freshRoot
+                && file_get_contents($freshRoot . '/installation.json') === $installedIdentity
+                && !file_exists($freshRoot . '-moved'),
+                'A damaged existing Data directory was changed or moved during repair');
+            $results['invalid_existing_store_stays_locked_for_repair'] = true;
+        } finally { chmod($freshRoot, 0700); }
         testCheck(file_get_contents($root . '/installation.json') === $identity, 'First-use save changed original installation identity');
         testCheck(($originalCredentials === null && !file_exists($credentialFile))
                     || ($originalCredentials !== null && file_get_contents($credentialFile) === $originalCredentials), 'First-use save changed original encrypted credentials');

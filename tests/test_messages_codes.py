@@ -159,6 +159,22 @@ echo json_encode($result, JSON_THROW_ON_ERROR);
         self.assertIn('PDO MySQL', messages['database-pdo-driver-unavailable'][1])
         self.assertIn('could not connect', messages['database-connection-failed'][1])
 
+    def test_writer_cause_copy_is_formatted_by_messages(self):
+        script = r'''
+require $argv[1];
+echo json_encode([
+    \Paymenter\Extensions\Others\Backups\Messages::withWriterCause('Settings were not saved.', 'busy'),
+    \Paymenter\Extensions\Others\Backups\Messages::withWriterCause('Settings were not saved.', null),
+], JSON_THROW_ON_ERROR);
+'''
+        result = subprocess.run([PHP, '-r', script, str(ROOT / 'extension/Backups/Messages.php')],
+                                capture_output=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stdout.decode() + result.stderr.decode())
+        self.assertEqual(json.loads(result.stdout), [
+            'Settings were not saved. Writer cause: busy.',
+            'Settings were not saved.',
+        ])
+
     def test_save_errors_keep_the_field_and_have_direct_repair_guidance(self):
         script = r'''
 require $argv[1];
@@ -228,6 +244,12 @@ echo (string) \Paymenter\Extensions\Others\Backups\Messages::schedulerWaitLine('
         self.assertIn('Writer cause: actor-login-failed.', value['notification']['body'])
         self.assertNotIn('highlighted setting', value['errors']['settings.schedule_time'])
         self.assertNotIn('highlighted setting', value['notification']['body'])
+        self.assertEqual(value['credentials_notification'], {
+            'title': 'Settings not saved',
+            'status': 'danger',
+            'body': self.messages(('credentials-unreadable',))['credentials-unreadable'][1],
+        })
+        self.assertFalse(value['credentials_errors'])
         self.assertNotIn('Open Settings and save', value['errors']['settings.schedule_time'])
         self.assertNotIn('Open Settings and save', value['notification']['body'])
         self.assertIn('Backups settings command', value['command_notification']['body'])

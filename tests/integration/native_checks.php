@@ -392,8 +392,8 @@ if ($mode === 'upload') {
         check($refused->instance()->getErrorBag()->isEmpty(), 'unreadable-store scenario stopped at form validation');
         $refusalNotices = $notices();
         check(array_filter($refusalNotices, static fn ($n) => $n['status'] === 'danger' && $n['title'] === 'Settings not saved'
-            && str_contains($n['body'], Paymenter\Extensions\Others\Backups\Messages::error('credentials-unreadable'))
-            && str_contains($n['body'], 'Writer cause: credentials-unreadable.')) !== [], 'unreadable store did not report complete Save refusal');
+            && $n['body'] === Paymenter\Extensions\Others\Backups\Messages::error('credentials-unreadable')) !== [],
+            'unreadable store did not report its complete cause-free Save refusal');
         check(array_filter($refusalNotices, static fn ($n) => $n['status'] === 'success') === [], 'unreadable-store refusal reported success');
         check($nativeRows() === $beforeRefusal, 'unreadable-store refusal changed native settings');
         check(!is_file($root . '/config-save.json'), 'definite unreadable-store refusal left its new save guard');

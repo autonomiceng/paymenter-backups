@@ -61,11 +61,14 @@ trait LoadsOverview
         if ($this->overview()['initialized'] ?? false) { return true; }
         try { return @is_file(Runtime::privateRoot() . '/installation.json'); }
         catch (\Throwable $error) {
-            // Read only presence, to keep an existing data directory immutable
-            // while its public-directory guard is awaiting explicit repair.
+            // Keep existing or inaccessible data out of first-time setup while
+            // owner, mode, and public-directory checks wait for repair.
             try {
                 $configured = $this->record()->settings()->where('key', 'private_root')->value('value');
-                return @is_file(PrivateStore::root(realpath(base_path()), $configured ?: null) . '/installation.json');
+                $application = realpath(base_path());
+                if ($application === false) { return false; }
+                $path = is_string($configured) && $configured !== '' ? $configured : PrivateStore::defaultPath($application);
+                return PrivateStore::installedOrRequiresRepair($path);
             } catch (\Throwable $ignored) { return false; }
         }
     }

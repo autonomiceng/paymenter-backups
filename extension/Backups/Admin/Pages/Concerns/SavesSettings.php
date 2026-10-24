@@ -137,8 +137,9 @@ trait SavesSettings
             }
             if (in_array($code, ['config-save-outcome-unknown', 'config-write-outcome-unknown'], true)) {
                 Notification::make()->title('Save outcome unknown')->warning()
-                    ->body('Refresh and check the saved settings before trying again. Keys you entered were cleared.'
-                        . ($cause !== null ? ' Writer cause: ' . $cause . '.' : ''))->send();
+                    ->body(Messages::withWriterCause(
+                        'Refresh and check the saved settings before trying again. Keys you entered were cleared.', $cause
+                    ))->send();
             } else {
                 $field = $error instanceof \Paymenter\Extensions\Others\Backups\EngineCommandException ? $error->field : null;
                 $this->refuseSettings($code, false, $field, $cause);
@@ -182,12 +183,11 @@ trait SavesSettings
                 $this->dispatch('form-validation-error', livewireId: $this->getId());
             }
             Notification::make()->title('Save incomplete')->warning()
-                ->body((($saved['outcome_unknown'] ?? false)
+                ->body(Messages::withWriterCause((($saved['outcome_unknown'] ?? false)
                     ? 'The saved settings or keys could not be confirmed. Backup work is paused. Refresh, check settings and enter the replacement keys again to complete Save.'
                     : (($saved['concurrent_settings_preserved'] ?? false)
                         ? 'Concurrent settings changes were preserved. Keys you entered weren\'t saved. Refresh and check settings before trying again.'
-                        : 'Some settings could not be restored. Backup work is paused. Keys you entered weren\'t saved. Refresh, check settings and enter the replacement keys again to complete Save.'))
-                    . ($writerCause !== null ? ' Writer cause: ' . $writerCause . '.' : ''))->send();
+                        : 'Some settings could not be restored. Backup work is paused. Keys you entered weren\'t saved. Refresh, check settings and enter the replacement keys again to complete Save.')), $writerCause))->send();
             return;
         }
         $problems = [];
@@ -247,7 +247,7 @@ trait SavesSettings
             $this->dispatch('form-validation-error', livewireId: $this->getId());
         }
         $body = $environment ? $message . ' Fix Binary paths under Advanced, save, then save your other changes.' : $message;
-        if ($cause !== null) { $body .= ' Writer cause: ' . $cause . '.'; }
+        $body = Messages::withWriterCause($body, $cause);
         Notification::make()->title('Settings not saved')->danger()->body($body)->send();
     }
 

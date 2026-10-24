@@ -452,7 +452,7 @@ class CoordinatedSaveTests(PrivateFixture):
                         'credentials': {'_fixture_fail': code},
                     })
                 self.assertEqual(refused.exception.code, code)
-                self.assertEqual(refused.exception.detail.get('writer_cause'), 'unrecognized')
+                self.assertEqual(refused.exception.detail.get('writer_cause'), code)
                 self.assertEqual(self.rows()['rows']['s3_bucket']['value'], 'old-destination')
                 self.assertEqual(self.credentials['access_key'], 'fake-old')
                 self.assertFalse((self.state.root / 'config-save.json').exists())

@@ -60,8 +60,9 @@ trait BuildsPageContent
         return $schema->components([
             Callout::make('Settings save needs attention')
                 ->warning()
-                ->description(fn () => Messages::error($this->overviewError)
-                    . ' Writer cause: ' . $this->overviewErrorCause . '.')
+                ->description(fn () => Messages::withWriterCause(
+                    Messages::error($this->overviewError), $this->overviewErrorCause
+                ))
                 ->visible(fn () => $this->overview() && $this->overviewError !== null
                     && $this->overviewErrorCause !== null && $this->privateRootProblem() === null),
             Callout::make('Backups can\'t start')

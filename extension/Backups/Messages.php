@@ -284,6 +284,12 @@ final class Messages
 
     public static function known(string $code): bool { return isset(self::ERRORS[$code]); }
 
+    /** Append a bounded writer cause to administrator copy when one is available. */
+    public static function withWriterCause(string $text, ?string $cause): string
+    {
+        return $cause === null ? $text : $text . ' Writer cause: ' . $cause . '.';
+    }
+
     /** Format bounded data-directory details for Save and readiness messages. */
     public static function privateRootProblem(array $problem): string
     {
@@ -293,8 +299,8 @@ final class Messages
         if ($path === '') { return self::error(is_string($code) ? $code : null); }
         if ($code === 'private-root-invalid') {
             return match ($params['reason'] ?? null) {
-                'owner' => 'Data directory ' . $path . ' isn\'t owned by the web user. Change its owner to the web user and set mode 0700, or choose another folder outside Paymenter.',
-                'mode' => 'Data directory ' . $path . ' must have mode 0700. Set its mode to 0700, or choose another folder outside Paymenter.',
+                'owner' => 'Data directory ' . $path . ' isn\'t owned by the web user. Change its owner to the web user and set mode 0700. Backups keeps this folder selected until it can check for an installation.',
+                'mode' => 'Data directory ' . $path . ' must have mode 0700. Set its mode to 0700. Backups keeps this folder selected until it can check for an installation.',
                 default => self::error($code),
             };
         }

@@ -57,6 +57,27 @@ final class PrivateStore
         return null;
     }
 
+    /** Keep an existing or inaccessible data path out of first-time setup until it can be checked. */
+    public static function installedOrRequiresRepair(string $path): bool
+    {
+        if (!str_starts_with($path, '/') || str_contains($path, "\0")
+            || preg_match('~(?:^|/)\.{1,2}(?:/|$)~', $path)) { return false; }
+        clearstatcache(true, $path);
+        $info = @lstat($path);
+        if ($info !== false) {
+            if (($info['mode'] & 0170000) !== 0040000) { return true; }
+            if ($info['uid'] !== posix_geteuid() || ($info['mode'] & 07777) !== 0700) { return true; }
+            if (!is_readable($path) || !is_executable($path)) { return true; }
+            clearstatcache(true, $path . '/installation.json');
+            return @lstat($path . '/installation.json') !== false;
+        }
+        $parent = dirname($path);
+        clearstatcache(true, $parent);
+        $parentInfo = @stat($parent);
+        return is_array($parentInfo) && (($parentInfo['mode'] & 0170000) === 0040000)
+            && !is_executable($parent);
+    }
+
     private static function unavailable(string $path, string $parent): array
     {
         if (!is_dir($parent)) {

@@ -36,10 +36,17 @@ namespace {
     $probe->refuse($details['code'], $details['field'], $details['cause'] ?? null);
     $fieldNotification = \Filament\Notifications\Notification::$last;
     $probe->refuse('command-not-registered', null);
+    $commandNotification = \Filament\Notifications\Notification::$last;
+    $credentialsDetails = \Paymenter\Extensions\Others\Backups\Runtime::errorDetails('{"error":"credentials-unreadable"}');
+    $credentialsProbe = new SaveRefusalProbe();
+    $credentialsProbe->refuse($credentialsDetails['code'], $credentialsDetails['field'], $credentialsDetails['cause']);
+    $credentialsNotification = \Filament\Notifications\Notification::$last;
     echo json_encode([
         'details' => $details,
         'errors' => $probe->errors,
         'notification' => $fieldNotification,
-        'command_notification' => \Filament\Notifications\Notification::$last,
+        'command_notification' => $commandNotification,
+        'credentials_errors' => $credentialsProbe->errors,
+        'credentials_notification' => $credentialsNotification,
     ], JSON_THROW_ON_ERROR);
 }
