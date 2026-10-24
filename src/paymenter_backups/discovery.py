@@ -64,6 +64,19 @@ def suggestions(state, envelope, inventory=None):
             'queue': prefix + cron_quote(str(state.root / 'queue.lock')) + suffix + ' queue:work --stop-when-empty --max-time=50 >/dev/null 2>&1'}
 
 
+def guarded_script_safe():
+    """Require the fixed root-owned script without file or parent symlinks."""
+    try:
+        target = pathlib.Path('/opt/beco/scheduler.php')
+        # Reuse lock_safe's canonical-path and lstat regular-file checks.
+        if target.resolve(strict=True) != target:
+            return False
+        info = target.lstat()
+        return stat.S_ISREG(info.st_mode) and info.st_uid == 0 and not info.st_mode & 0o022
+    except (OSError, RuntimeError):
+        return False
+
+
 def parse(line, app, cron=True, working=None):
     """Return validated tokens only. Shell interpretation/wrappers fail closed."""
     try:
@@ -112,8 +125,10 @@ def parse(line, app, cron=True, working=None):
             if str(app) != '/app' or php != '/usr/local/bin/php' or not lock:
                 raise ValueError()
             display = ['/usr/bin/flock', '-n', lock, php, '/opt/beco/scheduler.php']
-            return {'kind': 'scheduler', 'coordination': 'coordinated', 'command': shlex.join(display),
-                    'lock': lock, 'reason': None}
+            safe = guarded_script_safe()
+            return {'kind': 'scheduler', 'coordination': 'coordinated' if safe else 'unsupported',
+                    'command': shlex.join(display), 'lock': lock,
+                    'reason': None if safe else 'job-command-unsupported'}
         if not PHP_NAME.fullmatch(pathlib.Path(php).name):
             raise ValueError()
         # PHP ini options can contain credentials. Validate but never display them.
@@ -330,6 +345,7 @@ def cached(state, now=None):
                 parsed = parse(item['command'], state.app, cron=False)
                 if parsed['command'] != item['command'] or parsed['lock'] != item['lock']:
                     raise ValueError()
+                item.update(parsed)
             elif item['lock'] is not None:
                 raise ValueError()
         if value['state'] not in ('ok', 'failed') or value['error'] not in (None, 'job-discovery-incomplete', 'job-discovery-failed'):
@@ -375,6 +391,8 @@ def admission(envelope, inventory):
     for job in jobs:
         if job['coordination'] != 'coordinated':
             add(job['reason'] or 'job-command-unsupported', detail={'job': job['id']})
+        elif job['command'].endswith(' /usr/local/bin/php /opt/beco/scheduler.php') and not guarded_script_safe():
+            add('job-command-unsupported', detail={'job': job['id']})
         elif not lock_safe(job['lock']):
             add('job-lock-unsafe', 'job_lock_paths', {'job': job['id'], 'lock': job['lock']})
     derived = {item['lock'] for item in jobs if item['coordination'] == 'coordinated'}

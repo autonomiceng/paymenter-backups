@@ -421,6 +421,14 @@ For an application at `/app`, it also accepts exactly
 `/usr/local/bin/php /opt/beco/scheduler.php` behind the same explicit flock and
 owner-private lock checks. This guarded scheduler takes no interpreter or script
 arguments. Other interpreters, script paths and application roots refuse.
+The script must be a root-owned regular file with no group or world write bits.
+Its canonical path must remain exactly `/opt/beco/scheduler.php`, with no file
+or parent-directory symlinks. The canonical-path and `lstat` regular-file checks
+follow `discovery.lock_safe`; script ownership and write restrictions differ
+from that helper's app-owned, exactly 0600 lock policy. Discovery, cache reads
+and admission recheck the script. Legacy cron and systemd validation use the
+same parser. An unsafe script remains visible as unsupported with its guarded
+command, so diagnostics cannot suggest replacing the guard with Artisan.
 Normalized commands, cached diagnostics and replacement suggestions preserve
 the guarded launcher and its lock, rather than replacing it with Artisan.
 Commands are reconstructed from recognized nonsecret tokens; ini values, raw

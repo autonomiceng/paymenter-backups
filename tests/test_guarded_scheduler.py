@@ -11,10 +11,13 @@ from unittest.mock import patch
 from paymenter_backups import discovery, process
 from paymenter_backups.maintenance import _legacy_cron_lock, systemd_locks
 from paymenter_backups.common import BackupError, State, atomic_json
+from guarded_scheduler_fixture import guarded_host
 
 
 class GuardedSchedulerTests(unittest.TestCase):
     def setUp(self):
+        self.host = self.enterContext(guarded_host())
+        self.script = self.host.script
         temporary = tempfile.TemporaryDirectory(prefix='backups-guarded-scheduler-')
         self.addCleanup(temporary.cleanup)
         base = pathlib.Path(temporary.name)
@@ -39,6 +42,68 @@ class GuardedSchedulerTests(unittest.TestCase):
         self.assertEqual(discovery.parse(row['command'], self.state.app, cron=False)['command'], expected)
         atomic_json(self.state.root / 'discovery.json', inventory)
         self.assertEqual(discovery.cached(self.state, now=101)['items'], inventory['items'])
+
+    def test_guarded_script_symlink_refuses_discovery_and_legacy_validation(self):
+        other = self.script.with_name('other.php')
+        self.script.rename(other)
+        self.script.symlink_to(other)
+        self.assert_guard_refused()
+
+    def assert_guard_refused(self):
+        self.assertEqual(discovery.parse(self.line, self.state.app)['coordination'], 'unsupported')
+        row = discovery.record(self.line, self.state.app, 'crontab', 'line 1')
+        self.assertEqual(row['coordination'], 'unsupported')
+        errors, _ = discovery.admission(self.envelope, {'state': 'ok', 'items': [row]})
+        self.assertIn('job-command-unsupported', [item['code'] for item in errors])
+        with self.assertRaisesRegex(BackupError, 'job-locks-unverified'):
+            _legacy_cron_lock(self.line, self.state.app, [str(self.lock)])
+
+    def test_guarded_script_parent_symlink_refuses(self):
+        parent = self.script.parent
+        other = parent.with_name('alternate')
+        parent.rename(other)
+        parent.symlink_to(other, target_is_directory=True)
+        self.assert_guard_refused()
+
+    def test_guarded_script_group_and_world_writable_modes_refuse(self):
+        for mode in (0o664, 0o646, 0o666):
+            with self.subTest(mode=oct(mode)):
+                self.script.chmod(mode)
+                self.assert_guard_refused()
+
+    def test_guarded_script_nonroot_owner_refuses(self):
+        self.host.owner_uid = 1000
+        self.assert_guard_refused()
+
+    def test_guarded_script_directory_and_missing_file_refuse(self):
+        self.script.unlink()
+        self.assert_guard_refused()
+        self.script.mkdir()
+        self.assert_guard_refused()
+
+    def test_admission_rechecks_script_after_discovery(self):
+        row = discovery.record(self.line, self.state.app, 'crontab', 'line 1')
+        self.assertEqual(row['coordination'], 'coordinated')
+        self.script.chmod(0o666)
+        errors, _ = discovery.admission(self.envelope, {'state': 'ok', 'items': [row]})
+        self.assertIn('job-command-unsupported', [item['code'] for item in errors])
+
+    def test_cached_readiness_rechecks_replaced_script_and_preserves_guard(self):
+        row = discovery.record(self.line, self.state.app, 'crontab', 'line 1')
+        inventory = {'schema_version': 1, 'parser_version': discovery.PARSER_VERSION,
+                     'app': '/app', 'checked_at': 100, 'state': 'ok', 'error': None, 'items': [row]}
+        atomic_json(self.state.root / 'discovery.json', inventory)
+        other = self.script.with_name('replacement.php')
+        self.script.rename(other)
+        self.script.symlink_to(other)
+        current = discovery.cached(self.state, now=101)
+        self.assertEqual(len(current['items']), 1)
+        self.assertEqual(current['items'][0]['coordination'], 'unsupported')
+        self.assertEqual(current['items'][0]['command'], row['command'])
+        errors, _ = discovery.admission(self.envelope, current)
+        self.assertIn('job-command-unsupported', [item['code'] for item in errors])
+        self.assertEqual(discovery.suggestions(self.state, self.envelope, current)['scheduler'],
+                         self.line + ' >/dev/null 2>&1')
 
     def test_guarded_launcher_variants_refuse(self):
         invalid = [self.line + ' --quiet', self.line + ' schedule:run',
@@ -120,6 +185,11 @@ class GuardedSchedulerTests(unittest.TestCase):
             self.assertEqual(rows[0]['coordination'], 'coordinated')
             self.assertTrue(rows[0]['command'].endswith(' /usr/local/bin/php /opt/beco/scheduler.php'))
             self.assertEqual(systemd_locks(self.state.app, [str(self.lock)], tools), {str(self.lock)})
+            self.script.chmod(0o666)
+            self.assertEqual(discovery.systemd(self.state.app, tools)[0]['coordination'], 'unsupported')
+            with self.assertRaisesRegex(BackupError, 'job-locks-unverified'):
+                systemd_locks(self.state.app, [str(self.lock)], tools)
+            self.script.chmod(0o644)
             owner += 1
             self.assertEqual(discovery.systemd(self.state.app, tools), [])
             self.assertEqual(systemd_locks(self.state.app, [str(self.lock)], tools), set())

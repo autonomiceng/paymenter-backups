@@ -7,6 +7,7 @@ import subprocess
 import unittest
 
 from paymenter_backups import discovery
+from guarded_scheduler_fixture import guarded_host
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -38,6 +39,9 @@ namespace {
 @unittest.skipUnless(PHP, 'PHP CLI required for scheduler commands')
 class GuardedSchedulerUI(unittest.TestCase):
     COMMAND = "/usr/bin/flock -n '/private/existing jobs.lock' /usr/local/bin/php /opt/beco/scheduler.php"
+
+    def setUp(self):
+        self.enterContext(guarded_host())
 
     def scheduler_line(self, app='/app', items=None, suggestion=None):
         jobs = {'items': items or []}
