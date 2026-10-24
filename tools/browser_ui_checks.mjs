@@ -28,8 +28,9 @@ const temporary = await realpath(process.env.TMPDIR || tmpdir());
 assert.equal(path.dirname(workbase), temporary);
 const temporaryInfo = await stat(temporary);
 assert(temporaryInfo.isDirectory(), 'Temporary parent must be a directory');
-assert.equal(temporaryInfo.mode & 0o002 && !(temporaryInfo.mode & 0o1000), 0,
-  'Temporary parent must not be world-writable without the sticky bit');
+assert([0, process.geteuid()].includes(temporaryInfo.uid), 'Temporary parent must be root- or user-owned');
+assert.equal(temporaryInfo.mode & 0o022 && !(temporaryInfo.mode & 0o1000), 0,
+  'Temporary parent must not be group- or world-writable without the sticky bit');
 assert(path.basename(workbase).startsWith('paymenter-backups-ui-'), 'Require a private random UI fixture base');
 assert(path.basename(work).startsWith('ui-'), 'Require a disposable ui- fixture');
 for (const directory of [workbase, work]) {

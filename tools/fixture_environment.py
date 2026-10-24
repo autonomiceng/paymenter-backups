@@ -14,6 +14,16 @@ DEFAULT_ENVIRONMENT = {
 }
 
 
+def _validate_temporary_parent(info):
+    if not stat.S_ISDIR(info.st_mode):
+        raise RuntimeError('temporary parent is not a directory')
+    if info.st_uid not in (0, os.geteuid()):
+        raise RuntimeError('temporary parent owner is not trusted')
+    if info.st_mode & 0o022 and not info.st_mode & stat.S_ISVTX:
+        writable_by = 'world' if info.st_mode & stat.S_IWOTH else 'group'
+        raise RuntimeError(f'temporary parent is {writable_by}-writable without sticky bit')
+
+
 def child_environment(overrides=None):
     result = dict(DEFAULT_ENVIRONMENT)
     if overrides:
@@ -33,11 +43,12 @@ def private_work_directory(prefix, parent=None):
         info = parent.stat()
     except OSError:
         raise RuntimeError('temporary directory is unavailable') from None
-    if not stat.S_ISDIR(info.st_mode):
-        raise RuntimeError('temporary parent is not a directory')
-    if info.st_mode & stat.S_IWOTH and not info.st_mode & stat.S_ISVTX:
-        raise RuntimeError('temporary parent is world-writable without sticky bit')
-    if nested and (info.st_uid != os.getuid() or info.st_mode & 0o077):
+    if nested:
+        if not stat.S_ISDIR(info.st_mode):
+            raise RuntimeError('temporary parent is not a directory')
+    else:
+        _validate_temporary_parent(info)
+    if nested and (info.st_uid != os.geteuid() or info.st_mode & 0o077):
         raise RuntimeError('nested temporary parent is not owner-private')
     path = pathlib.Path(tempfile.mkdtemp(prefix=prefix, dir=parent))
     path.chmod(0o700)
@@ -50,9 +61,7 @@ def require_private_workroot(path, prefix, parent_prefix):
     base = work.parent
     temporary = pathlib.Path(os.environ.get('TMPDIR', tempfile.gettempdir())).resolve(strict=True)
     temporary_info = temporary.stat()
-    if (not stat.S_ISDIR(temporary_info.st_mode)
-            or temporary_info.st_mode & stat.S_IWOTH and not temporary_info.st_mode & stat.S_ISVTX):
-        raise RuntimeError('temporary parent is world-writable without sticky bit')
+    _validate_temporary_parent(temporary_info)
     if (not work.name.startswith(prefix) or not base.name.startswith(parent_prefix)
             or base.resolve(strict=True).parent != temporary):
         raise RuntimeError('fixture workroot is outside its private temporary base')
@@ -62,6 +71,6 @@ def require_private_workroot(path, prefix, parent_prefix):
         except OSError:
             raise RuntimeError('fixture workroot is unavailable') from None
         if (not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode)
-                or info.st_uid != os.getuid() or info.st_mode & 0o077):
+                or info.st_uid != os.geteuid() or info.st_mode & 0o077):
             raise RuntimeError('fixture workroot is not owner-private')
     return work.resolve(strict=True)
