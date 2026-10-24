@@ -80,6 +80,8 @@ def configured_timezone(value, field="schedule_timezone"):
         except ZoneInfoNotFoundError:
             raise BackupError("timezone-data-unavailable", field, {"timezone": value}) from None
         raise BackupError("config-invalid", field) from None
+    except (ValueError, OSError):
+        raise BackupError("config-invalid", field) from None
 
 
 def redact(value):
@@ -110,9 +112,11 @@ def validate_database_context(context):
         if not isinstance(value, str) or len(value.encode()) > limit or "\0" in value:
             raise BackupError("database-connection-invalid")
     port = connection["port"]
+    valid_port = (isinstance(port, int) and not isinstance(port, bool)
+                  or isinstance(port, str) and re.fullmatch(r"[0-9]{1,5}", port))
     if (not re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]{0,63}", connection["driver"])
             or ";" in connection["host"] or ";" in connection["unix_socket"] or ";" in connection["database"]
-            or isinstance(port, bool) or not (isinstance(port, int) or isinstance(port, str) and port.isdigit())
+            or not valid_port
             or not 1 <= int(port) <= 65535 or not isinstance(connection["options"], dict)
             or len(connection["options"]) > 128 or not isinstance(connection["strict"], bool)
             or not isinstance(connection["prefix_indexes"], bool)

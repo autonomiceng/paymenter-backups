@@ -2,7 +2,9 @@
 import json
 import os
 import pathlib
+import shutil
 import sys
+import subprocess
 import tempfile
 import unittest
 from types import SimpleNamespace
@@ -281,6 +283,31 @@ class DatabaseContextTests(unittest.TestCase):
         with self.assertRaisesRegex(BackupError, "database-connection-invalid"):
             validate_database_context(invalid)
 
+    def test_database_context_rejects_unbounded_and_non_ascii_string_ports(self):
+        for port in ("000001", "１２３"):
+            invalid = json.loads(json.dumps(MARIADB_CONTEXT))
+            invalid["connection"]["port"] = port
+            with self.subTest(port=port), self.assertRaisesRegex(BackupError, "database-connection-invalid"):
+                validate_database_context(invalid)
+
+    def test_php_database_context_rejects_unbounded_and_non_ascii_string_ports(self):
+        php = shutil.which("php")
+        if not php:
+            self.skipTest("PHP CLI is unavailable")
+        helper = r"""require $argv[1];
+$context = json_decode(stream_get_contents(STDIN), true, 16, JSON_THROW_ON_ERROR);
+try { \Paymenter\Extensions\Others\Backups\DatabaseConnectionContext::validate($context); echo 'accepted'; }
+catch (\Throwable $error) { echo $error->getMessage(); }
+"""
+        source = pathlib.Path(__file__).resolve().parents[1] / "extension/Backups/DatabaseConnectionContext.php"
+        for port in ("000001", "１２３"):
+            invalid = json.loads(json.dumps(MARIADB_CONTEXT))
+            invalid["connection"]["port"] = port
+            with self.subTest(port=port):
+                result = subprocess.run([php, "-r", helper, str(source)], input=json.dumps(invalid).encode(),
+                                        stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+                self.assertEqual(result.returncode, 0, result.stderr.decode(errors="replace"))
+                self.assertEqual(result.stdout.decode(), "database-connection-invalid")
     def test_database_context_rejects_unsupported_driver_before_bridge_use(self):
         invalid = json.loads(json.dumps(MARIADB_CONTEXT))
         invalid["connection"]["driver"] = "sqlite"

@@ -16,7 +16,7 @@ final class Messages
         'billing-guard-stale' => 'Full backups need Paymenter\'s cron job to have run in the last few minutes, so they can avoid the daily billing run. Check the cron job on the Backups tab.',
         'billing-window-protected' => 'Waiting until Paymenter\'s daily billing run is over.',
         'schedule-overlaps-billing' => 'This time is too close to Paymenter\'s daily billing run. Pick a time outside the window shown under the time.',
-        'schedule-field-invalid' => 'A schedule setting is invalid. Check the highlighted setting.',
+        'schedule-field-invalid' => 'A schedule setting is invalid. Review the schedule settings and try again.',
         'schedule-kind-required' => 'Name the schedule: add --kind full or --kind database.',
         'scheduler-missing' => 'No cron job runs Paymenter\'s scheduler. Add the cron job shown on the Backups tab.',
         'job-lock-busy' => 'A Paymenter cron job was still running. The backup will try again next minute.',
@@ -50,7 +50,7 @@ final class Messages
         'request-not-launchable' => 'This task is no longer waiting to start. Refresh the task list before trying again.',
 
         // Configuration
-        'config-invalid' => 'A saved setting is invalid. Check the highlighted setting.',
+        'config-invalid' => 'A saved setting is invalid. Review the settings and try again.',
         'timezone-data-unavailable' => 'The time zone database is unavailable. Install the tzdata package.',
         'gzip-busybox' => 'gzip on this server is BusyBox; Backups needs GNU gzip',
         'storage-required' => 'Keep backups on this server, upload them to S3, or enable both under Storage.',

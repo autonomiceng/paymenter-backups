@@ -6,6 +6,8 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
+from paymenter_backups import cli
+from paymenter_backups import cli
 from paymenter_backups.engine import run_tool
 from paymenter_backups.native_writer import run
 
@@ -33,6 +35,30 @@ MARIADB_CONTEXT = {
 
 
 class NativeWriterDatabaseContextTests(unittest.TestCase):
+    def test_native_writer_cause_accepts_only_known_codes(self):
+        self.assertEqual(cli.native_writer_cause(
+            b'{"error":"config-write-outcome-unknown","detail":{"writer_cause":"database-driver-unsupported"}}'),
+            "database-driver-unsupported")
+        self.assertEqual(cli.native_writer_cause(
+            b'{"error":"app","detail":{"writer_cause":"abc"}}'),
+            "unrecognized")
+        self.assertEqual(cli.native_writer_cause(
+            b'{"error":"config-write-outcome-unknown","detail":{"writer_cause":"username=app password=abc"}}'),
+            "unrecognized")
+        self.assertEqual(cli.native_writer_cause(b"PDO failed with password=abc"), "unrecognized")
+
+    def test_native_writer_cause_accepts_only_known_codes(self):
+        self.assertEqual(cli.native_writer_cause(
+            b'{"error":"config-write-outcome-unknown","detail":{"writer_cause":"database-driver-unsupported"}}'),
+            "database-driver-unsupported")
+        self.assertEqual(cli.native_writer_cause(
+            b'{"error":"app","detail":{"writer_cause":"abc"}}'),
+            "unrecognized")
+        self.assertEqual(cli.native_writer_cause(
+            b'{"error":"config-write-outcome-unknown","detail":{"writer_cause":"username=app password=abc"}}'),
+            "unrecognized")
+        self.assertEqual(cli.native_writer_cause(b"PDO failed with password=abc"), "unrecognized")
+
     def test_artisan_child_gets_only_validated_database_environment(self):
         # This child models Artisan's environment lookup before the command can
         # read its JSON stdin. Its parent has DB settings and unrelated secrets,

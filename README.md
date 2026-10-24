@@ -14,8 +14,9 @@ scope. Read [recovery](docs/RECOVERY.md) before relying on either kind.
 
 - Linux, Python 3.10+, and the application's PHP CLI 8.3+.
 - Paymenter 1.5.9, the version used by the native integration tests.
-- GNU tar, GNU gzip, time zone data (`tzdata`), and a supported MariaDB/MySQL dump client.
-  Minimal images such as Alpine may need the `tzdata` package installed.
+- GNU tar, GNU gzip, and a supported MariaDB/MySQL dump client.
+- Only non-UTC schedules need time zone data (`tzdata`). Minimal images such as
+  Alpine may need the `tzdata` package installed.
 - For encrypted S3 copies: GnuPG with `gpg`, `gpg-agent`, and `gpgconf`.
 - An owner-private directory outside Paymenter and every public web directory.
 - For full backups: cooperative scheduler/worker locks and the host checks

@@ -62,7 +62,7 @@ def inspect(name, configured='', fallback=None, capabilities=True):
                     if 'busybox' in help_diagnostic:
                         result['code'] = 'gzip-busybox'
                         return result
-                valid = valid and 'gzip' in output.lower()
+                valid = valid and 'gzip' in output.lower() and 'free software foundation' in diagnostic
             if not valid:
                 result['code'] = 'tool-capability-unsupported'
                 return result

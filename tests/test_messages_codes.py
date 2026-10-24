@@ -29,6 +29,7 @@ NON_ERRORS = {
     'recovery-key', 'request-worker', 's3-delivery', 's3-verify', 'scope-changed',
     'staging-removal', 'transactional-database-only', 'untrusted-transport-only',
     'us-east-1', 'utf-8', 'visible-zero',
+    'command-not-registered', 'writer-failed', 'writer-output-invalid',
     'native-writer-failed', 'writer-exited-without-output', 'writer-process-failed', 'writer-timeout',
 }
 
@@ -97,6 +98,13 @@ def emitted_codes():
 
 @unittest.skipUnless(PHP, 'PHP required for administrator message contracts')
 class EmittedMessageTests(unittest.TestCase):
+    def test_tzdata_requirement_is_limited_to_non_utc_schedules(self):
+        for relative in ('README.md', 'docs/INSTALL.md'):
+            with self.subTest(path=relative):
+                text = (ROOT / relative).read_text()
+                self.assertIn('Only non-UTC schedules need time zone data (`tzdata`).', text)
+                self.assertNotIn('GNU gzip, time zone data (`tzdata`)', text)
+
     def messages(self, codes):
         script = r'''
 require $argv[1];
@@ -161,6 +169,8 @@ $result = [
     'timezone' => \Paymenter\Extensions\Others\Backups\Messages::error('timezone-data-unavailable'),
     'gzip' => \Paymenter\Extensions\Others\Backups\Messages::readinessItem('gzip-busybox', [])['text'],
     'details' => \Paymenter\Extensions\Others\Backups\Runtime::errorDetails('{"error":"config-invalid","field":"schedule_time","detail":{"value":"secret"}}'),
+    'database_cause' => \Paymenter\Extensions\Others\Backups\Runtime::errorDetails('{"error":"config-write-outcome-unknown","detail":{"writer_cause":"database-pdo-driver-unavailable"}}'),
+    'unknown_cause' => \Paymenter\Extensions\Others\Backups\Runtime::errorDetails('{"error":"config-write-outcome-unknown","detail":{"writer_cause":"arbitrary-sensitive-text"}}'),
 ];
 echo json_encode($result, JSON_THROW_ON_ERROR);
 '''
@@ -170,10 +180,14 @@ echo json_encode($result, JSON_THROW_ON_ERROR);
         self.assertEqual(result.returncode, 0, result.stdout.decode() + result.stderr.decode())
         value = json.loads(result.stdout)
         self.assertNotIn('Open Settings and save', value['config'])
+        self.assertNotIn('highlighted setting', value['config'])
         self.assertNotIn('Open Settings and save', self.messages(('schedule-field-invalid',))['schedule-field-invalid'][1])
+        self.assertNotIn('highlighted setting', self.messages(('schedule-field-invalid',))['schedule-field-invalid'][1])
         self.assertIn('tzdata', value['timezone'])
         self.assertEqual(value['gzip'], 'gzip on this server is BusyBox; Backups needs GNU gzip')
-        self.assertEqual(value['details'], {'code': 'config-invalid', 'field': 'schedule_time'})
+        self.assertEqual(value['details'], {'code': 'config-invalid', 'field': 'schedule_time', 'cause': None})
+        self.assertEqual(value['database_cause']['cause'], 'database-pdo-driver-unavailable')
+        self.assertEqual(value['unknown_cause']['cause'], 'unrecognized')
 
     def test_engine_field_reaches_the_save_form_error(self):
         result = subprocess.run([PHP, str(ROOT / 'tests/integration/save_refusal_checks.php')],
@@ -184,6 +198,8 @@ echo json_encode($result, JSON_THROW_ON_ERROR);
                                             'cause': 'actor-login-failed'})
         self.assertIn('settings.schedule_time', value['errors'])
         self.assertIn('Writer cause: actor-login-failed.', value['notification']['body'])
+        self.assertNotIn('highlighted setting', value['errors']['settings.schedule_time'])
+        self.assertNotIn('highlighted setting', value['notification']['body'])
         self.assertNotIn('Open Settings and save', value['errors']['settings.schedule_time'])
         self.assertNotIn('Open Settings and save', value['notification']['body'])
         self.assertIn('Backups settings command', value['command_notification']['body'])

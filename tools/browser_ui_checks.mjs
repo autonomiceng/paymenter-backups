@@ -1,14 +1,15 @@
 #!/usr/bin/env node
 /** Real browser checks for a disposable native fixture. No package or browser is installed by this script.
- * node tools/browser_ui_checks.mjs --workroot /path/to/.native-work/ui-ID --base-url http://127.0.0.1:PORT
+ * node tools/browser_ui_checks.mjs --workroot /path/to/TMPDIR/paymenter-backups-ui-ID/ui-ID --base-url http://127.0.0.1:PORT
  *   --package-path /path/to/playwright --phase inspect|defaults|validation|secrets|recovery|lifecycle|s3|last-good-edge|all
  * Optional: --output /private/output --browser-library-path /private/extracted/libs
  * Mutating phases require --allow-fixture-mutations. Fixture helpers launch only exact request IDs.
  */
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
-import { readFile, writeFile, mkdir, readdir, stat } from 'node:fs/promises';
+import { readFile, writeFile, mkdir, readdir, stat, lstat, realpath } from 'node:fs/promises';
 import path from 'node:path';
+import { tmpdir } from 'node:os';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { createHash } from 'node:crypto';
@@ -22,8 +23,21 @@ for (let i = 2; i < process.argv.length; i++) {
 for (const key of ['workroot', 'base-url', 'package-path']) assert(args[key], `Missing --${key}`);
 const root = path.resolve(import.meta.dirname, '..');
 const work = path.resolve(args.workroot);
-assert.equal(path.dirname(work), path.join(root, '.native-work'));
+const workbase = path.dirname(work);
+const temporary = await realpath(process.env.TMPDIR || tmpdir());
+assert.equal(path.dirname(workbase), temporary);
+const temporaryInfo = await stat(temporary);
+assert(temporaryInfo.isDirectory(), 'Temporary parent must be a directory');
+assert.equal(temporaryInfo.mode & 0o002 && !(temporaryInfo.mode & 0o1000), 0,
+  'Temporary parent must not be world-writable without the sticky bit');
+assert(path.basename(workbase).startsWith('paymenter-backups-ui-'), 'Require a private random UI fixture base');
 assert(path.basename(work).startsWith('ui-'), 'Require a disposable ui- fixture');
+for (const directory of [workbase, work]) {
+  const info = await lstat(directory);
+  assert(info.isDirectory() && !info.isSymbolicLink(), 'Fixture directories must not be links');
+  assert.equal(info.uid, process.getuid(), 'Fixture directories must belong to this user');
+  assert.equal(info.mode & 0o077, 0, 'Fixture directories must be owner-private');
+}
 const metadata = JSON.parse(await readFile(path.join(work, 'ui-fixture.json'), 'utf8'));
 assert.equal(metadata.work, work);
 assert.equal(metadata.app, path.join(work, 'app'));

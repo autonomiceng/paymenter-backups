@@ -34,6 +34,9 @@ if ($mode === 'upload') {
     echo json_encode(['id' => $user->id]) . "\n";
 } elseif ($mode === 'env-db-save') {
     check(config('database.default') === 'mariadb', 'environment-only default driver was not loaded');
+    $diagnostic = Paymenter\Extensions\Others\Backups\Runtime::errorDetails(
+        '{"error":"config-save-outcome-unknown","detail":{"writer_cause":"password=fixture-secret"}}');
+    check($diagnostic['cause'] === 'unrecognized', 'native Save diagnostic accepted an unsafe cause');
     $db = (new Illuminate\Database\ConfigurationUrlParser)->parseConfiguration(config('database.connections.mariadb'));
     check(($db['driver'] ?? null) === 'mariadb' && ($db['database'] ?? null) === 'paymenter_fixture'
         && ($db['host'] ?? null) === '127.0.0.1' && (int) ($db['port'] ?? 0) > 0
@@ -80,8 +83,30 @@ if ($mode === 'upload') {
         'active database context did not reach the bridge envelope');
     $oldCredentials = $bridgeEnvelope['credentials'] ?? [];
     $credentials = ['s3' => ['access_key' => 'ENV-ONLY-FIXTURE-ACCESS', 'secret_key' => 'ENV-ONLY-FIXTURE-SECRET'], 'site' => null];
+    $nativeSave = static function (array $settings, ?array $secrets = null) use ($runtime) {
+        try {
+            $result = $runtime::saveConfiguration($settings, $secrets);
+        } catch (Throwable $error) {
+            $cause = $error instanceof Paymenter\Extensions\Others\Backups\EngineCommandException
+                ? $error->cause : null;
+            $outcome = preg_match('/^[a-z0-9][a-z0-9-]{0,63}$/D', $error->getMessage())
+                ? $error->getMessage() : 'save-failed';
+            fwrite(STDERR, 'Native Save diagnostic: ' . json_encode([
+                'outcome' => $outcome,
+                'cause' => $runtime::safeWriterCause($cause) ?? 'unrecognized',
+            ], JSON_THROW_ON_ERROR) . "\n");
+            throw $error;
+        }
+        if (($result['updated'] ?? false) !== true) {
+            fwrite(STDERR, 'Native Save diagnostic: ' . json_encode([
+                'outcome' => $runtime::safeWriterCause($result['error'] ?? null) ?? 'config-save-outcome-unknown',
+                'cause' => $runtime::safeWriterCause($result['writer_cause'] ?? null) ?? 'unrecognized',
+            ], JSON_THROW_ON_ERROR) . "\n");
+        }
+        return $result;
+    };
     try {
-        $saved = $runtime::saveConfiguration(['dump' => '/usr/bin/mysqldump'], $credentials);
+        $saved = $nativeSave(['dump' => '/usr/bin/mysqldump'], $credentials);
         check(($saved['updated'] ?? false) === true && $record->settings()->where('key', 'dump')->value('value') === '/usr/bin/mysqldump',
             'environment-only native writer did not persist settings');
     } finally {
@@ -90,7 +115,7 @@ if ($mode === 'upload') {
             else { $runtime::credentials(['clear' => true]); }
         } finally {
             if ($oldDump === null) { $record->settings()->where('key', 'dump')->delete(); }
-            else { $runtime::saveConfiguration(['dump' => $oldDump]); }
+            else { $nativeSave(['dump' => $oldDump]); }
         }
     }
     echo json_encode(['env_only_mariadb_save' => true]) . "\n";

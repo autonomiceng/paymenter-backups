@@ -124,7 +124,11 @@ final class ConfigSetCommand extends Command
                 'config-save-outcome-unknown', 'credentials-unreadable', 'credentials-invalid', 'maintenance-probe-credentials-invalid',
                 'maintenance-probe-origin-invalid', 'maintenance-probe-origin-mismatch', 'installation-missing', 'installation-mismatch',
                 'private-file-invalid', 'private-root-invalid', 'billing-settings-unreadable', 'extension-uninstalled',
-                'database-connection-invalid', 'database-driver-unsupported'], true) ? $error->getMessage() : 'config-invalid';
+                'database-connection-invalid', 'database-pdo-driver-unavailable', 'database-connection-failed',
+                'database-driver-unsupported', 'database-tls-unsupported', 'database-prefix-unsupported',
+                'unsupported-database', 'native-secret-row-refused', 'document-roots-invalid',
+                'private-pipe-required', 'application-unavailable', 'private-root-unavailable',
+                'archive-key-change-busy'], true) ? $error->getMessage() : 'config-invalid';
             $writerCause ??= self::exceptionCause($error);
             if ($this->option('defer-init')) {
                 // Artisan's styled error() writes to its console output stream.
