@@ -1,4 +1,5 @@
 """Scheduler commands shown by the native page preserve the detected launcher."""
+import contextlib
 import json
 import pathlib
 import shlex
@@ -41,7 +42,9 @@ class GuardedSchedulerUI(unittest.TestCase):
     COMMAND = "/usr/bin/flock -n '/private/existing jobs.lock' /usr/local/bin/php /opt/beco/scheduler.php"
 
     def setUp(self):
-        self.enterContext(guarded_host())
+        contexts = contextlib.ExitStack()
+        self.addCleanup(contexts.close)
+        contexts.enter_context(guarded_host())
 
     def scheduler_line(self, app='/app', items=None, suggestion=None):
         jobs = {'items': items or []}

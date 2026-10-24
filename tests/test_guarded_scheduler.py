@@ -1,4 +1,5 @@
 """The guarded scheduler remains exact through discovery and display."""
+import contextlib
 import json
 import os
 import pathlib
@@ -16,7 +17,9 @@ from guarded_scheduler_fixture import guarded_host
 
 class GuardedSchedulerTests(unittest.TestCase):
     def setUp(self):
-        self.host = self.enterContext(guarded_host())
+        contexts = contextlib.ExitStack()
+        self.addCleanup(contexts.close)
+        self.host = contexts.enter_context(guarded_host())
         self.script = self.host.script
         temporary = tempfile.TemporaryDirectory(prefix='backups-guarded-scheduler-')
         self.addCleanup(temporary.cleanup)
@@ -195,7 +198,7 @@ class GuardedSchedulerTests(unittest.TestCase):
             self.assertEqual(systemd_locks(self.state.app, [str(self.lock)], tools), set())
 
     def test_running_guarded_scheduler_is_checked_after_lock_acquisition(self):
-        real_path = pathlib.Path
+        real_path = type(self.state.root)
         proc = self.state.root / 'proc'
         child = proc / str(os.getpid() + 100000)
         child.mkdir(parents=True)
