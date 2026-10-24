@@ -21,6 +21,8 @@ PHP_NAME = re.compile(r'(?:php(?:[0-9]+(?:\.[0-9]+)?)?|php-cli|ea-php[0-9]+|lsph
 UNIT_NAME = re.compile(r'(?:[A-Za-z0-9_]|\\x[0-9A-Fa-f]{2})(?:[A-Za-z0-9_.@:-]|\\x[0-9A-Fa-f]{2}){0,199}\.service')
 KINDS = {'schedule:run': 'scheduler', 'queue:work': 'queue-worker', 'queue:listen': 'queue-worker', 'horizon': 'queue-worker', 'schedule:work': 'scheduler'}
 PARSER_VERSION = 3
+SYSTEMD_SHOW_PROPERTIES = ('Id', 'ExecStart', 'User', 'WorkingDirectory', 'DynamicUser', 'LoadState', 'Restart')
+SYSTEMD_RESTART_POLICIES = frozenset(('always', 'on-success', 'on-failure', 'on-abnormal', 'on-watchdog', 'on-abort'))
 
 
 def cron_quote(value):
@@ -277,7 +279,7 @@ def systemd(app, tools):
                 raise ValueError()
             if not units:
                 continue
-            raw = read(manager + ['show', '--no-pager', '--property=Id,ExecStart,User,WorkingDirectory,DynamicUser,LoadState,Restart', '--', *sorted(units)])
+            raw = read(manager + ['show', '--no-pager', '--property=' + ','.join(SYSTEMD_SHOW_PROPERTIES), '--', *sorted(units)])
             blocks = re.split(r'\n\s*\n', raw.strip())
             seen = set()
             for block in blocks:
@@ -297,7 +299,7 @@ def systemd(app, tools):
                 if len(invocations) != 1 or props.get('DynamicUser') == 'yes':
                     result.append(record('', app, 'systemd', unit))
                     continue
-                result.append(record(invocations[0], app, 'systemd', unit, working, props.get('Restart') in ('always', 'on-success', 'on-failure', 'on-abnormal', 'on-watchdog', 'on-abort')))
+                result.append(record(invocations[0], app, 'systemd', unit, working, props.get('Restart') in SYSTEMD_RESTART_POLICIES))
             if seen != units:
                 raise ValueError()
         except (KeyError, ValueError, UnicodeError, BackupError, OSError):
