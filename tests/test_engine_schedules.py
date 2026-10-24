@@ -1004,6 +1004,58 @@ class DiscoveryTests(PrivateFixture):
         self.assertEqual(current['items'], inventory['items'])
         self.assertEqual(discovery.admission(self.envelope, current), (fresh_errors, fresh_locks))
 
+    def test_legacy_coordination_and_discovery_admission_agree_on_restarting_finite_worker(self):
+        unit = 'paymenter-worker.service'
+        lock = self.state.root / 'queue.lock'
+        lock.touch(mode=0o600, exist_ok=True)
+        command = f'/usr/bin/flock -n {lock} /usr/bin/php {self.app}/artisan queue:work --stop-when-empty'
+        self.envelope['tools']['systemctl'] = self.script('restart-aware-systemctl', "print('[]')")
+        show = {
+            'Id': unit,
+            'ExecStart': f'{{ path=/usr/bin/flock ; argv[]={command} ; ignore_errors=no ; }}',
+            'User': str(os.getuid()),
+            'WorkingDirectory': str(self.app),
+            'DynamicUser': 'no',
+            'LoadState': 'loaded',
+            'Restart': 'always',
+        }
+
+        def systemctl(arguments, timeout):
+            if '--user' in arguments:
+                return b'[]'
+            if 'list-timers' in arguments:
+                return json.dumps([{'activates': unit}]).encode()
+            if 'list-units' in arguments:
+                return json.dumps([{'unit': unit, 'active': 'active'}]).encode()
+            if 'list-unit-files' in arguments:
+                return json.dumps([{'unit_file': unit, 'state': 'enabled'}]).encode()
+            if 'show' in arguments:
+                requested = next(value.partition('=')[2].split(',') for value in arguments
+                                 if value.startswith('--property='))
+                return ('\n'.join(f'{name}={show[name]}' for name in requested) + '\n').encode()
+            raise AssertionError(f'unexpected systemctl command: {arguments}')
+
+        def maintenance_command(arguments, timeout):
+            if arguments[0] == self.envelope['tools']['crontab']:
+                return b'# no fixture jobs\n'
+            return systemctl(arguments, timeout)
+
+        with patch.object(discovery, 'run', side_effect=systemctl):
+            rows = discovery.systemd(self.app, self.envelope['tools'])
+        inventory = dict(self.inventory(), app=str(self.app), schema_version=1,
+                         parser_version=discovery.PARSER_VERSION)
+        inventory['items'].extend(rows)
+        errors, _ = discovery.admission(self.envelope, inventory)
+        self.assertIn('continuous-worker-present', [item['code'] for item in errors])
+
+        legacy = dict(self.envelope, settings=dict(self.settings, settings_version=1,
+                                                    job_lock_paths=[str(lock)]))
+        with patch('paymenter_backups.maintenance.run', side_effect=maintenance_command), \
+             patch('paymenter_backups.maintenance.app_workers', return_value=[]), \
+             self.assertRaisesRegex(BackupError, 'job-locks-unverified'):
+            with coordination(self.state, legacy):
+                self.fail('a restarting finite worker must not be admitted')
+
 
 class ReadinessTests(PrivateFixture):
     def full_plan(self, inventory=None):
