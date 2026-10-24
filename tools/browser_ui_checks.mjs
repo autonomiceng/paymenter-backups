@@ -13,7 +13,7 @@ import { tmpdir } from 'node:os';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { createHash } from 'node:crypto';
-import { hasUnsafeWritableParentMode } from './fixture_modes.mjs';
+import { hasSafeTemporaryAncestors } from './fixture_modes.mjs';
 const run = promisify(execFile);
 const args = {};
 for (let i = 2; i < process.argv.length; i++) {
@@ -27,11 +27,8 @@ const work = path.resolve(args.workroot);
 const workbase = path.dirname(work);
 const temporary = await realpath(process.env.TMPDIR || tmpdir());
 assert.equal(path.dirname(workbase), temporary);
-const temporaryInfo = await stat(temporary);
-assert(temporaryInfo.isDirectory(), 'Temporary parent must be a directory');
-assert([0, process.geteuid()].includes(temporaryInfo.uid), 'Temporary parent must be root- or user-owned');
-assert.equal(hasUnsafeWritableParentMode(temporaryInfo.mode), false,
-  'Temporary parent must not be group- or world-writable without the sticky bit');
+assert.equal(await hasSafeTemporaryAncestors(temporary), true,
+  'Temporary parent and ancestors must be trusted directories');
 assert(path.basename(workbase).startsWith('paymenter-backups-ui-'), 'Require a private random UI fixture base');
 assert(path.basename(work).startsWith('ui-'), 'Require a disposable ui- fixture');
 for (const directory of [workbase, work]) {
