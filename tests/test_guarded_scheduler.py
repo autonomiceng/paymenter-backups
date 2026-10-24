@@ -207,4 +207,3 @@ class GuardedSchedulerTests(unittest.TestCase):
             self.assertEqual(process.app_workers(real_path('/other')), [])
             cmdline.write_bytes(b'/usr/bin/php\0/opt/beco/scheduler.php\0')
             self.assertEqual(process.app_workers(self.state.app), [])
-
