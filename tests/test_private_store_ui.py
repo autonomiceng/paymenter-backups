@@ -167,19 +167,19 @@ class PrivateStoreUiTests(unittest.TestCase):
             )
             self.assertEqual(code, "private-root-invalid")
 
-    def test_unidentified_foreign_directory_prompts_for_a_new_dedicated_folder(self):
+    def test_unidentified_foreign_filesystem_root_prompts_for_a_new_dedicated_folder(self):
         with tempfile.TemporaryDirectory(prefix="backups-private-store-foreign-") as temporary:
             base = pathlib.Path(temporary)
             app = base / "app"
             (app / "public").mkdir(parents=True)
-            private = base / "shared"
-            private.mkdir(mode=0o700)
+            private = pathlib.Path("/")
             setup = (
                 'eval("namespace Paymenter\\\\Extensions\\\\Others\\\\Backups; '
                 'function posix_geteuid() { return 999999; }"); '
             )
             result = self.private_root_problem(app, private, setup)
             self.assertEqual(result["problem"]["code"], "private-root-invalid")
+            self.assertEqual(result["problem"]["params"]["path"], "/")
             self.assertEqual(result["problem"]["params"]["reason"], "owner")
             self.assertIn("Choose a new, dedicated, empty folder", result["message"])
             self.assertNotIn("Change its owner", result["message"])
