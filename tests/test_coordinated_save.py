@@ -112,9 +112,10 @@ namespace Illuminate\Support\Facades {
         public static function loginUsingId($actor) { self::$actor = $actor; return true; }
         public static function onceUsingId($actor) {
             if ($actor === 13) { throw new \RuntimeException('fixture actor lookup failed'); }
+            if ($actor === 15) { self::$actor = $actor; return false; }
             self::$actor = $actor; return true;
         }
-        public static function user() { return new class { public function hasPermission($permission) { return \Illuminate\Support\Facades\Auth::$actor !== 14; } }; }
+        public static function user() { return \Illuminate\Support\Facades\Auth::$actor === 15 ? null : new class { public function hasPermission($permission) { return \Illuminate\Support\Facades\Auth::$actor !== 14; } }; }
     }
 }
 namespace App\Models {
@@ -362,21 +363,24 @@ class CoordinatedSaveTests(PrivateFixture):
 
         self.args.database_connection = MARIADB_CONTEXT
         cases = (
-            ({'unexpected_setting_name': 'never logged'}, 9, 'unknown-input-key:unexpected_setting_name', None),
+            ({'unexpected_setting_name': 'never logged'}, 9, 'unrecognized', None),
             ({'retention_keep_full': '__fixture_validation_failure__'}, 9,
              'validation:retention_keep_full:integer', 'retention_keep_full'),
             ({'retention_keep_full': '7'}, 13, 'actor-login-failed', None),
             ({'retention_keep_full': '7'}, 14, 'actor-not-authorized', None),
-            ({'s3_bucket': '__fixture_unexpected_exception__'}, 9, 'exception:LogicException', None),
+            ({'retention_keep_full': '7'}, 15, 'actor-login-failed', None),
+            ({'s3_bucket': '__fixture_unexpected_exception__'}, 9, 'unrecognized', None),
         )
         for values, actor, cause, field in cases:
             with self.subTest(cause=cause), \
                     self.state.lock('config.lock') as config_fd, self.state.lock('tick.lock') as tick_fd:
+                before = self.rows()
                 with self.assertRaises(BackupError) as raised:
                     cli.native_settings(self.args, self.state, values, (config_fd, tick_fd), actor=actor)
                 self.assertEqual(raised.exception.code, 'config-write-outcome-unknown')
                 self.assertEqual(raised.exception.detail, {'writer_cause': cause})
                 self.assertEqual(raised.exception.field, field)
+                self.assertEqual(self.rows(), before, 'refused writer changed native rows')
 
     def test_r9_overview_carries_a_bounded_writer_cause(self):
         value = cli.overview(self.state, self.envelope, 'config-save-outcome-unknown', writer_cause='actor-login-failed')
@@ -448,7 +452,7 @@ class CoordinatedSaveTests(PrivateFixture):
                         'credentials': {'_fixture_fail': code},
                     })
                 self.assertEqual(refused.exception.code, code)
-                self.assertEqual(refused.exception.detail.get('writer_cause'), code)
+                self.assertEqual(refused.exception.detail.get('writer_cause'), 'unrecognized')
                 self.assertEqual(self.rows()['rows']['s3_bucket']['value'], 'old-destination')
                 self.assertEqual(self.credentials['access_key'], 'fake-old')
                 self.assertFalse((self.state.root / 'config-save.json').exists())

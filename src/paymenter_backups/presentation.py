@@ -13,6 +13,7 @@ import urllib.parse
 
 from . import artifacts
 from .common import BackupError, private_file, read_json, safe_writer_cause
+from .config import DEFAULTS
 from .engine import plan, storage_usage
 from .process import process_identity
 from .requests import ACTIVE, list_requests, next_slot
@@ -191,7 +192,7 @@ def origin(url):
 
 
 def configuration(state, envelope, error=None, encryption_key_status=None, writer_cause=None):
-    writer_cause = safe_writer_cause(writer_cause)
+    writer_cause = safe_writer_cause(writer_cause, fields=DEFAULTS)
     if envelope is None:
         result = {"available": False, "valid": False, "error": code(error) or "unknown"}
         if writer_cause is not None:

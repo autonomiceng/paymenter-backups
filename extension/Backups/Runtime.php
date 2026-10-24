@@ -16,6 +16,20 @@ final class EngineCommandException extends RuntimeException
 
 final class Runtime
 {
+    private const SAFE_WRITER_CAUSES = [
+        'actor-login-failed', 'actor-not-authorized', 'archive-key-change-busy', 'application-unavailable',
+        'billing-settings-unreadable', 'busy', 'command-not-registered', 'config-changed',
+        'config-coordination-required', 'config-save-incomplete', 'config-save-outcome-unknown',
+        'config-write-failed', 'config-write-outcome-unknown', 'credentials-invalid', 'credentials-unreadable',
+        'database-connection-invalid', 'database-connection-failed', 'database-pdo-driver-unavailable',
+        'database-driver-unsupported', 'database-tls-unsupported', 'database-prefix-unsupported',
+        'document-roots-invalid', 'extension-uninstalled', 'installation-missing', 'installation-mismatch',
+        'maintenance-probe-credentials-invalid', 'maintenance-probe-origin-invalid', 'maintenance-probe-origin-mismatch',
+        'native-secret-row-refused', 'private-file-invalid', 'private-pipe-required', 'private-root-invalid',
+        'private-root-unavailable', 'unsupported-database', 'writer-failed', 'writer-timeout',
+        'writer-process-failed', 'writer-output-invalid', 'writer-exited-without-output',
+    ];
+
     /** Child startup excludes loader, resolver, TLS and application overrides. */
     private static function safeEnvironment(): array
     {
@@ -120,10 +134,10 @@ PYTHON;
     {
         $decoded = json_decode(trim($stderr), true);
         $code = is_array($decoded) ? ($decoded['error'] ?? null) : null;
-        if (!is_string($code) || !preg_match('/^[a-z0-9][a-z0-9-]{0,63}$/D', $code)) { $code = $fallback; }
+        if (!is_string($code) || !Messages::known($code)) { $code = Messages::known($fallback) ? $fallback : 'engine-unavailable'; }
         $field = is_array($decoded) && is_string($decoded['field'] ?? null) ? $decoded['field'] : null;
         if ($field === null || !array_key_exists($field, Settings::LABELS)) { $field = null; }
-        $details = ['code' => $code, 'field' => $field];
+        $details = ['code' => $code, 'field' => $field, 'cause' => null];
         $cause = self::safeWriterCause(is_array($decoded) ? ($decoded['detail']['writer_cause'] ?? null) : null);
         if ($cause !== null) { $details['cause'] = $cause; }
         return $details;
@@ -132,15 +146,16 @@ PYTHON;
     /** Remove credentials and terminal control bytes before a writer cause reaches logs or UI. */
     public static function safeWriterCause(mixed $cause): ?string
     {
-        if (!is_string($cause) || $cause === '') { return null; }
-        if ($cause === 'command-not-registered') { return $cause; }
-        $cause = preg_replace('/\x1B\[[0-?]*[ -\/]*[@-~]/', '', $cause) ?? '';
-        $cause = preg_replace('/(?i)\b(password|passwd|pwd|username|user|secret|token|api[_-]?key|access[_-]?key|authorization)\b(\s*[:=]\s*)(?:"[^"]*"|\'[^\']*\'|[^\s,;]+)/', '$1$2[redacted]', $cause) ?? '';
-        $cause = preg_replace('/(?i)(:\/\/)[^\/@\s:]+:[^\/@\s]+@/', '$1[redacted]@', $cause) ?? '';
-        $cause = strip_tags($cause);
-        $cause = preg_replace('/[\x00-\x1F\x7F]/', ' ', $cause) ?? '';
-        $cause = trim(preg_replace('/\s+/', ' ', $cause) ?? '');
-        return $cause === '' ? null : substr($cause, 0, 160);
+        if ($cause === null) { return null; }
+        if ($cause === 'unrecognized') { return $cause; }
+        if (!is_string($cause) || strlen($cause) > 160) { return 'unrecognized'; }
+        if (in_array($cause, self::SAFE_WRITER_CAUSES, true)) { return $cause; }
+        if (preg_match('/^validation:([a-z][a-z0-9_]{0,63}):([a-z][a-z0-9_-]{0,31})$/D', $cause, $match)
+            && array_key_exists($match[1], Settings::LABELS)
+            && in_array($match[2], ['boolean', 'in', 'integer', 'json', 'max', 'min', 'nullable', 'regex', 'required', 'scalar', 'string', 'timezone'], true)) {
+            return $cause;
+        }
+        return 'unrecognized';
     }
 
     /** Record a fixed event code and only the bounded, redacted writer cause. */
@@ -299,7 +314,7 @@ PYTHON;
         }
         if (!$process->isSuccessful()) {
             $failure = self::errorDetails($process->getErrorOutput(), 'config-save-outcome-unknown');
-            if ($failure['cause'] !== null || in_array($failure['code'], ['command-not-registered', 'config-write-outcome-unknown', 'config-write-failed'], true)) {
+            if (($failure['cause'] ?? null) !== null || in_array($failure['code'], ['command-not-registered', 'config-write-outcome-unknown', 'config-write-failed'], true)) {
                 $failure = self::recordNativeWriterFailure($process->getErrorOutput());
                 throw new EngineCommandException($failure['code'], $failure['field'], $failure['cause'] ?? null);
             }

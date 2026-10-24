@@ -12,7 +12,6 @@ use Filament\Support\Enums\FontFamily;
 use Filament\Support\Enums\Size;
 use Filament\Tables\Columns\TextColumn;
 use Filament\Tables\Table;
-use Illuminate\Support\HtmlString;
 use Illuminate\Pagination\LengthAwarePaginator;
 use Paymenter\Extensions\Others\Backups\Messages;
 use Paymenter\Extensions\Others\Backups\Runtime;
@@ -87,10 +86,10 @@ trait BuildsHistoryTable
         return $rows;
     }
 
-    private function schedulerWaitLine(): HtmlString
+    private function schedulerWaitLine(): \Illuminate\Support\HtmlString
     {
-        $url = e(static::getUrl(['tab' => 'backups']) . '#setup');
-        return new HtmlString('Waiting for Paymenter\'s scheduled tasks. Set them up on <a class="underline" href="' . $url . '">the Backups tab</a>.');
+        $url = static::getUrl(['tab' => 'backups']) . '#setup';
+        return Messages::schedulerWaitLine($url);
     }
 
     private function hasDeletedRuns(): bool

@@ -284,6 +284,49 @@ final class Messages
 
     public static function known(string $code): bool { return isset(self::ERRORS[$code]); }
 
+    /** Format bounded data-directory details for Save and readiness messages. */
+    public static function privateRootProblem(array $problem): string
+    {
+        $code = $problem['code'] ?? null;
+        $params = is_array($problem['params'] ?? null) ? $problem['params'] : [];
+        $path = self::displayPath($params['path'] ?? null);
+        if ($path === '') { return self::error(is_string($code) ? $code : null); }
+        if ($code === 'private-root-invalid') {
+            return match ($params['reason'] ?? null) {
+                'owner' => 'Data directory ' . $path . ' isn\'t owned by the web user. Change its owner to the web user and set mode 0700, or choose another folder outside Paymenter.',
+                'mode' => 'Data directory ' . $path . ' must have mode 0700. Set its mode to 0700, or choose another folder outside Paymenter.',
+                default => self::error($code),
+            };
+        }
+        if ($code === 'private-root-unavailable') {
+            $parent = self::displayPath($params['parent'] ?? null);
+            if ($parent === '') { return self::error($code); }
+            if (($params['parent_is_folder'] ?? null) === false) {
+                return 'Data directory ' . $path . ' can\'t be created: ' . $parent . ' isn\'t a folder. Choose a writable folder outside Paymenter.';
+            }
+            if (($params['parent_is_folder'] ?? null) === true) {
+                return 'Data directory ' . $path . ' can\'t be created: the web user can\'t write to ' . $parent . '. Create it for the web user with mode 0700, or choose another folder outside Paymenter.';
+            }
+        }
+        return self::error(is_string($code) ? $code : null);
+    }
+
+    private static function displayPath(mixed $path): string
+    {
+        if (!is_string($path) || $path === '') { return ''; }
+        $path = preg_replace('/[\x00-\x1f\x7f]/', '?', $path) ?? '';
+        return strlen($path) > 400 ? substr($path, 0, 397) . '...' : $path;
+    }
+
+    /** Waiting copy and its escaped setup link for backup history. */
+    public static function schedulerWaitLine(string $url): \Illuminate\Support\HtmlString
+    {
+        $url = htmlspecialchars($url, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
+        return new \Illuminate\Support\HtmlString(
+            'Waiting for Paymenter\'s scheduled tasks. Set them up on <a class="underline" href="' . $url . '">the Backups tab</a>.'
+        );
+    }
+
     private static function shellWord(string $word): string
     {
         return preg_match('~^[A-Za-z0-9_@%+=:,./-]+$~D', $word) ? $word : escapeshellarg($word);

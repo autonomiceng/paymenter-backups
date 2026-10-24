@@ -253,7 +253,7 @@ trait SavesSettings
 
     private function refusePrivateRootProblem(array $problem): void
     {
-        $message = $problem['message'];
+        $message = Messages::privateRootProblem($problem);
         $this->addError('settings.private_root', $message);
         $this->dispatch('form-validation-error', livewireId: $this->getId());
     }

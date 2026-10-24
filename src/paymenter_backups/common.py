@@ -21,19 +21,32 @@ class BackupError(Exception):
 
 TRANSIENT_ERRORS = frozenset({"busy", "billing-guard-stale", "billing-window-protected", "job-lock-busy"})
 PREINSTALL_RUNTIME_FILES = frozenset({"identity.lock", "billing-guard.json"})
+WRITER_CAUSE_CODES = frozenset({
+    "actor-login-failed", "actor-not-authorized", "archive-key-change-busy", "application-unavailable", "billing-settings-unreadable",
+    "busy", "command-not-registered", "config-changed", "config-coordination-required", "config-save-incomplete",
+    "config-save-outcome-unknown", "config-write-failed", "config-write-outcome-unknown",
+    "credentials-invalid", "credentials-unreadable", "document-roots-invalid", "extension-uninstalled",
+    "installation-missing", "installation-mismatch", "maintenance-probe-credentials-invalid",
+    "maintenance-probe-origin-invalid", "maintenance-probe-origin-mismatch", "native-secret-row-refused",
+    "private-file-invalid", "private-pipe-required", "private-root-invalid", "private-root-unavailable",
+    "database-connection-invalid", "database-connection-failed", "database-pdo-driver-unavailable",
+    "database-driver-unsupported", "database-tls-unsupported", "database-prefix-unsupported",
+    "unsupported-database", "writer-failed", "writer-timeout", "writer-process-failed", "writer-output-invalid",
+    "writer-exited-without-output",
+})
+WRITER_VALIDATION_RULES = frozenset({
+    "boolean", "in", "integer", "json", "max", "min", "nullable", "regex", "required", "scalar", "string", "timezone",
+})
 
 
-def safe_writer_cause(value):
-    """Accept only bounded, secret-free causes that the native writer emits."""
+def safe_writer_cause(value, fields=None):
+    """Accept only fixed writer diagnostics and validation details for known fields."""
     if not isinstance(value, str) or len(value) > 160:
         return None
-    if re.fullmatch(r"[a-z][a-z0-9-]{0,63}", value):
+    if value in WRITER_CAUSE_CODES:
         return value
-    if re.fullmatch(r"unknown-input-key:[a-z][a-z0-9_]{0,63}", value):
-        return value
-    if re.fullmatch(r"validation:[a-z][a-z0-9_]{0,63}:[a-z][a-z0-9_-]{0,31}", value):
-        return value
-    if re.fullmatch(r"exception:[A-Za-z][A-Za-z0-9_]{0,63}", value):
+    match = re.fullmatch(r"validation:([a-z][a-z0-9_]{0,63}):([a-z][a-z0-9_-]{0,31})", value)
+    if match and fields is not None and match.group(1) in fields and match.group(2) in WRITER_VALIDATION_RULES:
         return value
     return None
 

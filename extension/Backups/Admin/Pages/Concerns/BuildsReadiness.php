@@ -61,7 +61,7 @@ trait BuildsReadiness
         $configuration = $this->configuration();
         $privateRootProblem = $this->privateRootProblem();
         if ($privateRootProblem !== null) {
-            $problem = Messages::readinessItem($privateRootProblem['code'], [], ['private_root_problem' => $privateRootProblem['message']]);
+            $problem = Messages::readinessItem($privateRootProblem['code'], [], ['private_root_problem' => Messages::privateRootProblem($privateRootProblem)]);
             $groups['all'][] = $problem + ['code' => $privateRootProblem['code'], 'id' => 'private-root-problem', 'page' => true, 'advisory' => false];
             return $groups;
         }
@@ -150,7 +150,7 @@ trait BuildsReadiness
         if ($this->overviewError !== null || !($configuration['available'] ?? false)) {
             $problem = $this->privateRootProblem();
             return [Messages::readinessItem($problem['code'] ?? ($configuration['error'] ?? 'engine-unavailable'), [],
-                $problem ? ['private_root_problem' => $problem['message']] : [])];
+                $problem ? ['private_root_problem' => Messages::privateRootProblem($problem)] : [])];
         }
         $groups = $this->setupGroups();
         $items = [...$groups['all'], ...$groups[$mode]];

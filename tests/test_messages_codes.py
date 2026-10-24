@@ -31,6 +31,7 @@ NON_ERRORS = {
     'us-east-1', 'utf-8', 'visible-zero',
     'command-not-registered', 'writer-failed', 'writer-output-invalid',
     'native-writer-failed', 'writer-exited-without-output', 'writer-process-failed', 'writer-timeout',
+    'actor-login-failed', 'actor-not-authorized',
 }
 
 
@@ -170,7 +171,9 @@ $result = [
     'gzip' => \Paymenter\Extensions\Others\Backups\Messages::readinessItem('gzip-busybox', [])['text'],
     'details' => \Paymenter\Extensions\Others\Backups\Runtime::errorDetails('{"error":"config-invalid","field":"schedule_time","detail":{"value":"secret"}}'),
     'database_cause' => \Paymenter\Extensions\Others\Backups\Runtime::errorDetails('{"error":"config-write-outcome-unknown","detail":{"writer_cause":"database-pdo-driver-unavailable"}}'),
+    'timezone_cause' => \Paymenter\Extensions\Others\Backups\Runtime::errorDetails('{"error":"config-invalid","field":"schedule_timezone","detail":{"writer_cause":"validation:schedule_timezone:timezone"}}'),
     'unknown_cause' => \Paymenter\Extensions\Others\Backups\Runtime::errorDetails('{"error":"config-write-outcome-unknown","detail":{"writer_cause":"arbitrary-sensitive-text"}}'),
+    'unknown_code' => \Paymenter\Extensions\Others\Backups\Runtime::errorDetails('{"error":"app"}'),
 ];
 echo json_encode($result, JSON_THROW_ON_ERROR);
 '''
@@ -187,7 +190,32 @@ echo json_encode($result, JSON_THROW_ON_ERROR);
         self.assertEqual(value['gzip'], 'gzip on this server is BusyBox; Backups needs GNU gzip')
         self.assertEqual(value['details'], {'code': 'config-invalid', 'field': 'schedule_time', 'cause': None})
         self.assertEqual(value['database_cause']['cause'], 'database-pdo-driver-unavailable')
+        self.assertEqual(value['timezone_cause']['cause'], 'validation:schedule_timezone:timezone')
         self.assertEqual(value['unknown_cause']['cause'], 'unrecognized')
+        self.assertEqual(value['unknown_code']['code'], 'engine-unavailable')
+
+    def test_cause_free_save_refusal_survives_warning_to_exception_handler(self):
+        result = subprocess.run([PHP, str(ROOT / 'tests/integration/runtime_cause_free_refusal.php')],
+                                capture_output=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stderr.decode())
+        self.assertEqual(result.stdout.decode(), 'RuntimeException:busy')
+
+    def test_scheduler_wait_copy_and_link_are_owned_by_messages(self):
+        script = r'''
+namespace Illuminate\Support {
+    final class HtmlString { public function __construct(private string $value) {} public function __toString(): string { return $this->value; } }
+}
+namespace {
+require $argv[1];
+echo (string) \Paymenter\Extensions\Others\Backups\Messages::schedulerWaitLine('/admin/backups?x="&');
+}
+'''
+        result = subprocess.run([PHP, '-r', script, str(ROOT / 'extension/Backups/Messages.php')],
+                                capture_output=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stdout.decode() + result.stderr.decode())
+        self.assertIn("Waiting for Paymenter's scheduled tasks.", result.stdout.decode())
+        self.assertIn('href="/admin/backups?x=&quot;&amp;"', result.stdout.decode())
+        self.assertIn('>the Backups tab</a>', result.stdout.decode())
 
     def test_engine_field_reaches_the_save_form_error(self):
         result = subprocess.run([PHP, str(ROOT / 'tests/integration/save_refusal_checks.php')],
@@ -253,14 +281,14 @@ echo json_encode([
         self.assertEqual(value['logs'][0][1], {'code': 'native-writer-failed',
                                                'cause': 'command-not-registered'})
         self.assertEqual(value['logs'][1][1], {'code': 'native-writer-failed',
-                                               'cause': 'PDO failed password=[redacted] username=[redacted]'})
+                                               'cause': 'unrecognized'})
         self.assertEqual(value['actor_failure'], {'code': 'config-invalid', 'field': None,
                                                   'cause': 'actor-not-authorized'})
         self.assertEqual(value['logs'][2][1], {'code': 'native-writer-failed',
                                                'cause': 'actor-not-authorized'})
-        self.assertNotIn('secret-value', value['redacted']['cause'])
-        self.assertNotIn('fixture-user', value['redacted']['cause'])
-        self.assertIn('[redacted]', value['redacted']['cause'])
+        self.assertEqual(value['redacted']['cause'], 'unrecognized')
+        self.assertNotIn('secret-value', json.dumps(value['logs']))
+        self.assertNotIn('fixture-user', json.dumps(value['logs']))
         self.assertIn('Backups', value['message'])
         self.assertIn('database', value['message'])
 

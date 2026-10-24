@@ -203,6 +203,33 @@ if ($mode === 'upload') {
         $record->settings()->where('key', 'retention_keep_full')->update(['value' => (string) $writerCauseKeep]);
     }
 
+    // A stale authorized web actor must be refused when the native process
+    // cannot resolve the actor ID from the database.
+    $admin->load('role');
+    $missingActor = clone $admin;
+    $missingActor->setAttribute($missingActor->getKeyName(), (int) App\Models\User::max('id') + 1);
+    Illuminate\Support\Facades\Auth::login($missingActor);
+    $missingActorKeep = (int) $record->settings()->where('key', 'retention_keep_full')->value('value');
+    $missingActorNextKeep = $missingActorKeep + 1;
+    $missingActorRows = $nativeRows();
+    try {
+        try {
+            $missingActorResult = Paymenter\Extensions\Others\Backups\Runtime::saveConfiguration(['retention_keep_full' => $missingActorNextKeep]);
+        } catch (Paymenter\Extensions\Others\Backups\EngineCommandException $error) {
+            $missingActorResult = ['updated' => false, 'cause' => $error->cause];
+        }
+        check(($missingActorResult['updated'] ?? true) === false
+            && ($missingActorResult['cause'] ?? $missingActorResult['writer_cause'] ?? null) === 'actor-login-failed',
+            'Missing native actor did not report the bounded login failure');
+        check($nativeRows() === $missingActorRows, 'Missing native actor changed settings rows');
+    } finally {
+        Illuminate\Support\Facades\Auth::login($admin);
+        if ($nativeRows() !== $missingActorRows || is_file($root . '/config-save.json')) {
+            $restored = Paymenter\Extensions\Others\Backups\Runtime::saveConfiguration(['retention_keep_full' => $missingActorKeep]);
+            check(($restored['updated'] ?? false) === true, 'Admin could not clear the missing-actor Save guard');
+        }
+    }
+
     // Fields explain themselves; no field opens a help dialog.
     $fresh = Livewire\Livewire::test($page);
     check(!str_contains($fresh->html(), "mountAction('cronLockHelp'") && !str_contains($fresh->html(), 'Help for '), 'field help dialog returned');
@@ -365,7 +392,8 @@ if ($mode === 'upload') {
         check($refused->instance()->getErrorBag()->isEmpty(), 'unreadable-store scenario stopped at form validation');
         $refusalNotices = $notices();
         check(array_filter($refusalNotices, static fn ($n) => $n['status'] === 'danger' && $n['title'] === 'Settings not saved'
-            && $n['body'] === Paymenter\Extensions\Others\Backups\Messages::error('credentials-unreadable')) !== [], 'unreadable store did not report complete Save refusal');
+            && str_contains($n['body'], Paymenter\Extensions\Others\Backups\Messages::error('credentials-unreadable'))
+            && str_contains($n['body'], 'Writer cause: credentials-unreadable.')) !== [], 'unreadable store did not report complete Save refusal');
         check(array_filter($refusalNotices, static fn ($n) => $n['status'] === 'success') === [], 'unreadable-store refusal reported success');
         check($nativeRows() === $beforeRefusal, 'unreadable-store refusal changed native settings');
         check(!is_file($root . '/config-save.json'), 'definite unreadable-store refusal left its new save guard');

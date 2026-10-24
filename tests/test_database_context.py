@@ -85,11 +85,28 @@ class DatabaseContextTests(unittest.TestCase):
     def test_native_writer_cause_redacts_connection_secrets(self):
         cause = cli.native_writer_cause(
             b"PDO error for fixture: password=fixture-password username=fixture-user",
-            database_context=MARIADB_CONTEXT,
         )
         self.assertNotIn("fixture-password", cause)
         self.assertNotIn("fixture-user", cause)
-        self.assertIn("[redacted]", cause)
+        self.assertEqual(cause, "unrecognized")
+
+    def test_native_writer_cause_accepts_only_known_validation_fields_and_rules(self):
+        self.assertEqual(cli.native_writer_cause(
+            b'{"error":"config-invalid","field":"retention_keep_full",'
+            b'"detail":{"writer_cause":"validation:retention_keep_full:integer"}}'),
+            "validation:retention_keep_full:integer")
+        self.assertEqual(cli.native_writer_cause(
+            b'{"error":"config-invalid","field":"schedule_timezone",'
+            b'"detail":{"writer_cause":"validation:schedule_timezone:timezone"}}'),
+            "validation:schedule_timezone:timezone")
+        self.assertEqual(cli.native_writer_cause(
+            b'{"error":"config-invalid","field":"retention_keep_full",'
+            b'"detail":{"writer_cause":"validation:password:integer"}}'),
+            "unrecognized")
+        self.assertEqual(cli.native_writer_cause(
+            b'{"error":"config-invalid","field":"retention_keep_full",'
+            b'"detail":{"writer_cause":"validation:retention_keep_full:secret-value"}}'),
+            "unrecognized")
 
     def test_config_save_dispatch_runs_writer_with_context_from_private_stdin(self):
         with tempfile.TemporaryDirectory(prefix="backups-save-writer-context-") as temporary:

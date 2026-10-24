@@ -11,7 +11,7 @@ final class PrivateStore
         return rtrim(dirname($app), '/') . '/paymenter-backups-private';
     }
 
-    /** Check the data directory without creating it, and return a safe fix message. */
+    /** Check the data directory without creating it, and return a code with bounded display parameters. */
     public static function problem(string $app, ?string $configured = null, array $extraDocroots = []): ?array
     {
         $path = $configured ?: self::defaultPath($app);
@@ -44,12 +44,10 @@ final class PrivateStore
         if (file_exists($path)) {
             if (!is_dir($path) || !($root = realpath($path))) { return null; }
             if (fileowner($root) !== posix_geteuid()) {
-                return ['code' => 'private-root-invalid',
-                    'message' => 'Data directory ' . self::displayPath($root) . ' isn\'t owned by the web user. Change its owner to the web user and set mode 0700, or choose another folder outside Paymenter.'];
+                return ['code' => 'private-root-invalid', 'params' => ['path' => self::displayPath($root), 'reason' => 'owner']];
             }
             if ((fileperms($root) & 07777) !== 0700) {
-                return ['code' => 'private-root-invalid',
-                    'message' => 'Data directory ' . self::displayPath($root) . ' must have mode 0700. Set its mode to 0700, or choose another folder outside Paymenter.'];
+                return ['code' => 'private-root-invalid', 'params' => ['path' => self::displayPath($root), 'reason' => 'mode']];
             }
             return null;
         }
@@ -62,11 +60,13 @@ final class PrivateStore
     private static function unavailable(string $path, string $parent): array
     {
         if (!is_dir($parent)) {
-            return ['code' => 'private-root-unavailable',
-                'message' => 'Data directory ' . self::displayPath($path) . ' can\'t be created: ' . self::displayPath($parent) . ' isn\'t a folder. Choose a writable folder outside Paymenter.'];
+            return ['code' => 'private-root-unavailable', 'params' => [
+                'path' => self::displayPath($path), 'parent' => self::displayPath($parent), 'parent_is_folder' => false,
+            ]];
         }
-        return ['code' => 'private-root-unavailable',
-            'message' => 'Data directory ' . self::displayPath($path) . ' can\'t be created: the web user can\'t write to ' . self::displayPath($parent) . '. Create it for the web user with mode 0700, or choose another folder outside Paymenter.'];
+        return ['code' => 'private-root-unavailable', 'params' => [
+            'path' => self::displayPath($path), 'parent' => self::displayPath($parent), 'parent_is_folder' => true,
+        ]];
     }
 
     private static function displayPath(string $path): string

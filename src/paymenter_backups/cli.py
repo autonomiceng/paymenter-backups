@@ -10,7 +10,7 @@ import uuid
 
 from . import __version__
 from .artifacts import journal as artifact_journal, stream
-from .common import BackupError, State, atomic_json, read_json, private_file, safe_writer_cause
+from .common import BackupError, State, atomic_json, read_json, private_file, safe_writer_cause, WRITER_CAUSE_CODES
 from .config import DEFAULTS, bridge, load, load_policy, normalize, redact, validate, validate_database_context
 from .engine import capture, export, plan, verify
 from .maintenance import recover
@@ -20,8 +20,8 @@ from .native_writer import run as run_native_writer
 from .storage import clean_environment, delete_plan, delete_run, deliver, destination_test, retention, retrieve, retrieve_plan
 
 
-def native_writer_cause(stderr, stdout=b"", database_context=None):
-    """Return a short cause for an Artisan writer failure without credentials."""
+def native_writer_cause(stderr, stdout=b""):
+    """Return a fixed cause for an Artisan writer failure, never raw output."""
     outputs = []
     for value in (stderr, stdout):
         if isinstance(value, bytes):
@@ -37,29 +37,13 @@ def native_writer_cause(stderr, stdout=b"", database_context=None):
         except (TypeError, ValueError):
             continue
         detail = refusal.get("detail") if isinstance(refusal, dict) else None
-        cause = safe_writer_cause(detail.get("writer_cause")) if isinstance(detail, dict) else None
-        if cause is not None:
-            return cause
+        if isinstance(detail, dict) and "writer_cause" in detail:
+            cause = safe_writer_cause(detail.get("writer_cause"), fields=DEFAULTS)
+            return cause if cause is not None else "unrecognized"
         code = refusal.get("error") if isinstance(refusal, dict) else None
-        if isinstance(code, str) and re.fullmatch(r"[a-z0-9][a-z0-9-]{0,63}", code):
+        if isinstance(code, str) and code in WRITER_CAUSE_CODES:
             return code
-    line = next((item for item in combined.splitlines() if item.strip()), "writer-exited-without-output")
-    line = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", line)
-    secrets = []
-    if isinstance(database_context, dict):
-        connection = database_context.get("connection", {})
-        if isinstance(connection, dict):
-            secrets.extend(connection.get(field) for field in ("password", "username") if isinstance(connection.get(field), str))
-    for secret in sorted((item for item in secrets if len(item) >= 4), key=len, reverse=True):
-        line = line.replace(secret, "[redacted]")
-    line = re.sub(
-        r"(?i)\b(password|passwd|pwd|username|user|secret|token|api[_-]?key|access[_-]?key|authorization)\b"
-        r"(\s*[:=]\s*)(?:\"[^\"]*\"|'[^']*'|[^\s,;]+)",
-        r"\1\2[redacted]", line,
-    )
-    line = re.sub(r"(?i)(://)[^/@\s:]+:[^/@\s]+@", r"\1[redacted]@", line)
-    line = " ".join("".join(char for char in line if char.isprintable()).split())
-    return line[:160] or "writer-exited-without-output"
+    return "writer-exited-without-output" if not combined.strip() else "unrecognized"
 
 
 def stdin_json():
@@ -165,7 +149,7 @@ def native_settings(args, state, values, descriptors, actor=None, restore=False,
         else:
             result = run_native_writer(command, input_bytes, descriptors, database_context=database_context)
         if result.returncode:
-            cause = native_writer_cause(result.stderr, result.stdout, database_context)
+            cause = native_writer_cause(result.stderr, result.stdout)
             try:
                 refusal = json.loads(result.stderr)
                 code = refusal.get("error") if isinstance(refusal, dict) else None
@@ -214,7 +198,7 @@ def finish_config_save(state):
 
 
 def retain_writer_cause(path, cause):
-    cause = safe_writer_cause(cause)
+    cause = safe_writer_cause(cause, fields=DEFAULTS)
     if cause is None or not path.exists():
         return
     try:
@@ -473,7 +457,7 @@ def dispatch(args):
                     if pending_save:
                         private_file(pending_path)
                         pending_intent = read_json(pending_path)
-                        pending_writer_cause = safe_writer_cause(pending_intent.get("writer_cause"))
+                        pending_writer_cause = safe_writer_cause(pending_intent.get("writer_cause"), fields=DEFAULTS)
                 envelope["settings"] = {**DEFAULTS, **envelope.get("settings", {})}
                 normalize(envelope["settings"])
             except BackupError as failure:

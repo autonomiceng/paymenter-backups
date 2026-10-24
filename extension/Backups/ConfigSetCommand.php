@@ -30,7 +30,7 @@ final class ConfigSetCommand extends Command
                 $fields = array_column(Settings::fields(), null, 'name');
                 $unknown = array_values(array_diff(array_map('strval', array_keys($input)), array_keys($fields)));
                 if ($unknown) {
-                    $writerCause = 'unknown-input-key:' . self::safeInputKey($unknown[0]);
+                    $writerCause = 'unrecognized';
                     throw new \RuntimeException('config-invalid');
                 }
                 foreach ($input as $key => $value) {
@@ -164,7 +164,6 @@ final class ConfigSetCommand extends Command
 
     private static function exceptionCause(\Throwable $error): string
     {
-        $class = (new \ReflectionClass($error))->getShortName();
-        return 'exception:' . (preg_match('/^[A-Za-z][A-Za-z0-9_]{0,63}$/D', $class) ? $class : 'Throwable');
+        return 'unrecognized';
     }
 }
