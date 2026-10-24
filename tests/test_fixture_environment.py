@@ -22,6 +22,17 @@ class PrivateWorkDirectoryTests(unittest.TestCase):
 
         return patch.object(pathlib.Path, "stat", controlled_stat)
 
+    def parent_stat_with_mode(self, parent, mode):
+        original_stat = pathlib.Path.stat
+
+        def controlled_stat(path, *args, **kwargs):
+            info = original_stat(path, *args, **kwargs)
+            if path == parent:
+                return SimpleNamespace(st_mode=mode, st_uid=info.st_uid)
+            return info
+
+        return patch.object(pathlib.Path, "stat", controlled_stat)
+
     def test_rejects_world_writable_parent_without_sticky_bit(self):
         with tempfile.TemporaryDirectory(prefix="fixture-temp-parent-") as temporary:
             parent = pathlib.Path(temporary) / "unsafe"
@@ -39,6 +50,17 @@ class PrivateWorkDirectoryTests(unittest.TestCase):
             with patch.dict(os.environ, {"TMPDIR": str(parent)}):
                 with self.assertRaisesRegex(RuntimeError, "writable without sticky bit"):
                     private_work_directory("fixture-")
+
+    def test_rejects_group_writable_ancestor_before_creating_work_directory(self):
+        with tempfile.TemporaryDirectory(prefix="fixture-temp-parent-") as temporary:
+            unsafe = pathlib.Path(temporary) / "replaceable"
+            parent = unsafe / "private-tmp"
+            parent.mkdir(parents=True, mode=0o700)
+            unsafe.chmod(0o770)
+            with patch.dict(os.environ, {"TMPDIR": str(parent)}):
+                with self.assertRaisesRegex(RuntimeError, "group-writable without sticky bit"):
+                    private_work_directory("fixture-")
+            self.assertEqual(list(parent.iterdir()), [])
 
     def test_rejects_foreign_owned_temporary_parent(self):
         with tempfile.TemporaryDirectory(prefix="fixture-temp-parent-") as temporary:
@@ -89,6 +111,21 @@ class PrivateWorkDirectoryTests(unittest.TestCase):
                 parent.chmod(0o770)
                 with self.assertRaisesRegex(RuntimeError, "group-writable without sticky bit"):
                     require_private_workroot(work, "ui-", "paymenter-backups-ui-")
+
+    def test_fixture_workroot_rejects_group_writable_ancestor_of_temporary_base(self):
+        with tempfile.TemporaryDirectory(prefix="fixture-temp-parent-") as temporary:
+            ancestor = pathlib.Path(temporary)
+            parent = ancestor / "private-tmp"
+            parent.mkdir(mode=0o700)
+            cache_root = ancestor.parent
+            safe_mode = stat.S_IFDIR | 0o755
+            with self.parent_stat_with_mode(cache_root, safe_mode):
+                with patch.dict(os.environ, {"TMPDIR": str(parent)}):
+                    base = private_work_directory("paymenter-backups-ui-")
+                    work = private_work_directory("ui-", base)
+                    ancestor.chmod(0o770)
+                    with self.assertRaisesRegex(RuntimeError, "group-writable without sticky bit"):
+                        require_private_workroot(work, "ui-", "paymenter-backups-ui-")
 
     def test_fixture_workroot_rejects_foreign_owned_temporary_parent(self):
         with tempfile.TemporaryDirectory(prefix="fixture-temp-parent-") as temporary:
