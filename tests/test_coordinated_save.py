@@ -148,9 +148,22 @@ namespace App\Models {
     }
 }
 namespace Paymenter\Extensions\Others\Backups {
+    if (!function_exists(__NAMESPACE__ . '\\posix_geteuid')) { function posix_geteuid() { return getmyuid(); } }
+    if (!function_exists(__NAMESPACE__ . '\\ctype_digit')) { function ctype_digit($value) { return is_string($value) && preg_match('/^[0-9]+$/D', $value) === 1; } }
     class Backups { public function getConfig() { return []; } }
     class Runtime {
         public static function publishCredentialsWhileLocked($input, $root) {
+            if (in_array($input['s3']['_fixture_fail'] ?? null,
+                    ['database-connection-invalid', 'database-pdo-driver-unavailable', 'database-connection-failed',
+                     'database-driver-unsupported', 'private-pipe-required', 'application-unavailable', 'database-tls-unsupported',
+                     'database-prefix-unsupported', 'unsupported-database', 'native-secret-row-refused',
+                     'private-file-invalid', 'private-root-invalid', 'private-root-unavailable', 'document-roots-invalid',
+                     'billing-settings-unreadable', 'installation-missing', 'installation-mismatch',
+                     'extension-uninstalled', 'credentials-unreadable', 'credentials-invalid',
+                     'maintenance-probe-credentials-invalid', 'maintenance-probe-origin-invalid',
+                     'maintenance-probe-origin-mismatch', 'archive-key-change-busy'], true)) {
+                throw new \RuntimeException($input['s3']['_fixture_fail']);
+            }
             $saved = json_decode(file_get_contents($root . '/native-credentials.json'), true);
             if (!is_array($saved)) { throw new \RuntimeException('credentials-unreadable'); }
             if (($input['s3'] ?? null) !== null) {
@@ -267,6 +280,33 @@ class CoordinatedSaveTests(PrivateFixture):
         self.assertEqual(self.rows()['rows']['s3_bucket']['value'], 'old-destination')
         self.assertFalse((self.state.root / 'config-save.json').exists(),
             'Definite native credential refusal left backup work paused as an uncertain commit')
+
+    def test_database_refusals_during_credential_merge_are_definite(self):
+        codes = ('database-connection-invalid', 'database-pdo-driver-unavailable', 'database-connection-failed',
+                 'database-driver-unsupported', 'private-pipe-required', 'application-unavailable', 'database-tls-unsupported',
+                 'database-prefix-unsupported', 'unsupported-database', 'native-secret-row-refused',
+                 'private-file-invalid', 'private-root-invalid', 'private-root-unavailable', 'document-roots-invalid',
+                 'billing-settings-unreadable', 'installation-missing', 'installation-mismatch',
+                 'extension-uninstalled', 'credentials-unreadable', 'credentials-invalid',
+                 'maintenance-probe-credentials-invalid', 'maintenance-probe-origin-invalid',
+                 'maintenance-probe-origin-mismatch', 'archive-key-change-busy')
+        for code in codes:
+            with self.subTest(code=code):
+                self.rows_file.write_text(json.dumps({'rows': {
+                    's3_bucket': {'id': 1, 'key': 's3_bucket', 'value': 'old-destination', 'type': 'string', 'encrypted': 0, 'updated_at': 1},
+                    'retention_keep_full': {'id': 2, 'key': 'retention_keep_full', 'value': '7', 'type': 'string', 'encrypted': 0, 'updated_at': 1}},
+                    'next_id': 2, 'sequence': 1, 'audits': []}))
+                self.credentials = {'access_key': 'fake-old', 'secret_key': 'fake-old'}
+                with self.assertRaises(BackupError) as refused:
+                    cli.set_config(self.args, self.state, {
+                        'settings': {'s3_bucket': 'replacement'},
+                        'credentials': {'_fixture_fail': code},
+                    })
+                self.assertEqual(refused.exception.code, code)
+                self.assertEqual(refused.exception.detail.get('writer_cause'), code)
+                self.assertEqual(self.rows()['rows']['s3_bucket']['value'], 'old-destination')
+                self.assertEqual(self.credentials['access_key'], 'fake-old')
+                self.assertFalse((self.state.root / 'config-save.json').exists())
 
     def test_initialization_failure_preserves_interleaved_editor_and_reports_partial(self):
         real_load = cli.load

@@ -15,13 +15,12 @@ import socket
 import subprocess
 import sys
 import tarfile
-import tempfile
 import time
 import urllib.request
 import urllib.parse
 
 from fetch_fixture import fetch
-from fixture_environment import child_environment
+from fixture_environment import child_environment, private_work_directory
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 
@@ -281,9 +280,8 @@ def main():
     args = parser.parse_args()
     if args.slow_step_delay < 0:
         parser.error('--slow-step-delay must be nonnegative')
-    workbase = pathlib.Path(os.environ.get('TMPDIR', tempfile.gettempdir())) / 'paymenter-backups-native'
-    workbase.mkdir(mode=0o700, parents=True, exist_ok=True)
-    work = pathlib.Path(tempfile.mkdtemp(prefix='native-integration-', dir=workbase))
+    workbase = private_work_directory('paymenter-backups-native-')
+    work = private_work_directory('native-integration-', workbase)
     # This regression runs every full drill under deliberately hostile parent
     # configuration. Its socket/cache paths are inside this disposable workroot,
     # so even a broken boundary cannot connect to an existing database or cache.
@@ -693,10 +691,7 @@ def main():
                 os.environ[key] = previous
         if not args.keep:
             shutil.rmtree(work)
-            try:
-                workbase.rmdir()
-            except OSError:
-                pass
+            shutil.rmtree(workbase)
 
 
 if __name__ == '__main__':

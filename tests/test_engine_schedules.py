@@ -1100,7 +1100,7 @@ class TimezoneDataTests(PrivateFixture):
             'mariadb-dump': "printf 'mariadb-dump 11.8.9\\n'",
             'mariadb': "printf 'mariadb 11.8.9\\n'",
             'tar': "printf 'tar (GNU tar) 1.35\\n'",
-            'gzip': "printf 'gzip 1.12\\n'",
+            'gzip': "printf 'gzip 1.12\\nCopyright (C) 2025 Free Software Foundation, Inc.\\n'",
         }
         for name, output in programs.items():
             binary = bindir / name
@@ -1152,6 +1152,17 @@ class TimezoneDataTests(PrivateFixture):
             config.validate(self.envelope)
         self.assertEqual((refused.exception.code, refused.exception.field), ('config-invalid', 'schedule_time'))
 
+    def test_bad_timezone_key_errors_are_field_specific_and_overview_survives(self):
+        self.settings['schedule_timezone'] = 'Europe/Berlin'
+        for failure in (ValueError('invalid zone key'), OSError('zone file unreadable')):
+            with self.subTest(error=type(failure).__name__), patch.object(config, 'ZoneInfo', side_effect=failure):
+                with patch.object(cli, 'bridge', return_value=copy.deepcopy(self.envelope)):
+                    args = SimpleNamespace(app=str(self.app), private_root=str(self.state.root), bridge='fixture',
+                                           command='overview', offline=False)
+                    result = cli.dispatch(args)
+                self.assertFalse(result['configuration']['valid'])
+                self.assertEqual(result['configuration']['error_field'], 'schedule_timezone')
+
     def test_overview_uses_detected_tools_when_a_setting_stops_validation(self):
         bindir = self.base / 'tools'
         bindir.mkdir()
@@ -1161,7 +1172,7 @@ class TimezoneDataTests(PrivateFixture):
             'mariadb-dump': "printf 'mariadb-dump 11.8.9\\n'",
             'mariadb': "printf 'mariadb 11.8.9\\n'",
             'tar': "printf 'tar (GNU tar) 1.35\\n'",
-            'gzip': "printf 'gzip 1.12\\n'",
+            'gzip': "printf 'gzip 1.12\\nCopyright (C) 2025 Free Software Foundation, Inc.\\n'",
         }
         for name, output in programs.items():
             binary = bindir / name
@@ -1221,6 +1232,12 @@ class TimezoneDataTests(PrivateFixture):
 
 
 class ToolTests(PrivateFixture):
+    def test_gzip_rejects_non_gnu_non_busybox_binary(self):
+        binary = pathlib.Path(self.script('lookalike-gzip', "print('gzip 1.14')"))
+        result = tools.inspect('gzip', str(binary))
+        self.assertFalse(result['ok'])
+        self.assertEqual(result['code'], 'tool-capability-unsupported')
+
     def test_trusted_detection_ignores_path_cwd_and_preserves_explicit_pin(self):
         hostile = self.script('python3', 'raise SystemExit("secret-canary")')
         with patch.dict(os.environ, {'PATH': str(self.base)}):

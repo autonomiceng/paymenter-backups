@@ -26,7 +26,10 @@ WRITER_CAUSE_CODES = frozenset({
     "maintenance-probe-origin-invalid", "maintenance-probe-origin-mismatch", "installation-missing",
     "installation-mismatch", "private-file-invalid", "private-root-invalid", "billing-settings-unreadable",
     "extension-uninstalled", "database-connection-invalid", "database-pdo-driver-unavailable",
-    "database-connection-failed", "database-driver-unsupported",
+    "database-connection-failed", "private-pipe-required", "application-unavailable",
+    "database-driver-unsupported", "database-tls-unsupported",
+    "database-prefix-unsupported", "unsupported-database", "native-secret-row-refused",
+    "document-roots-invalid", "private-root-unavailable", "archive-key-change-busy",
     "writer-timeout", "writer-process-failed", "writer-output-invalid", "writer-failed",
 })
 
@@ -166,7 +169,10 @@ def native_settings(args, state, values, descriptors, actor=None, restore=False,
             safe_refusals = {"config-changed", "credentials-unreadable", "credentials-invalid", "maintenance-probe-credentials-invalid",
                 "maintenance-probe-origin-mismatch", "maintenance-probe-origin-invalid", "installation-missing", "installation-mismatch",
                 "private-file-invalid", "private-root-invalid", "billing-settings-unreadable", "extension-uninstalled",
-                "database-connection-invalid", "database-pdo-driver-unavailable", "database-connection-failed", "database-driver-unsupported"}
+                "database-connection-invalid", "database-pdo-driver-unavailable", "database-connection-failed", "database-driver-unsupported",
+                "database-tls-unsupported", "database-prefix-unsupported", "unsupported-database", "native-secret-row-refused",
+                "private-pipe-required", "application-unavailable",
+                "document-roots-invalid", "private-root-unavailable", "archive-key-change-busy"}
             if code in safe_refusals and (finalize or code in {"database-connection-invalid", "database-driver-unsupported"}):
                 raise BackupError(code, detail={"writer_cause": cause})
             failure_code = "config-write-failed" if code == "config-coordination-required" else "config-write-outcome-unknown"
@@ -316,7 +322,12 @@ def set_config(args, state, changes):
 
             definite_credential_refusals = {"config-changed", "credentials-unreadable", "credentials-invalid", "maintenance-probe-credentials-invalid",
                 "maintenance-probe-origin-mismatch", "maintenance-probe-origin-invalid", "installation-missing", "installation-mismatch",
-                "private-file-invalid", "private-root-invalid", "billing-settings-unreadable", "extension-uninstalled"}
+                "private-file-invalid", "private-root-invalid", "billing-settings-unreadable", "extension-uninstalled",
+                "database-connection-invalid", "database-pdo-driver-unavailable", "database-connection-failed",
+                "database-driver-unsupported", "database-tls-unsupported", "database-prefix-unsupported",
+                "private-pipe-required", "application-unavailable",
+                "unsupported-database", "native-secret-row-refused", "document-roots-invalid",
+                "private-root-unavailable", "archive-key-change-busy"}
             if failure.code == "config-write-outcome-unknown" or credentials_attempted and not committed_credentials and failure.code not in definite_credential_refusals:
                 # A child may have committed before timing out or losing stdout.
                 # Keep the guard durable: workers refuse either possibly mixed

@@ -139,7 +139,10 @@ PYTHON;
             'maintenance-probe-origin-invalid', 'maintenance-probe-origin-mismatch', 'installation-missing',
             'installation-mismatch', 'private-file-invalid', 'private-root-invalid', 'billing-settings-unreadable',
             'extension-uninstalled', 'database-connection-invalid', 'database-pdo-driver-unavailable',
-            'database-connection-failed', 'database-driver-unsupported',
+            'database-connection-failed', 'private-pipe-required', 'application-unavailable',
+            'database-driver-unsupported', 'database-tls-unsupported',
+            'database-prefix-unsupported', 'unsupported-database', 'native-secret-row-refused',
+            'document-roots-invalid', 'private-root-unavailable', 'archive-key-change-busy',
             'writer-timeout', 'writer-process-failed', 'writer-output-invalid', 'writer-failed',
         ];
         return is_string($cause) && in_array($cause, $allowed, true) ? $cause : 'unrecognized';

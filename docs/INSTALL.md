@@ -4,9 +4,9 @@ Use Linux, Python 3.10 or newer and the application's PHP 8.3 or newer. Release
 ZIPs include an isolated, pinned S3 SDK. Do not run pip or Composer in Paymenter
 for this extension. Keep Paymenter core and native database definitions stock.
 
-The server also needs GNU tar, GNU gzip, time zone data (`tzdata`) and a supported
-MariaDB/MySQL dump client. Minimal images such as Alpine may need the `tzdata`
-package installed.
+The server also needs GNU tar, GNU gzip and a supported MariaDB/MySQL dump client.
+Only non-UTC schedules need time zone data (`tzdata`). Minimal images such as
+Alpine may need the `tzdata` package installed.
 Encrypted S3 uploads need the complete GnuPG package, including gpg, gpg-agent
 and gpgconf. GnuPG is a server dependency and is not bundled in the ZIP;
 the server administrator maintains its security updates. The Backups setup
@@ -81,7 +81,7 @@ pauses backup work until a complete Save resubmits the intended settings and
 uncertain credential groups; partial successes are reported explicitly.
 
 Empty v2 binary paths mean trusted detection (Python, matching hosting PHP,
-MariaDB/MySQL dump/client alternatives, GNU tar, gzip; GPG belongs to encryption
+MariaDB/MySQL dump/client alternatives, GNU tar, GNU gzip; GPG belongs to encryption
 setup). Nonempty legacy pins remain pinned. New v2 captures with blank
 local_path use PRIVATE_ROOT/backups, including old artifacts bindings. Recorded
 old backups and immutable identity stay unchanged and count toward the budget.

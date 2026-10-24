@@ -62,7 +62,7 @@ final class DatabaseConnectionContext
         if (!preg_match('/^[A-Za-z][A-Za-z0-9_-]{0,63}$/D', $connection['driver'])
             || str_contains($connection['host'], ';') || str_contains($connection['unix_socket'], ';')
             || str_contains($connection['database'], ';')
-            || !(is_int($connection['port']) || (is_string($connection['port']) && ctype_digit($connection['port'])))
+            || !(is_int($connection['port']) || (is_string($connection['port']) && preg_match('/^[0-9]{1,5}$/D', $connection['port'])))
             || (int) $connection['port'] < 1 || (int) $connection['port'] > 65535
             || !is_array($connection['options']) || count($connection['options']) > 128
             || !is_bool($connection['strict']) || !is_bool($connection['prefix_indexes'])
