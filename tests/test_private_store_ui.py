@@ -220,6 +220,7 @@ class PrivateStoreUiTests(unittest.TestCase):
             (app / "public").mkdir(parents=True)
             private = base / "private"
             private.mkdir(mode=0o750)
+            private.chmod(0o750)
             marker = private / "installation.json"
             marker.write_text('{"schema_version":1}')
             marker.chmod(0o000)
