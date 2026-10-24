@@ -247,7 +247,7 @@ trait SavesSettings
             $this->dispatch('form-validation-error', livewireId: $this->getId());
         }
         $body = $environment ? $message . ' Fix Binary paths under Advanced, save, then save your other changes.' : $message;
-        $body = Messages::withWriterCause($body, $cause);
+        $body = Messages::withWriterCause($body, $cause, $code);
         Notification::make()->title('Settings not saved')->danger()->body($body)->send();
     }
 

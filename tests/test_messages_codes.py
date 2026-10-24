@@ -165,6 +165,11 @@ require $argv[1];
 echo json_encode([
     \Paymenter\Extensions\Others\Backups\Messages::withWriterCause('Settings were not saved.', 'busy'),
     \Paymenter\Extensions\Others\Backups\Messages::withWriterCause('Settings were not saved.', null),
+    \Paymenter\Extensions\Others\Backups\Messages::withWriterCause(
+        \Paymenter\Extensions\Others\Backups\Messages::error('credentials-unreadable'),
+        'credentials-unreadable',
+        'credentials-unreadable'
+    ),
 ], JSON_THROW_ON_ERROR);
 '''
         result = subprocess.run([PHP, '-r', script, str(ROOT / 'extension/Backups/Messages.php')],
@@ -173,6 +178,7 @@ echo json_encode([
         self.assertEqual(json.loads(result.stdout), [
             'Settings were not saved. Writer cause: busy.',
             'Settings were not saved.',
+            'Saved credentials or recovery keys could not be read. Restore the matching APP_KEY or APP_PREVIOUS_KEYS and keep credentials.json. Replacing it can lose keys needed for earlier S3 backups.',
         ])
 
     def test_save_errors_keep_the_field_and_have_direct_repair_guidance(self):

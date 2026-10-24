@@ -285,9 +285,9 @@ final class Messages
     public static function known(string $code): bool { return isset(self::ERRORS[$code]); }
 
     /** Append a bounded writer cause to administrator copy when one is available. */
-    public static function withWriterCause(string $text, ?string $cause): string
+    public static function withWriterCause(string $text, ?string $cause, ?string $refusalCode = null): string
     {
-        return $cause === null ? $text : $text . ' Writer cause: ' . $cause . '.';
+        return $cause === null || $cause === $refusalCode ? $text : $text . ' Writer cause: ' . $cause . '.';
     }
 
     /** Format bounded data-directory details for Save and readiness messages. */
