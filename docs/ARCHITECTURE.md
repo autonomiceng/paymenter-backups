@@ -393,6 +393,9 @@ V2 full admission uses the same sanitized discovery/parser module as overview.
 The tick refreshes owner-private discovery.json no more than once every five
 minutes; overview only reads it and labels data older than 15 minutes stale.
 Capture always rediscovers and validates; cached diagnostics never authorize it.
+Cache command revalidation can add a refusal but preserves service-derived
+coordination and its reason, including a finite worker kept continuous by systemd
+restart policy.
 Inventory covers the account crontab and system/user systemd timer targets and
 active/enabled standalone services, with bounded reads and plain-table fallback.
 Cron suggestions escape every `%` as `\%`. Discovery decodes that cron escape

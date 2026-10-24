@@ -973,6 +973,37 @@ class DiscoveryTests(PrivateFixture):
         self.assertTrue(any('list-unit-files' in argv for argv in seen))
         self.assertTrue(all(not any(word in argv for word in ('start', 'stop', 'disable', 'enable')) for argv in seen))
 
+    def test_restarting_finite_systemd_worker_stays_continuous_after_cache_round_trip(self):
+        self.envelope['tools']['systemctl'] = sys.executable
+        unit = 'paymenter-worker.service'
+        command = f'/usr/bin/flock -n {self.state.root}/queue.lock /usr/bin/php {self.app}/artisan queue:work --stop-when-empty'
+
+        def read(argv, timeout):
+            if '--user' in argv or 'list-timers' in argv:
+                return b'[]'
+            if 'list-units' in argv:
+                return json.dumps([{'unit': unit, 'active': 'active'}]).encode()
+            if 'list-unit-files' in argv:
+                return json.dumps([{'unit_file': unit, 'state': 'enabled'}]).encode()
+            return (f'Id={unit}\nUser={os.getuid()}\nWorkingDirectory={self.app}\nDynamicUser=no\nLoadState=loaded\nRestart=always\n'
+                    f'ExecStart={{ path=/usr/bin/flock ; argv[]={command} ; ignore_errors=no ; }}\n').encode()
+
+        with patch.object(discovery, 'run', side_effect=read):
+            rows = discovery.systemd(self.app, self.envelope['tools'])
+        self.assertEqual(len(rows), 1)
+        self.assertEqual((rows[0]['coordination'], rows[0]['reason']),
+                         ('continuous', 'continuous-worker-present'))
+        inventory = dict(self.inventory(), app=str(self.app), schema_version=1,
+                         parser_version=discovery.PARSER_VERSION)
+        inventory['items'].extend(rows)
+        fresh_errors, fresh_locks = discovery.admission(self.envelope, inventory)
+        self.assertIn('continuous-worker-present', [item['code'] for item in fresh_errors])
+        atomic_json(self.state.root / 'discovery.json', inventory)
+        current = discovery.cached(self.state)
+        self.assertEqual(current['items'][-1]['reason'], 'continuous-worker-present')
+        self.assertEqual(current['items'], inventory['items'])
+        self.assertEqual(discovery.admission(self.envelope, current), (fresh_errors, fresh_locks))
+
 
 class ReadinessTests(PrivateFixture):
     def full_plan(self, inventory=None):

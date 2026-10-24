@@ -345,7 +345,10 @@ def cached(state, now=None):
                 parsed = parse(item['command'], state.app, cron=False)
                 if parsed['command'] != item['command'] or parsed['lock'] != item['lock']:
                     raise ValueError()
-                item.update(parsed)
+                # Command revalidation may add a refusal, but cannot clear
+                # service-derived coordination or its reason.
+                if item['coordination'] == 'coordinated' and parsed['coordination'] != 'coordinated':
+                    item.update(coordination=parsed['coordination'], reason=parsed['reason'])
             elif item['lock'] is not None:
                 raise ValueError()
         if value['state'] not in ('ok', 'failed') or value['error'] not in (None, 'job-discovery-incomplete', 'job-discovery-failed'):
