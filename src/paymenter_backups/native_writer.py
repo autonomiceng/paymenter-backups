@@ -11,13 +11,17 @@ import subprocess
 import sys
 
 
-def run(command, input_bytes, descriptors, timeout=35):
+def run(command, input_bytes, descriptors, timeout=35, database_context=None):
     supervisor = [sys.executable, '-I', str(pathlib.Path(__file__).resolve()),
                   str(os.getpid()), ','.join(str(fd) for fd in descriptors), str(timeout - min(3, timeout / 3)), *command]
+    environment = {'PATH': '/usr/local/bin:/usr/bin:/bin', 'LANG': 'C.UTF-8', 'LC_ALL': 'C.UTF-8', 'TZ': 'UTC'}
+    if database_context is not None:
+        from .config import database_connection_environment
+        environment.update(database_connection_environment(database_context))
     process = subprocess.Popen(supervisor, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                stderr=subprocess.PIPE, close_fds=True, pass_fds=tuple(descriptors),
                                start_new_session=True,
-                               env={'PATH': '/usr/local/bin:/usr/bin:/bin', 'LANG': 'C.UTF-8', 'LC_ALL': 'C.UTF-8', 'TZ': 'UTC'})
+                               env=environment)
     try:
         output, error = process.communicate(input_bytes, timeout=timeout)
         return subprocess.CompletedProcess(command, process.returncode, output, error)

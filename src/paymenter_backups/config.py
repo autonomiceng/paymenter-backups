@@ -135,6 +135,29 @@ def validate_database_context(context):
     return context
 
 
+def database_connection_environment(context):
+    """Return only the validated Laravel database variables for Artisan."""
+    context = validate_database_context(context)
+    connection = context["connection"]
+    return {
+        "DB_CONNECTION": context["default"],
+        # Prevent a .env DB_URL from overriding the captured active connection.
+        "DB_URL": "null",
+        "DB_HOST": connection["host"],
+        "DB_PORT": str(connection["port"]),
+        "DB_DATABASE": connection["database"],
+        "DB_USERNAME": connection["username"],
+        "DB_PASSWORD": connection["password"],
+        "DB_SOCKET": connection["unix_socket"],
+        "DB_PREFIX": connection["prefix"],
+        "DB_CHARSET": connection["charset"],
+        "DB_COLLATION": connection["collation"],
+        "DB_STRICT": "true" if connection["strict"] else "false",
+        "DB_ENGINE": "null" if connection["engine"] is None else connection["engine"],
+        "DB_PREFIX_INDEXES": "true" if connection["prefix_indexes"] else "false",
+    }
+
+
 def bridge(args, verb="read", payload=None):
     from .process import safe_environment
     if not args.bridge:

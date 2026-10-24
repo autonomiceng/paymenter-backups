@@ -8,7 +8,7 @@ require_once __DIR__ . '/DatabaseConnectionContext.php';
 
 final class EngineCommandException extends RuntimeException
 {
-    public function __construct(string $error, public readonly ?string $field = null)
+    public function __construct(string $error, public readonly ?string $field = null, public readonly ?string $cause = null)
     {
         parent::__construct($error);
     }
@@ -123,7 +123,26 @@ PYTHON;
         if (!is_string($code) || !preg_match('/^[a-z0-9][a-z0-9-]{0,63}$/D', $code)) { $code = $fallback; }
         $field = is_array($decoded) && is_string($decoded['field'] ?? null) ? $decoded['field'] : null;
         if ($field === null || !array_key_exists($field, Settings::LABELS)) { $field = null; }
-        return ['code' => $code, 'field' => $field];
+        $detail = is_array($decoded) ? ($decoded['detail'] ?? null) : null;
+        $cause = self::safeWriterCause(is_array($detail) ? ($detail['writer_cause'] ?? null) : null);
+        return ['code' => $code, 'field' => $field, 'cause' => $cause];
+    }
+
+    /** Keep native writer diagnostics to known codes so output cannot carry secrets. */
+    public static function safeWriterCause(mixed $cause): ?string
+    {
+        if ($cause === null) { return null; }
+        $allowed = [
+            'unrecognized', 'command-not-registered', 'busy', 'config-invalid', 'config-coordination-required',
+            'config-save-incomplete', 'config-changed', 'config-save-outcome-unknown', 'config-write-failed',
+            'credentials-unreadable', 'credentials-invalid', 'maintenance-probe-credentials-invalid',
+            'maintenance-probe-origin-invalid', 'maintenance-probe-origin-mismatch', 'installation-missing',
+            'installation-mismatch', 'private-file-invalid', 'private-root-invalid', 'billing-settings-unreadable',
+            'extension-uninstalled', 'database-connection-invalid', 'database-pdo-driver-unavailable',
+            'database-connection-failed', 'database-driver-unsupported',
+            'writer-timeout', 'writer-process-failed', 'writer-output-invalid', 'writer-failed',
+        ];
+        return is_string($cause) && in_array($cause, $allowed, true) ? $cause : 'unrecognized';
     }
 
     /** Compatibility helper for stream commands that only consume the fixed code. */
@@ -146,7 +165,7 @@ PYTHON;
         $process->run();
         if (!$process->isSuccessful()) {
             $failure = self::errorDetails($process->getErrorOutput());
-            throw new EngineCommandException($failure['code'], $failure['field']);
+            throw new EngineCommandException($failure['code'], $failure['field'], $failure['cause']);
         }
         return json_decode($process->getOutput(), true, 64, JSON_THROW_ON_ERROR);
     }
@@ -261,8 +280,13 @@ PYTHON;
         // status timeout. A killed writer is an unknown outcome, never "not saved".
         $process->setTimeout(300);
         try { $process->run(); }
-        catch (\Symfony\Component\Process\Exception\ProcessTimedOutException $error) { throw new RuntimeException('config-save-outcome-unknown'); }
-        if (!$process->isSuccessful()) { throw new RuntimeException(self::errorCode($process->getErrorOutput(), 'config-save-outcome-unknown')); }
+        catch (\Symfony\Component\Process\Exception\ProcessTimedOutException $error) {
+            throw new EngineCommandException('config-save-outcome-unknown', null, 'writer-timeout');
+        }
+        if (!$process->isSuccessful()) {
+            $failure = self::errorDetails($process->getErrorOutput(), 'config-save-outcome-unknown');
+            throw new EngineCommandException($failure['code'], $failure['field'], $failure['cause']);
+        }
         $result = json_decode($process->getOutput(), true, 32, JSON_THROW_ON_ERROR);
         if (!is_array($result) || !is_bool($result['updated'] ?? null)) { throw new RuntimeException('config-save-outcome-unknown'); }
         return $result;
