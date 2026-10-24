@@ -5,9 +5,13 @@ try {
     $work = $base ? dirname($base) : '';
     $workbase = $work ? dirname($work) : '';
     $temporary = realpath(getenv('TMPDIR') ?: sys_get_temp_dir());
+    $temporaryInfo = $temporary ? stat($temporary) : false;
     $metadataPath = $work . '/ui-fixture.json';
     if (!$base || basename($base) !== 'app' || !str_starts_with(basename($work), 'ui-')
         || !str_starts_with(basename($workbase), 'paymenter-backups-ui-') || dirname($workbase) !== $temporary
+        || !is_array($temporaryInfo) || ($temporaryInfo['mode'] & 0170000) !== 0040000
+        || !in_array($temporaryInfo['uid'], [0, posix_geteuid()], true)
+        || (($temporaryInfo['mode'] & 0022) !== 0 && ($temporaryInfo['mode'] & 01000) === 0)
         || !is_file($metadataPath)) {
         throw new RuntimeException('A disposable ui- fixture is required');
     }

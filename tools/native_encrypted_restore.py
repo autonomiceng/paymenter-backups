@@ -25,6 +25,7 @@ def main():
     parser.add_argument('--gpg-reader', default='/usr/bin/gpg')
     args = parser.parse_args()
     os.umask(0o077)
+    sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
     from fixture_environment import require_private_workroot
     work = require_private_workroot(args.work, 'native-integration-', 'paymenter-backups-native-')
     app, private = work / 'app', work / 'private'
