@@ -393,12 +393,15 @@ V2 full admission uses the same sanitized discovery/parser module as overview.
 The tick refreshes owner-private discovery.json no more than once every five
 minutes; overview only reads it and labels data older than 15 minutes stale.
 Capture always rediscovers and validates; cached diagnostics never authorize it.
+Cache command revalidation can add a refusal but preserves service-derived
+coordination and its reason, including a finite worker kept continuous by systemd
+restart policy.
 Inventory covers the account crontab and system/user systemd timer targets and
 active/enabled standalone services, with bounded reads and plain-table fallback.
 Cron suggestions escape every `%` as `\%`. Discovery decodes that cron escape
 before shell parsing, preserves literal backslashes and refuses an unescaped
 `%` because cron would turn the remainder into stdin. Shell and systemd parsing
-remain separate from this cron preprocessing. Discovery parser version 2
+remain separate from this cron preprocessing. Discovery parser version 3
 invalidates older cached interpretations and requires rediscovery.
 No scheduler, failed/incomplete discovery, unsupported/uncoordinated jobs,
 continuous workers, unsafe/missing locks and explicit-list mismatch refuse.
@@ -417,6 +420,20 @@ bounded `detail["activates"]` diagnostic. A null entry does not bypass lock
 verification for other timers.
 The parser accepts documented /dev/null redirection tails, common PHP/Artisan
 flags and hosting PHP basenames, with shell expansion/wrappers refused.
+For an application at `/app`, it also accepts exactly
+`/usr/local/bin/php /opt/beco/scheduler.php` behind the same explicit flock and
+owner-private lock checks. This guarded scheduler takes no interpreter or script
+arguments. Other interpreters, script paths and application roots refuse.
+The script must be a root-owned regular file with no group or world write bits.
+Its canonical path must remain exactly `/opt/beco/scheduler.php`, with no file
+or parent-directory symlinks. The canonical-path and `lstat` regular-file checks
+follow `discovery.lock_safe`; script ownership and write restrictions differ
+from that helper's app-owned, exactly 0600 lock policy. Discovery, cache reads
+and admission recheck the script. Legacy cron and systemd validation use the
+same parser. An unsafe script remains visible as unsupported with its guarded
+command, so diagnostics cannot suggest replacing the guard with Artisan.
+Normalized commands, cached diagnostics and replacement suggestions preserve
+the guarded launcher and its lock, rather than replacing it with Artisan.
 Commands are reconstructed from recognized nonsecret tokens; ini values, raw
 cron/service/process text and process identities never enter discovery records.
 

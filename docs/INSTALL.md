@@ -109,8 +109,14 @@ python3 -I /path/to/app/extensions/Others/Backups/runtime/cli.py \
 
 The native every-minute tick observes the actual native billing event and
 launches durable work. Paymenter's server setup owns the systemd timer or cron
-job invoking `schedule:run` each minute. Keep a working existing launcher and
-use exactly one scheduler launcher. Backups never installs, enables or edits
+job invoking `schedule:run` each minute, or the supported guarded launcher
+`flock PATH /usr/local/bin/php /opt/beco/scheduler.php` for an app at `/app`.
+The script must be a root-owned regular file, not group or world writable, and
+its path must contain no file or parent-directory symlinks. Backups rechecks it
+at discovery, admission and cache reads.
+The guarded form accepts no interpreter or script arguments and retains its
+exact command in diagnostics and replacement suggestions. Keep a working
+existing launcher and use exactly one scheduler launcher. Backups never installs, enables or edits
 those jobs. Follow [Paymenter's installation guide](https://paymenter.org/docs/installation/install)
 for the host setup. Full backups additionally require that scheduler and worker
 jobs use the configured cooperative locks. Save Backups settings first: init

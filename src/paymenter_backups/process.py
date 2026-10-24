@@ -298,11 +298,13 @@ def app_workers(app):
         try:
             if path.stat().st_uid != os.getuid():
                 continue
-            arguments = (path / "cmdline").read_bytes().replace(b"\0", b" ").decode(errors="replace")
-            if "artisan" not in arguments or not any(word in arguments for word in ("schedule:run", "schedule:work", "queue:work", "queue:listen", "horizon")):
+            raw = (path / "cmdline").read_bytes()
+            guarded = str(app) == '/app' and raw.rstrip(b'\0').split(b'\0') == [b'/usr/local/bin/php', b'/opt/beco/scheduler.php']
+            arguments = raw.replace(b"\0", b" ").decode(errors="replace")
+            if not guarded and ("artisan" not in arguments or not any(word in arguments for word in ("schedule:run", "schedule:work", "queue:work", "queue:listen", "horizon"))):
                 continue
             cwd = (path / "cwd").resolve()
-            if cwd == app or str(app / "artisan") in arguments:
+            if guarded or cwd == app or str(app / "artisan") in arguments:
                 found.append(int(path.name))
         except (OSError, RuntimeError):
             continue

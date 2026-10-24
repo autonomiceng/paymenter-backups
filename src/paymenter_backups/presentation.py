@@ -300,7 +300,7 @@ def configuration(state, envelope, error=None, encryption_key_status=None, write
     except KeyError:
         user = str(os.getuid())
     result['checks'] = {'jobs': {key: jobs.get(key) for key in ('checked_at', 'state', 'error', 'items')} |
-                       {'suggestions': suggestions(state, envelope), 'crontab_user': user},
+                       {'suggestions': suggestions(state, envelope, jobs), 'crontab_user': user},
                        'stores': stores(envelope), 'tools': tool_reports,
                        'billing': billing_window(settings, envelope.get('billing', {}))}
     # Use the encryption module's delivery probe for the shared tool diagnostics.

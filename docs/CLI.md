@@ -224,6 +224,13 @@ Defaults and prerequisites:
   The runner reads their service command and Unix user, with a bounded discovery
   deadline. It never installs or changes jobs. Verify cron/service semantics
   and request/worker bounds on the deployment.
+  For an app at `/app`, the guarded scheduler may instead run
+  `flock PATH /usr/local/bin/php /opt/beco/scheduler.php`, with no interpreter or
+  script arguments. Other paths, interpreters and app roots are unsupported.
+  The script must be root-owned, regular, and not group or world writable, with
+  no file or parent-directory symlinks. Its safety is rechecked before admission
+  and when reading cached readiness.
+  Discovered guarded commands stay intact in replacement suggestions.
 
 Refresh a terminal billing guard with the booted native command:
 

@@ -232,8 +232,8 @@ class Backups extends Page implements HasTable
                 ]),
             ]),
             Section::make('How backups run')->id('how-backups-run')->collapsible()->schema([
-                Text::make('Paymenter\'s cron job runs schedule:run every minute. Each minute, Backups starts what is queued: scheduled backups, Create backup, uploads, verification and deletion. If the cron job isn\'t running, nothing happens. Backups never edits your crontab or systemd units.'),
-                Text::make(fn () => 'Add this line to the crontab of ' . ($this->checks()['jobs']['crontab_user'] ?? 'the user that owns Paymenter') . ' with crontab -e. If a schedule:run line is already there, replace it:'),
+                Text::make('Paymenter\'s cron job runs the scheduler every minute. Each minute, Backups starts what is queued: scheduled backups, Create backup, uploads, verification and deletion. If the cron job isn\'t running, nothing happens. Backups never edits your crontab or systemd units.'),
+                Text::make(fn () => 'Add this line to the crontab of ' . ($this->checks()['jobs']['crontab_user'] ?? 'the user that owns Paymenter') . ' with crontab -e. If a scheduler entry is already there, replace it:'),
                 $this->command(fn () => $this->schedulerLine()),
                 Text::make('flock lets a full backup pause this job while it copies. Database backups work without it.'),
                 Text::make('Copying needs HTTPS. Over HTTP, select the text to copy it.')->visible(fn () => !request()->isSecure()),
@@ -242,7 +242,7 @@ class Backups extends Page implements HasTable
                 Text::make('During a full backup, Backups waits for running Paymenter cron jobs to finish and holds their lock files so new ones wait. It then puts the site into maintenance mode, waits for open page loads, checks that App URL shows the maintenance page, copies the database and files, and takes the site out of maintenance mode.'),
                 Text::make('Maintenance mode stops new page loads, but a cron job that already started keeps writing. If it writes while files are copied, the database and files in the backup won\'t match. Holding the same lock file as the job prevents that.'),
                 $bullets([
-                    'Every Paymenter cron job uses a lock file. For schedule:run, use the line above.',
+                    'Every Paymenter cron job uses a lock file. For the scheduler, use the line above.',
                     'No always-on queue worker. A worker started by systemd or Supervisor never stops, so it can\'t be paused. Run queue jobs from cron with their own lock, then stop the service:',
                 ]),
                 $this->command(fn () => $this->queueLine()),
