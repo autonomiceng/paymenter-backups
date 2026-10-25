@@ -342,12 +342,12 @@ PYTHON;
     }
 
     /** Standalone secret edits use the same coordinator as combined Save. */
-    public static function publishCredentialsWhileLocked(array $input, string $root): void
+    public static function publishCredentialsWhileLocked(array $input, string $root, ?array $frameworkContext = null): void
     {
         // Internal native finalizer owns both inherited flocks and native row
         // locks. Read committed rows in the cold child; it writes only secrets.
         $process = new Process([PHP_BINARY, __DIR__ . '/bridge.php', 'credentials-merge', '--database-connection-stdin', '--app', realpath(base_path()), '--private-root', $root],
-            base_path(), self::safeEnvironment(), json_encode(['database_connection' => self::databaseConnectionContext(), 'framework_context' => FrameworkStores::capture(app('config')), 'payload' => $input], JSON_THROW_ON_ERROR));
+            base_path(), self::safeEnvironment(), json_encode(['database_connection' => self::databaseConnectionContext(), 'framework_context' => FrameworkStores::validateContext($frameworkContext ?? FrameworkStores::capture(app('config'))), 'payload' => $input], JSON_THROW_ON_ERROR));
         $process->setTimeout(30);
         try { $process->run(); }
         catch (\Throwable $error) { throw new RuntimeException('config-save-outcome-unknown'); }

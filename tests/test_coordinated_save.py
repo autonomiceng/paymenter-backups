@@ -283,11 +283,35 @@ class CoordinatedSaveTests(PrivateFixture):
             'queue': {'default': 'jobs', 'driver': 'database', 'connection': None},
             'filesystem': {'default': 'local', 'driver': 'local', 'root': str(self.app / 'storage')},
         }
+        root = pathlib.Path(__file__).resolve().parents[1]
+        writer = PHP_WRITER.replace('__ROOT__', json.dumps(str(root)))
+        writer = writer.replace('public static function onceUsingId($actor) {',
+            "public static function onceUsingId($actor) {\n"
+            "            if (app('config')->get('cache.default') !== null) { throw new \\RuntimeException('writer-store-config-changed'); }")
+        writer = writer.replace('public static function publishCredentialsWhileLocked($input, $root) {',
+            "public static function publishCredentialsWhileLocked($input, $root, $context = null) {\n"
+            "            file_put_contents($root . '/native-framework-context.json', json_encode($context));")
+        (self.app / 'artisan').write_text(writer)
         for bucket in ('first-destination', 'second-destination'):
-            result = cli.set_config(self.args, self.state, {'settings': {'s3_bucket': bucket}})
-            self.assertTrue(result['updated'])
+            result = cli.set_config(self.args, self.state, {'settings': {'s3_bucket': bucket},
+                'credentials': {'access_key': 'fixture-key', 'secret_key': 'fixture-secret'}, '_actor': 42})
+            self.assertTrue(result['updated'], result)
             self.assertEqual(self.rows()['rows']['s3_bucket']['value'], bucket)
             self.assertNotIn('_framework_context', self.rows()['rows'])
+            self.assertEqual(json.loads((self.state.root / 'native-framework-context.json').read_text()),
+                             self.args.framework_context)
+
+    def test_native_framework_context_refusal_preserves_the_safe_error_code(self):
+        self.args.framework_context = {'schema_version': 1, 'password': 'fixture-store-secret'}
+        before = self.rows()
+        with self.state.lock('config.lock') as config_fd, self.state.lock('tick.lock') as tick_fd:
+            # Exercise PHP validation independently of the Python guard.
+            with patch.object(cli, 'validate_framework_context', side_effect=lambda context: context):
+                with self.assertRaises(BackupError) as raised:
+                    cli.native_settings(self.args, self.state, {}, (config_fd, tick_fd), finalize=True)
+        self.assertEqual(raised.exception.code, 'framework-store-context-invalid')
+        self.assertNotIn('fixture-store-secret', str(raised.exception))
+        self.assertEqual(self.rows(), before)
 
     def test_r9_settings_save_uses_stateless_actor_with_scrubbed_demo_environment(self):
         from test_database_context import MARIADB_CONTEXT

@@ -33,7 +33,7 @@ class FrameworkContextFixture(unittest.TestCase):
             'app.maintenance.driver': 'file',
             'cache.default': 'active-cache',
             'cache.stores.active-cache': {'driver': 'redis', 'connection': 'cache-redis',
-                'password': CANARY, 'url': 'redis://fixture:' + CANARY + '@example.test'},
+                'password': CANARY, 'url': 'redis://fixture:' + CANARY + '@example.com'},
             'session.driver': 'database', 'session.connection': 'mysql',
             'session.files': str(self.app / 'storage'),
             'queue.default': 'active-queue',
@@ -45,7 +45,7 @@ class FrameworkContextFixture(unittest.TestCase):
             'database.redis': {'password': CANARY}, 'app.key': CANARY,
         }
 
-    def runtime_calls(self):
+    def runtime_calls(self, forward_finalizer=False):
         source = PHP_RUNTIME[:PHP_RUNTIME.index("    $fp = str_repeat('a',64);")]
         source = source.replace('public static function where(...$args) { return new self; }',
             'public static function __callStatic($name, $args) { return new self; }')
@@ -72,6 +72,13 @@ class FrameworkContextFixture(unittest.TestCase):
         source = source.replace("    \\Paymenter\\Extensions\\Others\\Backups\\Runtime::publishCredentialsWhileLocked",
             "    \\Symfony\\Component\\Process\\Process::$response = ['ok' => true];\n"
             "    \\Paymenter\\Extensions\\Others\\Backups\\Runtime::publishCredentialsWhileLocked")
+        if forward_finalizer:
+            source = source.replace("::publishCredentialsWhileLocked([], $GLOBALS['private']);",
+                "::publishCredentialsWhileLocked([], $GLOBALS['private'], $forwarded);")
+            source = source.replace("    \\Paymenter\\Extensions\\Others\\Backups\\Runtime::publishCredentialsWhileLocked",
+                "    $forwarded = \\Paymenter\\Extensions\\Others\\Backups\\FrameworkStores::capture(app('config'));\n"
+                "    $forwarded['session']['driver'] = 'file';\n"
+                "    \\Paymenter\\Extensions\\Others\\Backups\\Runtime::publishCredentialsWhileLocked")
         runner = self.base / 'runtime.php'
         runner.write_text(source)
         environment = dict(os.environ, SESSION_DRIVER='redis', CACHE_STORE='file',
@@ -82,6 +89,10 @@ class FrameworkContextFixture(unittest.TestCase):
         return [call for call in json.loads(result.stdout) if '--database-connection-stdin' in call[0]]
 
 class FrameworkContextTests(FrameworkContextFixture):
+    def test_finalizer_forwards_the_validated_snapshot_without_recapturing_cold_stores(self):
+        calls = self.runtime_calls(forward_finalizer=True)
+        self.assertEqual(json.loads(calls[-1][1])['framework_context']['session']['driver'], 'file')
+
     def test_parent_context_uses_only_nonsecret_fields_and_keeps_environment_scrubbed(self):
         calls = self.runtime_calls()
         self.assertEqual(len(calls), 3)

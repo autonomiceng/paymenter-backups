@@ -14,6 +14,7 @@ final class ConfigSetCommand extends Command
     public function handle(): int
     {
         $handles = [];
+        $frameworkContext = null;
         $writerCause = null;
         $writerField = null;
         try {
@@ -29,7 +30,7 @@ final class ConfigSetCommand extends Command
             }
             if (array_key_exists('_framework_context', $input)) {
                 if (!$this->option('defer-init')) { throw new \RuntimeException('config-invalid'); }
-                FrameworkStores::applyContext(app('config'), $input['_framework_context']);
+                $frameworkContext = FrameworkStores::validateContext($input['_framework_context']);
                 unset($input['_framework_context']);
             }
             if (!$this->option('restore') && !$this->option('finalize')) {
@@ -115,7 +116,7 @@ final class ConfigSetCommand extends Command
             if ($this->option('finalize')) {
                 if (!is_array($input['snapshot'] ?? null) || !is_array($input['credentials'] ?? null)
                     || array_diff(array_keys($input), ['snapshot', 'credentials'])) { throw new \RuntimeException('config-invalid'); }
-                SettingsWriter::finalize($record, $input['snapshot'], static fn () => Runtime::publishCredentialsWhileLocked($input['credentials'], $root));
+                SettingsWriter::finalize($record, $input['snapshot'], static fn () => Runtime::publishCredentialsWhileLocked($input['credentials'], $root, $frameworkContext));
                 $result = [];
             } elseif ($this->option('restore')) { $result = ['skipped' => SettingsWriter::restore($record, $input)]; }
             else {
@@ -130,7 +131,7 @@ final class ConfigSetCommand extends Command
                 'config-save-outcome-unknown', 'credentials-unreadable', 'credentials-invalid', 'maintenance-probe-credentials-invalid',
                 'maintenance-probe-origin-invalid', 'maintenance-probe-origin-mismatch', 'installation-missing', 'installation-mismatch',
                 'private-file-invalid', 'private-root-invalid', 'billing-settings-unreadable', 'extension-uninstalled',
-                'database-connection-invalid', 'database-pdo-driver-unavailable', 'database-connection-failed',
+                'framework-store-context-invalid', 'database-connection-invalid', 'database-pdo-driver-unavailable', 'database-connection-failed',
                 'database-driver-unsupported', 'database-tls-unsupported', 'database-prefix-unsupported',
                 'unsupported-database', 'native-secret-row-refused', 'document-roots-invalid',
                 'private-pipe-required', 'application-unavailable', 'private-root-unavailable',
