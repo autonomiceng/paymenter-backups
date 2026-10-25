@@ -11,6 +11,7 @@ class WriterRefusalCodeTests(unittest.TestCase):
         expected = frozenset({
             "application-unavailable", "archive-key-change-busy", "billing-settings-unreadable",
             "config-changed", "credentials-invalid", "credentials-unreadable",
+            "framework-store-context-invalid",
             "database-connection-failed", "database-connection-invalid", "database-driver-unsupported",
             "database-pdo-driver-unavailable", "database-prefix-unsupported", "database-tls-unsupported",
             "document-roots-invalid", "extension-uninstalled", "installation-mismatch", "installation-missing",
