@@ -17,8 +17,8 @@ but does not install packages or change hosting configuration.
 Build on a separate development machine:
 
 ```sh
-python3 tools/build_release.py --output dist/Backups-0.4.1.zip
-(cd dist && sha256sum -c Backups-0.4.1.zip.sha256)
+python3 tools/build_release.py --output dist/Backups-0.4.2.zip
+(cd dist && sha256sum -c Backups-0.4.2.zip.sha256)
 ```
 
 The deterministic archive has one top-level `Backups/` directory, compatible

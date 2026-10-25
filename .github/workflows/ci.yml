@@ -54,5 +54,5 @@ jobs:
           while IFS= read -r -d '' source; do
             php -l "$source"
           done < <(find extension tests/integration -name '*.php' -print0)
-      - run: python tools/build_release.py --output dist/Backups-0.4.1.zip
-      - run: python tools/native_integration.py --release dist/Backups-0.4.1.zip --composer "$(command -v composer)"
+      - run: python tools/build_release.py --output dist/Backups-0.4.2.zip
+      - run: python tools/native_integration.py --release dist/Backups-0.4.2.zip --composer "$(command -v composer)"
