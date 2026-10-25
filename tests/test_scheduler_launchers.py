@@ -28,6 +28,8 @@ class LauncherTests(unittest.TestCase):
         self.assertFalse(any(word in command for word in ("enable", "disable", "start", "stop", "restart", "edit")))
         if "list-timers" in command:
             return json.dumps([{"unit": "paymenter-scheduler.timer", "activates": self.unit}]).encode()
+        if "list-units" in command or "list-unit-files" in command:
+            return b'' if '--plain' in command else b'[]'
         return (f"Id={self.unit}\nUser={self.owner}\nWorkingDirectory={self.app}\nDynamicUser=no\nLoadState=loaded\n"
                 f"ExecStart={{ path=/usr/bin/flock ; argv[]={self.command} ; ignore_errors=no ; }}\n").encode()
 
@@ -84,10 +86,12 @@ class LauncherTests(unittest.TestCase):
     def test_masked_timer_without_trigger_is_accepted_on_systemd_255(self):
         # A masked timer with no Triggers has a null ACTIVATES cell.
         timers = b'[{"next":null,"left":null,"last":0,"passed":0,"unit":"fwupd-refresh.timer","activates":null}]'
-        with patch("paymenter_backups.maintenance.run", return_value=timers) as read:
+        def response(command, timeout):
+            return timers if "list-timers" in command else b'[]'
+        with patch("paymenter_backups.maintenance.run", side_effect=response) as read:
             self.assertEqual(systemd_locks(self.app, [self.lock], {"systemctl": "/usr/bin/true"}), set())
         self.assertTrue(read.called)
-        self.assertTrue(all("list-timers" in call.args[0] for call in read.call_args_list))
+        self.assertFalse(any("show" in call.args[0] for call in read.call_args_list))
 
     def test_null_timer_target_does_not_skip_real_timer_lock_verification(self):
         def response(command, timeout):
@@ -130,6 +134,8 @@ class LauncherTests(unittest.TestCase):
             self.invocations.append(command)
             if "list-timers" in command:
                 return json.dumps([{"activates": unit} for unit in units]).encode()
+            if "list-units" in command or "list-unit-files" in command:
+                return b'[]'
             self.assertIn("--", command)
             self.assertEqual(command[command.index("--") + 1:], sorted(units))
             return "\n\n".join(f"Id={unit}\nUser={self.owner}\nWorkingDirectory={self.app}\nDynamicUser=no\nLoadState=loaded\nExecStart={{ path=/usr/bin/flock ; argv[]={self.command} ; ignore_errors=no ; }}" for unit in units).encode()

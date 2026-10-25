@@ -333,6 +333,8 @@ def _legacy_cron_lock(line, app, paths, cron=True):
 
 def systemd_locks(app, paths, tools):
     """Read existing timer/service metadata. Never install, enable or start jobs."""
+    from .discovery import SYSTEMD_RESTART_POLICIES, SYSTEMD_SHOW_PROPERTIES, systemd_service_units
+
     systemctl = tools.get("systemctl", "/usr/bin/systemctl")
     if not pathlib.Path(systemctl).is_file():
         return set()
@@ -386,12 +388,18 @@ def systemd_locks(app, paths, tools):
             if not isinstance(unit, str) or len(unit) > 255 or not re.fullmatch(unit_pattern, unit):
                 raise BackupError("job-locks-unverified", detail={"activates": repr(unit)[:80]})
             units.add(unit)
+        try:
+            units.update(systemd_service_units(command, lambda argv: read(argv).decode()))
+            if len(units) > 1000:
+                raise ValueError()
+        except (KeyError, TypeError, ValueError, UnicodeError, BackupError, OSError):
+            raise BackupError("job-locks-unverified") from None
         if not units:
             continue
         try:
             # One bounded read per manager avoids a subprocess per timer. Id
             # identifies every block; -- keeps unit names separate from options.
-            raw = read(command + ["show", "--no-pager", "--property=Id,ExecStart,User,WorkingDirectory,DynamicUser,LoadState", "--", *sorted(units)]).decode()
+            raw = read(command + ["show", "--no-pager", "--property=" + ",".join(SYSTEMD_SHOW_PROPERTIES), "--", *sorted(units)]).decode()
             blocks = re.split(r"\n\s*\n", raw.strip())
             properties = {}
             for block in blocks:
@@ -429,7 +437,10 @@ def systemd_locks(app, paths, tools):
                 if working == str(app):
                     tokens = ["cd", str(app), "&&"] + tokens
                 line = " ".join(shlex.quote(token) for token in tokens)
-                verified.add(_legacy_cron_lock(line, app, paths, cron=False))
+                verified_lock = _legacy_cron_lock(line, app, paths, cron=False)
+                if props.get("Restart") in SYSTEMD_RESTART_POLICIES and "queue:work" in tokens:
+                    raise BackupError("job-locks-unverified")
+                verified.add(verified_lock)
         except (KeyError, ValueError, UnicodeError, BackupError):
             raise BackupError("job-locks-unverified") from None
     return verified
