@@ -30,6 +30,7 @@ try {
         $arguments[$key] = $argv[++$i];
     }
     $databaseContext = null;
+    $frameworkContext = null;
     $stdinPayload = null;
     $stdinPayloadRead = false;
     if ($databaseContextStdin) {
@@ -37,11 +38,14 @@ try {
         if (strlen($bytes) > 65536) { throw new RuntimeException('database-connection-invalid'); }
         try { $request = json_decode($bytes, true, 16, JSON_THROW_ON_ERROR); }
         catch (Throwable $error) { throw new RuntimeException('database-connection-invalid'); }
-        if (!is_array($request) || count($request) !== 2 || array_diff(array_keys($request), ['database_connection', 'payload'])
+        if (!is_array($request) || array_diff(array_keys($request), ['database_connection', 'framework_context', 'payload'])
             || !array_key_exists('database_connection', $request) || !array_key_exists('payload', $request)) {
             throw new RuntimeException('database-connection-invalid');
         }
         $databaseContext = DatabaseConnectionContext::validate($request['database_connection']);
+        if (array_key_exists('framework_context', $request)) {
+            $frameworkContext = \Paymenter\Extensions\Others\Backups\FrameworkStores::validateContext($request['framework_context']);
+        }
         $stdinPayload = $request['payload'];
     }
     $readPayload = static function (string $errorCode = 'credentials-invalid') use (&$stdinPayloadRead, $databaseContextStdin, $stdinPayload) {
@@ -64,8 +68,10 @@ try {
     $app = new Application($base);
     $app->bootstrapWith([LoadEnvironmentVariables::class, LoadConfiguration::class]);
     $config = $app->make('config');
+    if ($frameworkContext !== null) { \Paymenter\Extensions\Others\Backups\FrameworkStores::applyContext($config, $frameworkContext); }
     if ($databaseContext !== null) {
         $dbName = $databaseContext['default'];
+        $config->set('database.default', $dbName);
         $existing = $config->get('database.connections.' . $dbName, []);
         $db = array_replace(is_array($existing) ? $existing : [], $databaseContext['connection']);
     } else {
@@ -236,7 +242,7 @@ try {
     if ($verb !== 'read') { throw new RuntimeException('bridge-command-invalid'); }
     echo json_encode($readEnvelope($credentials), JSON_THROW_ON_ERROR | JSON_UNESCAPED_SLASHES) . "\n";
 } catch (Throwable $error) {
-    $safe = ['private-pipe-required', 'application-unavailable', 'database-connection-invalid', 'database-pdo-driver-unavailable', 'database-connection-failed', 'database-driver-unsupported', 'database-tls-unsupported', 'database-prefix-unsupported', 'unsupported-database', 'extension-uninstalled', 'native-secret-row-refused', 'private-root-invalid', 'document-roots-invalid', 'private-root-unavailable', 'billing-settings-unreadable', 'installation-mismatch', 'installation-missing', 'credentials-unreadable', 'credentials-invalid', 'bridge-command-invalid', 'private-file-invalid', 'private-write-failed', 'maintenance-probe-credentials-invalid', 'maintenance-probe-origin-invalid', 'maintenance-probe-origin-mismatch', 'archive-key-invalid', 'archive-key-mismatch', 'archive-key-required', 'archive-key-change-busy', 'archive-key-pending-exists', 'archive-key-already-exists', 'archive-key-limit', 'archive-key-audit-failed'];
+    $safe = ['private-pipe-required', 'application-unavailable', 'framework-store-context-invalid', 'database-connection-invalid', 'database-pdo-driver-unavailable', 'database-connection-failed', 'database-driver-unsupported', 'database-tls-unsupported', 'database-prefix-unsupported', 'unsupported-database', 'extension-uninstalled', 'native-secret-row-refused', 'private-root-invalid', 'document-roots-invalid', 'private-root-unavailable', 'billing-settings-unreadable', 'installation-mismatch', 'installation-missing', 'credentials-unreadable', 'credentials-invalid', 'bridge-command-invalid', 'private-file-invalid', 'private-write-failed', 'maintenance-probe-credentials-invalid', 'maintenance-probe-origin-invalid', 'maintenance-probe-origin-mismatch', 'archive-key-invalid', 'archive-key-mismatch', 'archive-key-required', 'archive-key-change-busy', 'archive-key-pending-exists', 'archive-key-already-exists', 'archive-key-limit', 'archive-key-audit-failed'];
     $code = in_array($error->getMessage(), $safe, true) ? $error->getMessage() : 'bridge-unavailable';
     fwrite(STDERR, json_encode(['error' => $code]) . "\n"); exit(1);
 }

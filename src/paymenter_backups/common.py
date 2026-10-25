@@ -29,7 +29,7 @@ WRITER_CAUSE_CODES = frozenset({
     "installation-missing", "installation-mismatch", "maintenance-probe-credentials-invalid",
     "maintenance-probe-origin-invalid", "maintenance-probe-origin-mismatch", "native-secret-row-refused",
     "private-file-invalid", "private-pipe-required", "private-root-invalid", "private-root-unavailable",
-    "database-connection-invalid", "database-connection-failed", "database-pdo-driver-unavailable",
+    "framework-store-context-invalid", "database-connection-invalid", "database-connection-failed", "database-pdo-driver-unavailable",
     "database-driver-unsupported", "database-tls-unsupported", "database-prefix-unsupported",
     "unsupported-database", "writer-failed", "writer-timeout", "writer-process-failed", "writer-output-invalid",
     "writer-exited-without-output",

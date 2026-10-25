@@ -11,7 +11,7 @@ import uuid
 from . import __version__
 from .artifacts import journal as artifact_journal, stream
 from .common import BackupError, State, atomic_json, read_json, private_file, safe_writer_cause, WRITER_CAUSE_CODES
-from .config import DEFAULTS, bridge, load, load_policy, normalize, redact, validate, validate_database_context
+from .config import DEFAULTS, bridge, load, load_policy, normalize, redact, validate, validate_database_context, validate_framework_context
 from .engine import capture, export, plan, verify
 from .maintenance import recover
 from .presentation import overview
@@ -23,7 +23,7 @@ from .storage import clean_environment, delete_plan, delete_run, deliver, destin
 WRITER_REFUSAL_CODES = frozenset({
     "application-unavailable", "archive-key-change-busy", "billing-settings-unreadable",
     "config-changed", "credentials-invalid", "credentials-unreadable",
-    "database-connection-failed", "database-connection-invalid", "database-driver-unsupported",
+    "framework-store-context-invalid", "database-connection-failed", "database-connection-invalid", "database-driver-unsupported",
     "database-pdo-driver-unavailable", "database-prefix-unsupported", "database-tls-unsupported",
     "document-roots-invalid", "extension-uninstalled", "installation-mismatch", "installation-missing",
     "maintenance-probe-credentials-invalid", "maintenance-probe-origin-invalid",
@@ -153,6 +153,9 @@ def native_settings(args, state, values, descriptors, actor=None, restore=False,
         database_context = getattr(args, "database_connection", None)
         if database_context is not None:
             writer_values["_database_connection"] = database_context
+        framework_context = getattr(args, "framework_context", None)
+        if framework_context is not None:
+            writer_values["_framework_context"] = validate_framework_context(framework_context)
         input_bytes = json.dumps(writer_values).encode()
         if len(input_bytes) > 65536:
             raise BackupError("input-too-large")
@@ -421,6 +424,7 @@ def dispatch(args):
     args.bridge = args.bridge or str(pathlib.Path(args.app) / "extensions/Others/Backups/bridge.php")
     command = args.command
     args.database_connection = None
+    args.framework_context = None
     args.command_input = None
     if getattr(args, "database_connection_stdin", False):
         request = stdin_json()
@@ -428,6 +432,8 @@ def dispatch(args):
         if context is None:
             raise BackupError("database-connection-invalid")
         args.database_connection = validate_database_context(context)
+        if "_framework_context" in request:
+            args.framework_context = validate_framework_context(request.pop("_framework_context"))
         args.command_input = request
     initialize = command == "init" or command == "config" and args.verb == "set" or command == "schedule" and args.verb != "show" or command == "run" and args.execute
     preliminary = bridge(args, "read-settings") if initialize else None
@@ -625,7 +631,8 @@ def dispatch(args):
         database_context = args.database_connection
         if database_context is not None:
             prefix.append("--database-connection-stdin")
-        return tick(state, envelope, prefix, envelope_loader=lambda: load(args, coordinated=False), database_context=database_context)
+        return tick(state, envelope, prefix, envelope_loader=lambda: load(args, coordinated=False),
+                    database_context=database_context, framework_context=args.framework_context)
     raise BackupError("command-invalid")
 
 

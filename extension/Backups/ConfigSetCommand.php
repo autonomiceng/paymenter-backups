@@ -4,6 +4,7 @@ namespace Paymenter\Extensions\Others\Backups;
 use Illuminate\Console\Command;
 
 require_once __DIR__ . '/DatabaseConnectionContext.php';
+require_once __DIR__ . '/FrameworkStores.php';
 
 final class ConfigSetCommand extends Command
 {
@@ -25,6 +26,11 @@ final class ConfigSetCommand extends Command
                 $databaseContext = $input['_database_connection'];
                 unset($input['_database_connection']);
                 DatabaseConnectionContext::apply($databaseContext);
+            }
+            if (array_key_exists('_framework_context', $input)) {
+                if (!$this->option('defer-init')) { throw new \RuntimeException('config-invalid'); }
+                FrameworkStores::applyContext(app('config'), $input['_framework_context']);
+                unset($input['_framework_context']);
             }
             if (!$this->option('restore') && !$this->option('finalize')) {
                 $fields = array_column(Settings::fields(), null, 'name');

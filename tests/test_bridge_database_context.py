@@ -50,6 +50,7 @@ namespace Illuminate\Foundation\Bootstrap {
 namespace {
     final class FixtureConfig {
         public function get(string $key, mixed $default = null): mixed { return $default; }
+        public function set(string $key, mixed $value): void {}
     }
 }
 ''')

@@ -5,6 +5,7 @@ use RuntimeException;
 use Symfony\Component\Process\Process;
 
 require_once __DIR__ . '/DatabaseConnectionContext.php';
+require_once __DIR__ . '/FrameworkStores.php';
 
 final class EngineCommandException extends RuntimeException
 {
@@ -21,7 +22,7 @@ final class Runtime
         'billing-settings-unreadable', 'busy', 'command-not-registered', 'config-changed',
         'config-coordination-required', 'config-save-incomplete', 'config-save-outcome-unknown',
         'config-write-failed', 'config-write-outcome-unknown', 'credentials-invalid', 'credentials-unreadable',
-        'database-connection-invalid', 'database-connection-failed', 'database-pdo-driver-unavailable',
+        'framework-store-context-invalid', 'database-connection-invalid', 'database-connection-failed', 'database-pdo-driver-unavailable',
         'database-driver-unsupported', 'database-tls-unsupported', 'database-prefix-unsupported',
         'document-roots-invalid', 'extension-uninstalled', 'installation-missing', 'installation-mismatch',
         'maintenance-probe-credentials-invalid', 'maintenance-probe-origin-invalid', 'maintenance-probe-origin-mismatch',
@@ -186,6 +187,7 @@ PYTHON;
             $databaseContext = self::databaseConnectionContext();
             $input ??= [];
             $input['_database_connection'] = $databaseContext;
+            $input['_framework_context'] = FrameworkStores::capture(app('config'));
         }
         $process = new Process(self::engine($arguments, $databaseContext), base_path(), self::safeEnvironment(), $input === null ? null : json_encode($input === [] ? new \stdClass : $input, JSON_THROW_ON_ERROR));
         $process->setTimeout($timeout);
@@ -290,6 +292,7 @@ PYTHON;
         $input = ['settings' => $settings ?: new \stdClass];
         $databaseContext = self::databaseConnectionContext();
         $input['_database_connection'] = $databaseContext;
+        $input['_framework_context'] = FrameworkStores::capture(app('config'));
         if ($credentials !== null) {
             $input['credentials'] = $credentials['s3'] ?? null;
             $input['maintenance_probe_credentials'] = $credentials['site'] ?? null;
@@ -344,7 +347,7 @@ PYTHON;
         // Internal native finalizer owns both inherited flocks and native row
         // locks. Read committed rows in the cold child; it writes only secrets.
         $process = new Process([PHP_BINARY, __DIR__ . '/bridge.php', 'credentials-merge', '--database-connection-stdin', '--app', realpath(base_path()), '--private-root', $root],
-            base_path(), self::safeEnvironment(), json_encode(['database_connection' => self::databaseConnectionContext(), 'payload' => $input], JSON_THROW_ON_ERROR));
+            base_path(), self::safeEnvironment(), json_encode(['database_connection' => self::databaseConnectionContext(), 'framework_context' => FrameworkStores::capture(app('config')), 'payload' => $input], JSON_THROW_ON_ERROR));
         $process->setTimeout(30);
         try { $process->run(); }
         catch (\Throwable $error) { throw new RuntimeException('config-save-outcome-unknown'); }
@@ -428,7 +431,7 @@ PYTHON;
         $actor = \Illuminate\Support\Facades\Auth::id();
         $input['actor'] = $actor === null ? null : (int) $actor;
         $process = new Process([self::php(), __DIR__ . '/bridge.php', $verb, '--database-connection-stdin', '--app', realpath(base_path()), '--private-root', self::privateRoot()],
-            base_path(), self::safeEnvironment(), json_encode(['database_connection' => self::databaseConnectionContext(), 'payload' => $input], JSON_THROW_ON_ERROR));
+            base_path(), self::safeEnvironment(), json_encode(['database_connection' => self::databaseConnectionContext(), 'framework_context' => FrameworkStores::capture(app('config')), 'payload' => $input], JSON_THROW_ON_ERROR));
         // PBKDF2 and durable credential writes are bounded; this never starts a transfer.
         $process->setTimeout(10);
         $process->run();
@@ -441,7 +444,7 @@ PYTHON;
     public static function credentials(array $input, bool $maintenanceProbe = false): void
     {
         // Secrets never create private storage; Save settings does that first.
-        $process = new Process([self::php(), __DIR__ . '/bridge.php', $maintenanceProbe ? 'maintenance-probe-credentials-write' : 'credentials-write', '--database-connection-stdin', '--app', realpath(base_path()), '--private-root', self::privateRoot()], base_path(), self::safeEnvironment(), json_encode(['database_connection' => self::databaseConnectionContext(), 'payload' => $input], JSON_THROW_ON_ERROR));
+        $process = new Process([self::php(), __DIR__ . '/bridge.php', $maintenanceProbe ? 'maintenance-probe-credentials-write' : 'credentials-write', '--database-connection-stdin', '--app', realpath(base_path()), '--private-root', self::privateRoot()], base_path(), self::safeEnvironment(), json_encode(['database_connection' => self::databaseConnectionContext(), 'framework_context' => FrameworkStores::capture(app('config')), 'payload' => $input], JSON_THROW_ON_ERROR));
         $process->setTimeout(10);
         $process->run();
         if (!$process->isSuccessful()) {

@@ -274,6 +274,21 @@ class CoordinatedSaveTests(PrivateFixture):
         envelope['credentials'] = {} if verb == 'read-settings' else copy.deepcopy(self.credentials)
         return envelope
 
+    def test_resolved_framework_context_survives_audited_native_save(self):
+        self.args.framework_context = {
+            'schema_version': 1,
+            'maintenance': {'driver': 'file'},
+            'cache': {'default': 'shared', 'driver': 'redis', 'connection': 'cache', 'lock_connection': None, 'path': None},
+            'session': {'driver': 'database', 'connection': None, 'files': None},
+            'queue': {'default': 'jobs', 'driver': 'database', 'connection': None},
+            'filesystem': {'default': 'local', 'driver': 'local', 'root': str(self.app / 'storage')},
+        }
+        for bucket in ('first-destination', 'second-destination'):
+            result = cli.set_config(self.args, self.state, {'settings': {'s3_bucket': bucket}})
+            self.assertTrue(result['updated'])
+            self.assertEqual(self.rows()['rows']['s3_bucket']['value'], bucket)
+            self.assertNotIn('_framework_context', self.rows()['rows'])
+
     def test_r9_settings_save_uses_stateless_actor_with_scrubbed_demo_environment(self):
         from test_database_context import MARIADB_CONTEXT
 
