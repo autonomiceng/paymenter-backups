@@ -13,6 +13,190 @@ PHP = os.environ.get("PAYMENTER_BACKUPS_TEST_PHP") or shutil.which("php")
 
 @unittest.skipUnless(PHP, "PHP required")
 class PrivateStoreUiTests(unittest.TestCase):
+    def conditional_saved_guidance(self, path):
+        return (f"Backups can't confirm that saved data directory {path} holds Backups data. "
+                "If it does, restore the web user's ownership and access with mode 0700 before changing it; "
+                "otherwise choose a new, dedicated, empty folder.")
+
+    def test_private_root_guidance_matches_saved_and_identified_state(self):
+        path = "/private/backups"
+        new_folder = (f"Data directory {path} isn't identified as a readable Backups data directory. "
+                      "Choose a new, dedicated, empty folder for Backups data.")
+        cases = [
+            ("private-root-invalid", "owner",
+             f"Backups data directory {path} isn't owned by the web user. Change its owner to the web user and set mode 0700."),
+            ("private-root-invalid", "mode",
+             f"Backups data directory {path} must have mode 0700. Set its mode to 0700."),
+            ("private-root-unavailable", None,
+             f"Saved data directory {path} needs repair. Restore the web user's access before changing or replacing it."),
+        ]
+        for code, reason, direct_repair in cases:
+            for saved, identified, expected in (
+                (True, False, self.conditional_saved_guidance(path)),
+                (True, True, direct_repair),
+                (False, False, new_folder),
+            ):
+                with self.subTest(code=code, reason=reason, saved=saved, identified=identified):
+                    problem = {"code": code, "params": {
+                        "path": path, "reason": reason, "repair_required": saved,
+                        "identified": identified, "path_exists": True,
+                    }}
+                    message = self.php(
+                        'require $argv[1]; echo Paymenter\\Extensions\\Others\\Backups\\Messages::privateRootProblem('
+                        'json_decode($argv[2], true, 16, JSON_THROW_ON_ERROR));',
+                        ROOT / "extension/Backups/Messages.php", json.dumps(problem),
+                    )
+                    self.assertEqual(message, expected)
+
+    def test_pinned_unmarked_root_has_conditional_repair_guidance(self):
+        with tempfile.TemporaryDirectory(prefix="backups-pinned-unmarked-") as temporary:
+            base = pathlib.Path(temporary)
+            app = base / "app"
+            app.mkdir()
+            private = base / "private"
+            private.mkdir(mode=0o755)
+            private.chmod(0o755)
+            for action in ("inspect", "save"):
+                with self.subTest(action=action):
+                    result = self.page_guidance(app, str(private), action, local_byte_budget=123)
+                    self.assertTrue(result["problem"]["params"]["repair_required"])
+                    self.assertFalse(result["problem"]["params"]["identified"])
+                    self.assertEqual(result["message"], self.conditional_saved_guidance(private))
+                    if action == "save":
+                        self.assertEqual(result["errors"]["settings.private_root"], result["message"])
+            self.assertEqual(list(private.iterdir()), [])
+
+    def page_guidance(self, app, configured="", action="inspect", failure="", **changes):
+        result = subprocess.run(
+            [PHP, str(ROOT / "tests/integration/private_root_guidance.php")],
+            input=json.dumps({"app": str(app), "configured": configured, "action": action,
+                              "failure": failure, "changes": changes}),
+            capture_output=True, text=True, timeout=10,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        return json.loads(result.stdout)
+
+    @unittest.skipIf(os.geteuid() == 0, "Search permissions require a non-root account")
+    def test_saved_default_without_search_permission_keeps_page_repair_guidance(self):
+        with tempfile.TemporaryDirectory(prefix="backups-default-guidance-") as temporary:
+            base = pathlib.Path(temporary)
+            app = base / "app"
+            app.mkdir()
+            private = base / "paymenter-backups-private"
+            private.mkdir(mode=0o700)
+            marker = private / "installation.json"
+            marker.write_text('{"installation_uuid":"fixture"}')
+            private.chmod(0o000)
+            try:
+                result = self.page_guidance(app)
+            finally:
+                private.chmod(0o700)
+            self.assertTrue(result["initialized"])
+            self.assertEqual(result["overview"]["configuration"]["error"], "private-root-invalid")
+            self.assertTrue(result["problem"]["params"].get("repair_required"))
+            self.assertFalse(result["problem"]["params"]["identified"])
+            self.assertEqual(result["message"], self.conditional_saved_guidance(private))
+            self.assertEqual(marker.read_text(), '{"installation_uuid":"fixture"}')
+
+    @unittest.skipIf(os.geteuid() == 0, "Search permissions require a non-root account")
+    def test_save_repairs_inaccessible_saved_default_and_refuses_a_move(self):
+        with tempfile.TemporaryDirectory(prefix="backups-default-save-") as temporary:
+            base = pathlib.Path(temporary)
+            app = base / "app"
+            app.mkdir()
+            private = base / "paymenter-backups-private"
+            private.mkdir(mode=0o700)
+            marker = private / "installation.json"
+            marker.write_text('{"installation_uuid":"fixture"}')
+            private.chmod(0o000)
+            try:
+                for configured in ("", str(private)):
+                    with self.subTest(configured=configured):
+                        result = self.page_guidance(app, configured, "save", local_byte_budget=123)
+                        message = result["errors"]["settings.private_root"]
+                        self.assertEqual(message, self.conditional_saved_guidance(private))
+                replacement = base / "replacement"
+                result = self.page_guidance(app, action="save", private_root=str(replacement))
+                self.assertIn("can't be changed after setup", result["errors"]["settings.private_root"])
+                self.assertFalse(replacement.exists())
+            finally:
+                private.chmod(0o700)
+            self.assertEqual(marker.read_text(), '{"installation_uuid":"fixture"}')
+
+    @unittest.skipIf(os.geteuid() == 0, "Search permissions require a non-root account")
+    def test_save_errors_keep_default_root_repair_guidance(self):
+        with tempfile.TemporaryDirectory(prefix="backups-default-save-error-") as temporary:
+            base = pathlib.Path(temporary)
+            app = base / "app"
+            app.mkdir()
+            private = base / "paymenter-backups-private"
+            private.mkdir(mode=0o700)
+            marker = private / "installation.json"
+            marker.write_text('{"installation_uuid":"fixture"}')
+            for failure in ("throw", "incomplete"):
+                with self.subTest(failure=failure):
+                    try:
+                        result = self.page_guidance(app, action="save", failure=failure, local_byte_budget=123)
+                        self.assertEqual(private.stat().st_mode & 0o777, 0)
+                        self.assertEqual(result["errors"]["settings.private_root"], self.conditional_saved_guidance(private))
+                    finally:
+                        private.chmod(0o700)
+            self.assertEqual(marker.read_text(), '{"installation_uuid":"fixture"}')
+
+    def test_readable_unsaved_default_keeps_new_folder_guidance(self):
+        with tempfile.TemporaryDirectory(prefix="backups-default-unsaved-") as temporary:
+            base = pathlib.Path(temporary)
+            app = base / "app"
+            app.mkdir()
+            private = base / "paymenter-backups-private"
+            self.assertIsNone(self.page_guidance(app)["problem"])
+            self.assertFalse(private.exists())
+            private.mkdir(mode=0o755)
+            private.chmod(0o755)
+            for action in ("inspect", "save"):
+                with self.subTest(action=action):
+                    result = self.page_guidance(app, action=action, local_byte_budget=123)
+                    self.assertNotIn("repair_required", result["problem"]["params"])
+                    self.assertIn("Choose a new, dedicated, empty folder", result["message"])
+                    if action == "save":
+                        self.assertEqual(result["errors"]["settings.private_root"], result["message"])
+            self.assertEqual(list(private.iterdir()), [])
+
+    @unittest.skipIf(os.geteuid() == 0, "Search permissions require a non-root account")
+    def test_proposed_inaccessible_unsaved_directory_keeps_new_folder_guidance(self):
+        with tempfile.TemporaryDirectory(prefix="backups-proposed-unsaved-") as temporary:
+            base = pathlib.Path(temporary)
+            app = base / "app"
+            app.mkdir()
+            private = base / "proposed"
+            private.mkdir(mode=0o700)
+            private.chmod(0o000)
+            try:
+                result = self.page_guidance(app, action="save", private_root=str(private))
+                message = result["errors"]["settings.private_root"]
+                self.assertIn("Choose a new, dedicated, empty folder", message)
+                self.assertNotIn("Set its mode", message)
+            finally:
+                private.chmod(0o700)
+            self.assertEqual(list(private.iterdir()), [])
+
+    @unittest.skipIf(os.geteuid() == 0, "Search permissions require a non-root account")
+    def test_inaccessible_legacy_default_with_unknown_identity_requires_repair(self):
+        with tempfile.TemporaryDirectory(prefix="backups-default-ambiguous-") as temporary:
+            base = pathlib.Path(temporary)
+            app = base / "app"
+            app.mkdir()
+            private = base / "paymenter-backups-private"
+            private.mkdir(mode=0o700)
+            private.chmod(0o000)
+            try:
+                result = self.page_guidance(app)
+                self.assertTrue(result["problem"]["params"].get("repair_required"))
+                self.assertEqual(result["message"], self.conditional_saved_guidance(private))
+            finally:
+                private.chmod(0o700)
+            self.assertEqual(list(private.iterdir()), [])
+
     def php(self, program, *arguments):
         program = ('if (!function_exists("posix_geteuid")) { function posix_geteuid() { return getmyuid(); } } '
                    + program)
@@ -23,16 +207,16 @@ class PrivateStoreUiTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         return result.stdout
 
-    def private_root_problem(self, app, private, setup=""):
+    def private_root_problem(self, app, private, setup="", saved_root=False):
         source = ROOT / "extension/Backups/PrivateStore.php"
         messages = ROOT / "extension/Backups/Messages.php"
         result = self.php(
             setup
             + 'require $argv[1]; require $argv[4]; $problem = '
-            + 'Paymenter\\Extensions\\Others\\Backups\\PrivateStore::problem($argv[2], $argv[3]); '
+            + 'Paymenter\\Extensions\\Others\\Backups\\PrivateStore::problem($argv[2], $argv[3], [], $argv[5] === "true"); '
             + 'echo json_encode(["problem" => $problem, "message" => '
             + 'Paymenter\\Extensions\\Others\\Backups\\Messages::privateRootProblem($problem)], JSON_THROW_ON_ERROR);',
-            source, app, private, messages,
+            source, app, private, messages, "true" if saved_root else "false",
         )
         return json.loads(result)
 
@@ -196,6 +380,7 @@ class PrivateStoreUiTests(unittest.TestCase):
             result = self.private_root_problem(app, private)
             self.assertEqual(result["problem"]["code"], "private-root-invalid")
             self.assertEqual(result["problem"]["params"]["reason"], "mode")
+            self.assertNotIn("repair_required", result["problem"]["params"])
             self.assertIn("Choose a new, dedicated, empty folder", result["message"])
             self.assertNotIn("Set its mode", result["message"])
 
@@ -224,13 +409,68 @@ class PrivateStoreUiTests(unittest.TestCase):
             marker = private / "installation.json"
             marker.write_text('{"schema_version":1}')
             marker.chmod(0o000)
+            setup = (
+                'eval("namespace Paymenter\\\\Extensions\\\\Others\\\\Backups; '
+                'function is_readable(\\$path) { return !str_ends_with(\\$path, \'/installation.json\'); }"); '
+            )
             try:
-                result = self.private_root_problem(app, private)
+                result = self.private_root_problem(app, private, setup)
             finally:
                 marker.chmod(0o600)
             self.assertEqual(result["problem"]["params"]["reason"], "mode")
+            self.assertNotIn("repair_required", result["problem"]["params"])
             self.assertIn("Choose a new, dedicated, empty folder", result["message"])
             self.assertNotIn("Set its mode", result["message"])
+
+    def test_saved_root_with_unreadable_installation_marker_keeps_repair_guidance(self):
+        with tempfile.TemporaryDirectory(prefix="backups-private-store-saved-marker-") as temporary:
+            base = pathlib.Path(temporary)
+            app = base / "app"
+            (app / "public").mkdir(parents=True)
+            private = base / "private"
+            private.mkdir(mode=0o750)
+            marker = private / "installation.json"
+            marker.write_text('{"schema_version":1}')
+            marker.chmod(0o000)
+            private.chmod(0o750)
+            setup = (
+                'eval("namespace Paymenter\\\\Extensions\\\\Others\\\\Backups; '
+                'function is_readable(\\$path) { return !str_ends_with(\\$path, \'/installation.json\'); }"); '
+            )
+            try:
+                result = self.private_root_problem(app, private, setup, saved_root=True)
+            finally:
+                marker.chmod(0o600)
+            self.assertEqual(result["problem"]["code"], "private-root-invalid")
+            self.assertFalse(result["problem"]["params"]["identified"])
+            self.assertTrue(result["problem"]["params"]["repair_required"])
+            self.assertEqual(result["message"], self.conditional_saved_guidance(private))
+
+    def test_saved_unavailable_root_with_unreadable_marker_keeps_repair_guidance(self):
+        with tempfile.TemporaryDirectory(prefix="backups-private-store-saved-unavailable-") as temporary:
+            base = pathlib.Path(temporary)
+            app = base / "app"
+            (app / "public").mkdir(parents=True)
+            private = base / "private"
+            private.mkdir(mode=0o750)
+            marker = private / "installation.json"
+            marker.write_text('{"schema_version":1}')
+            marker.chmod(0o000)
+            private.chmod(0o750)
+            setup = (
+                'eval("namespace Paymenter\\\\Extensions\\\\Others\\\\Backups; '
+                'function is_readable(\\$path) { return !str_ends_with(\\$path, \'/installation.json\'); } '
+                'function is_dir(\\$path) { return !str_ends_with(\\$path, \'/private\'); }"); '
+            )
+            try:
+                result = self.private_root_problem(app, private, setup, saved_root=True)
+            finally:
+                marker.chmod(0o600)
+            self.assertEqual(result["problem"]["code"], "private-root-unavailable")
+            self.assertTrue(result["problem"]["params"]["path_exists"])
+            self.assertFalse(result["problem"]["params"]["identified"])
+            self.assertTrue(result["problem"]["params"]["repair_required"])
+            self.assertEqual(result["message"], self.conditional_saved_guidance(private))
 
     def test_unreadable_unidentified_directory_prompts_for_a_new_folder(self):
         with tempfile.TemporaryDirectory(prefix="backups-private-store-unreadable-") as temporary:
@@ -293,6 +533,25 @@ class PrivateStoreUiTests(unittest.TestCase):
             finally:
                 private.chmod(0o700)
             self.assertEqual(result, [True, False])
+
+    def test_unreadable_installation_marker_still_identifies_a_saved_default_root(self):
+        with tempfile.TemporaryDirectory(prefix="backups-private-store-saved-default-") as temporary:
+            private = pathlib.Path(temporary) / "private"
+            private.mkdir(mode=0o700)
+            marker = private / "installation.json"
+            marker.write_text('{"installation_uuid":"fixture"}')
+            marker.chmod(0o000)
+            try:
+                source = ROOT / "extension/Backups/PrivateStore.php"
+                result = self.php(
+                    'require $argv[1]; echo json_encode('
+                    'Paymenter\\Extensions\\Others\\Backups\\PrivateStore::hasInstallationMarker($argv[2]), '
+                    'JSON_THROW_ON_ERROR);',
+                    source, private,
+                )
+            finally:
+                marker.chmod(0o600)
+            self.assertEqual(json.loads(result), True)
 
 
 if __name__ == "__main__":

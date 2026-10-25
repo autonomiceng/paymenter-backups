@@ -296,9 +296,16 @@ final class Messages
         $code = $problem['code'] ?? null;
         $params = is_array($problem['params'] ?? null) ? $problem['params'] : [];
         $path = self::displayPath($params['path'] ?? null);
+        $repairRequired = ($params['repair_required'] ?? null) === true;
         if ($path === '') { return self::error(is_string($code) ? $code : null); }
+        if ($repairRequired && ($params['identified'] ?? null) !== true
+            && in_array($code, ['private-root-invalid', 'private-root-unavailable'], true)) {
+            return 'Backups can\'t confirm that saved data directory ' . $path . ' holds Backups data. '
+                . 'If it does, restore the web user\'s ownership and access with mode 0700 before changing it; '
+                . 'otherwise choose a new, dedicated, empty folder.';
+        }
         if ($code === 'private-root-invalid') {
-            if (($params['identified'] ?? null) !== true) {
+            if (!$repairRequired && ($params['identified'] ?? null) !== true) {
                 return 'Data directory ' . $path . ' isn\'t identified as a readable Backups data directory. Choose a new, dedicated, empty folder for Backups data.';
             }
             return match ($params['reason'] ?? null) {
@@ -308,8 +315,11 @@ final class Messages
             };
         }
         if ($code === 'private-root-unavailable') {
-            if (($params['path_exists'] ?? null) === true && ($params['identified'] ?? null) !== true) {
+            if (!$repairRequired && ($params['path_exists'] ?? null) === true && ($params['identified'] ?? null) !== true) {
                 return 'Data directory ' . $path . ' isn\'t identified as a readable Backups data directory. Choose a new, dedicated, empty folder for Backups data.';
+            }
+            if ($repairRequired) {
+                return 'Saved data directory ' . $path . ' needs repair. Restore the web user\'s access before changing or replacing it.';
             }
             $parent = self::displayPath($params['parent'] ?? null);
             if ($parent === '') { return self::error($code); }

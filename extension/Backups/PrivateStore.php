@@ -11,8 +11,19 @@ final class PrivateStore
         return rtrim(dirname($app), '/') . '/paymenter-backups-private';
     }
 
-    /** Check the data directory without creating it, and return a code with bounded display parameters. */
-    public static function problem(string $app, ?string $configured = null, array $extraDocroots = []): ?array
+    /** Preserve saved paths, including older defaults whose marker cannot be inspected. */
+    public static function isSavedRoot(string $app, ?string $configured = null): bool
+    {
+        if ($configured !== null && $configured !== '') { return true; }
+        $path = self::defaultPath($app);
+        // Older installs kept the default setting blank before and after Save.
+        // An inaccessible default is ambiguous: require repair rather than replacement.
+        return self::hasInstallationMarker($path)
+            || (self::installedOrRequiresRepair($path) && (!is_readable($path) || !is_executable($path)));
+    }
+
+    /** Check without creating the data directory; savedRoot marks the active persisted path. */
+    public static function problem(string $app, ?string $configured = null, array $extraDocroots = [], bool $savedRoot = false): ?array
     {
         $path = $configured ?: self::defaultPath($app);
         if (!str_starts_with($path, '/') || is_link($path) || preg_match('~(?:^|/)\.{1,2}(?:/|$)~', $path)) { return null; }
@@ -34,7 +45,7 @@ final class PrivateStore
         }
         $canonical = realpath($cursor);
         if ($canonical === false || !is_dir($canonical)) {
-            return self::unavailable($path, $cursor, true);
+            return self::unavailable($path, $cursor, true, $savedRoot);
         }
         $prospective = rtrim($canonical, '/') . ($suffix ? '/' . implode('/', $suffix) : '');
         if ($prospective === '') { $prospective = '/'; }
@@ -44,16 +55,21 @@ final class PrivateStore
         if (file_exists($path)) {
             if (!is_dir($path) || !($root = realpath($path))) { return null; }
             $identified = self::hasReadableInstallationMarker($root);
+            $repairRequired = $savedRoot && self::installedOrRequiresRepair($root);
             if (fileowner($root) !== posix_geteuid()) {
-                return ['code' => 'private-root-invalid', 'params' => ['path' => self::displayPath($root), 'reason' => 'owner', 'identified' => $identified]];
+                $params = ['path' => self::displayPath($root), 'reason' => 'owner', 'identified' => $identified];
+                if ($repairRequired) { $params['repair_required'] = true; }
+                return ['code' => 'private-root-invalid', 'params' => $params];
             }
             if ((fileperms($root) & 07777) !== 0700) {
-                return ['code' => 'private-root-invalid', 'params' => ['path' => self::displayPath($root), 'reason' => 'mode', 'identified' => $identified]];
+                $params = ['path' => self::displayPath($root), 'reason' => 'mode', 'identified' => $identified];
+                if ($repairRequired) { $params['repair_required'] = true; }
+                return ['code' => 'private-root-invalid', 'params' => $params];
             }
             return null;
         }
         if (!is_writable($canonical) || !is_executable($canonical)) {
-            return self::unavailable($prospective, $canonical, false);
+            return self::unavailable($prospective, $canonical, false, $savedRoot);
         }
         return null;
     }
@@ -81,25 +97,37 @@ final class PrivateStore
 
     private static function hasReadableInstallationMarker(string $path): bool
     {
+        return self::hasInstallationMarker($path) && @is_readable(rtrim($path, '/') . '/installation.json');
+    }
+
+    /** Identify a regular installation marker without needing to read its contents. */
+    public static function hasInstallationMarker(string $path): bool
+    {
+        if (str_contains($path, "\0")) { return false; }
         $marker = rtrim($path, '/') . '/installation.json';
         clearstatcache(true, $marker);
         $info = @lstat($marker);
-        return is_array($info) && (($info['mode'] & 0170000) === 0100000) && @is_readable($marker);
+        return is_array($info) && (($info['mode'] & 0170000) === 0100000);
     }
 
-    private static function unavailable(string $path, string $parent, bool $pathExists): array
+    private static function unavailable(string $path, string $parent, bool $pathExists, bool $savedRoot): array
     {
         $identified = $pathExists && self::hasReadableInstallationMarker($path);
+        $repairRequired = $savedRoot && self::installedOrRequiresRepair($path);
         if (!is_dir($parent)) {
-            return ['code' => 'private-root-unavailable', 'params' => [
+            $params = [
                 'path' => self::displayPath($path), 'parent' => self::displayPath($parent), 'parent_is_folder' => false,
                 'path_exists' => $pathExists, 'identified' => $identified,
-            ]];
+            ];
+            if ($repairRequired) { $params['repair_required'] = true; }
+            return ['code' => 'private-root-unavailable', 'params' => $params];
         }
-        return ['code' => 'private-root-unavailable', 'params' => [
+        $params = [
             'path' => self::displayPath($path), 'parent' => self::displayPath($parent), 'parent_is_folder' => true,
             'path_exists' => $pathExists, 'identified' => $identified,
-        ]];
+        ];
+        if ($repairRequired) { $params['repair_required'] = true; }
+        return ['code' => 'private-root-unavailable', 'params' => $params];
     }
 
     private static function displayPath(string $path): string

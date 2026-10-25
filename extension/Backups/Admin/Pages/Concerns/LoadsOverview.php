@@ -45,7 +45,11 @@ trait LoadsOverview
             $rawDocroots = $record->settings()->where('key', 'extra_docroots')->value('value') ?? '[]';
             $docroots = json_decode($rawDocroots, true, 16, JSON_THROW_ON_ERROR);
             if (!is_array($docroots) || !array_is_list($docroots) || !str_starts_with(ltrim($rawDocroots), '[')) { return null; }
-            return PrivateStore::problem(realpath(base_path()), $configured ?: null, $docroots);
+            $application = realpath(base_path());
+            if ($application === false) { return null; }
+            $configuredRoot = is_string($configured) && $configured !== '' ? $configured : null;
+            $savedRoot = PrivateStore::isSavedRoot($application, $configuredRoot);
+            return PrivateStore::problem($application, $configuredRoot, $docroots, $savedRoot);
         } catch (\Throwable $error) {
             return null;
         }
