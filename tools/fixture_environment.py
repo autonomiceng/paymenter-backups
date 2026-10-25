@@ -24,6 +24,22 @@ def _validate_temporary_parent(info):
         raise RuntimeError(f'temporary parent is {writable_by}-writable without sticky bit')
 
 
+def _validate_temporary_ancestors(directory):
+    current = pathlib.Path(directory)
+    initial_info = None
+    while True:
+        try:
+            info = current.stat()
+        except OSError:
+            raise RuntimeError('temporary directory is unavailable') from None
+        _validate_temporary_parent(info)
+        if initial_info is None:
+            initial_info = info
+        if current.parent == current:
+            return initial_info
+        current = current.parent
+
+
 def child_environment(overrides=None):
     result = dict(DEFAULT_ENVIRONMENT)
     if overrides:
@@ -40,16 +56,12 @@ def private_work_directory(prefix, parent=None):
     parent = pathlib.Path(parent if nested else os.environ.get('TMPDIR', tempfile.gettempdir()))
     try:
         parent = parent.resolve(strict=True)
-        info = parent.stat()
     except OSError:
         raise RuntimeError('temporary directory is unavailable') from None
+    info = _validate_temporary_ancestors(parent)
     if nested:
-        if not stat.S_ISDIR(info.st_mode):
-            raise RuntimeError('temporary parent is not a directory')
-    else:
-        _validate_temporary_parent(info)
-    if nested and (info.st_uid != os.geteuid() or info.st_mode & 0o077):
-        raise RuntimeError('nested temporary parent is not owner-private')
+        if info.st_uid != os.geteuid() or info.st_mode & 0o077:
+            raise RuntimeError('nested temporary parent is not owner-private')
     path = pathlib.Path(tempfile.mkdtemp(prefix=prefix, dir=parent))
     path.chmod(0o700)
     return path
@@ -60,10 +72,11 @@ def require_private_workroot(path, prefix, parent_prefix):
     work = pathlib.Path(path).absolute()
     base = work.parent
     temporary = pathlib.Path(os.environ.get('TMPDIR', tempfile.gettempdir())).resolve(strict=True)
-    temporary_info = temporary.stat()
-    _validate_temporary_parent(temporary_info)
+    _validate_temporary_ancestors(temporary)
+    resolved_base = base.resolve(strict=True)
+    _validate_temporary_ancestors(resolved_base)
     if (not work.name.startswith(prefix) or not base.name.startswith(parent_prefix)
-            or base.resolve(strict=True).parent != temporary):
+            or resolved_base.parent != temporary):
         raise RuntimeError('fixture workroot is outside its private temporary base')
     for directory in (base, work):
         try:
