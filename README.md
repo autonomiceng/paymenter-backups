@@ -30,8 +30,8 @@ database definitions, themes, and root Composer dependencies stay upstream.
 Build the native extension ZIP on a development machine:
 
 ```sh
-python3 tools/build_release.py --output dist/Backups-0.4.1.zip
-(cd dist && sha256sum -c Backups-0.4.1.zip.sha256)
+python3 tools/build_release.py --output dist/Backups-0.4.2.zip
+(cd dist && sha256sum -c Backups-0.4.2.zip.sha256)
 ```
 
 Upload the ZIP through Paymenter's native extension interface, install and enable

@@ -42,7 +42,7 @@ LEGACY_KEYS = {'enabled', 'destination', 'schedule_frequency', 'schedule_time', 
                'cooperative_writers_acknowledged', 'external_state_acknowledged'}
 
 BRIDGE_ERROR_CODES = frozenset({
-    "private-pipe-required", "application-unavailable", "database-connection-invalid",
+    "private-pipe-required", "application-unavailable", "framework-store-context-invalid", "database-connection-invalid",
     "database-pdo-driver-unavailable", "database-connection-failed", "database-driver-unsupported",
     "database-tls-unsupported", "database-prefix-unsupported", "unsupported-database",
     "extension-uninstalled", "native-secret-row-refused", "private-root-invalid",
@@ -139,6 +139,31 @@ def validate_database_context(context):
     return context
 
 
+FRAMEWORK_CONTEXT_FIELDS = {
+    "maintenance": {"driver"},
+    "cache": {"default", "driver", "connection", "lock_connection", "path"},
+    "session": {"driver", "connection", "files"},
+    "queue": {"default", "driver", "connection"},
+    "filesystem": {"default", "driver", "root"},
+}
+
+
+def validate_framework_context(context):
+    """Only nonsecret store identifiers and paths cross the private pipe."""
+    if (not isinstance(context, dict) or set(context) != {"schema_version", *FRAMEWORK_CONTEXT_FIELDS}
+            or type(context.get("schema_version")) is not int or context["schema_version"] != 1):
+        raise BackupError("framework-store-context-invalid")
+    for kind, fields in FRAMEWORK_CONTEXT_FIELDS.items():
+        values = context[kind]
+        if not isinstance(values, dict) or set(values) != fields:
+            raise BackupError("framework-store-context-invalid")
+        for field, value in values.items():
+            limit = 4096 if field in {"path", "files", "root"} else 256
+            if value is not None and (not isinstance(value, str) or len(value.encode()) > limit or "\0" in value):
+                raise BackupError("framework-store-context-invalid")
+    return context
+
+
 def database_connection_environment(context):
     """Return only Laravel's database variables for a booted Artisan child."""
     context = validate_database_context(context)
@@ -173,6 +198,9 @@ def bridge(args, verb="read", payload=None):
         database_context = validate_database_context(database_context)
         command.append("--database-connection-stdin")
         payload = {"database_connection": database_context, "payload": payload}
+        framework_context = getattr(args, "framework_context", None)
+        if framework_context is not None:
+            payload["framework_context"] = validate_framework_context(framework_context)
     input_bytes = json.dumps(payload).encode() if payload is not None else None
     if input_bytes is not None and len(input_bytes) > 65536:
         raise BackupError("input-too-large")

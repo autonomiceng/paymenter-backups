@@ -149,6 +149,14 @@ native baseline under those locks. Only changed native rows are written through
 Eloquent; the internal Artisan writer inherits the owning lock descriptors and
 restores the authenticated page actor, with console auditing explicitly enabled.
 The resolved database connection travels to scrubbed children on private stdin.
+The same private handoff carries the parent's resolved framework store defaults,
+drivers, connection names and storage paths. The cold bridge applies this
+nonsecret whitelist after loading configuration, so readiness uses the running
+application's stores even when uncached config depends on environment overrides.
+Provider URLs, credentials and connection definitions are excluded. Detached
+workers and coordinated native writers preserve the snapshot on stdin. Native
+writers validate it without changing their operational store configuration. Direct
+CLI calls without a parent snapshot keep using cold configuration.
 The Python runtime passes only Laravel's fixed `DB_*` connection fields to
 Artisan during bootstrap, when extension discovery needs the database before
 the command can read stdin. Other inherited environment values stay scrubbed;

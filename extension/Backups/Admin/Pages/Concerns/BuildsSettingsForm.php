@@ -48,7 +48,7 @@ trait BuildsSettingsForm
             ->validationMessages(['regex' => 'Put one full path on each line, starting with /.']);
         $time = static fn (string $key) => TextInput::make($key)->label('At')->type('time')->required()->rules(['regex:' . Settings::TIME])
             ->validationMessages(['regex' => 'Enter a time as HH:MM.']);
-        $days = static fn (string $key, string $schedule) => CheckboxList::make($key)->label('On these days')->options(array_map('strval', Messages::WEEKDAYS))->columns(['default' => 2, 'lg' => 4])
+        $days = static fn (string $key, string $schedule) => CheckboxList::make($key)->label('On these days')->options(array_map('strval', Messages::WEEKDAYS))->columns(['default' => 2])
             ->required(fn (Get $get) => $get($schedule) === 'weekly')
             ->rules(['array'])->nestedRecursiveRules(['in:0,1,2,3,4,5,6'])
             ->validationMessages(['required' => 'Choose at least one day.'])

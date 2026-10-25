@@ -80,6 +80,7 @@ final class Messages
         'extension-uninstalled' => 'The Backups extension isn\'t installed.',
         'native-secret-row-refused' => 'A Backups setting in Paymenter\'s database looks like a secret. Ask your server administrator to remove that setting. Enter keys in Backups settings only.',
         'billing-settings-unreadable' => 'Paymenter\'s daily billing time isn\'t set. Save "Cron Job Time" in Paymenter\'s settings.',
+        'framework-store-context-invalid' => 'Paymenter\'s active framework stores could not be read.',
         'database-connection-invalid' => 'Paymenter\'s active database connection could not be read.',
         'database-pdo-driver-unavailable' => 'The configured PHP CLI needs the PDO MySQL driver to read Paymenter\'s database.',
         'database-connection-failed' => 'The configured PHP CLI could not connect to Paymenter\'s database. Check the active database settings and network access.',
