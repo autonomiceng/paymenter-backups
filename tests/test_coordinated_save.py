@@ -388,6 +388,47 @@ class CoordinatedSaveTests(PrivateFixture):
         value = cli.overview(self.state, self.envelope, 'config-save-outcome-unknown', writer_cause='password=private')
         self.assertNotIn('writer_cause', value['configuration'])
 
+    def test_overview_keeps_configuration_when_pending_intent_is_malformed(self):
+        guard = self.state.root / 'config-save.json'
+        args = cli.parser().parse_args(['--app', str(self.app), '--private-root', str(self.state.root), 'overview'])
+        for contents in (b'{', b'[]'):
+            with self.subTest(contents=contents):
+                guard.write_bytes(contents)
+                guard.chmod(0o600)
+                value = cli.dispatch(args)
+                configuration = value['configuration']
+                self.assertTrue(configuration['available'])
+                self.assertEqual(configuration['error'], 'config-save-outcome-unknown')
+                self.assertEqual(configuration['destination']['s3_bucket'], 'old-destination')
+                self.assertNotIn('writer_cause', configuration)
+
+        guard.write_bytes(b'{}')
+        guard.chmod(0o644)
+        value = cli.dispatch(args)
+        self.assertFalse(value['configuration']['available'])
+        self.assertEqual(value['configuration']['error'], 'private-state-permissions')
+
+    def test_config_save_refuses_malformed_pending_intent_without_replacing_it(self):
+        guard = self.state.root / 'config-save.json'
+        before_rows = self.rows()
+        for contents in (b'{', b'[]'):
+            with self.subTest(contents=contents):
+                guard.write_bytes(contents)
+                guard.chmod(0o600)
+                with self.assertRaises(BackupError) as raised:
+                    cli.set_config(self.args, self.state, {'settings': {'s3_bucket': 'replacement'}})
+                self.assertEqual(raised.exception.code, 'config-save-outcome-unknown')
+                self.assertEqual(guard.read_bytes(), contents)
+                self.assertEqual(self.rows(), before_rows)
+
+        guard.write_bytes(b'{}')
+        guard.chmod(0o644)
+        with self.assertRaises(BackupError) as raised:
+            cli.set_config(self.args, self.state, {'settings': {'s3_bucket': 'replacement'}})
+        self.assertEqual(raised.exception.code, 'private-state-permissions')
+        self.assertEqual(guard.read_bytes(), b'{}')
+        self.assertEqual(self.rows(), before_rows)
+
     def test_audited_native_receipts_skip_unchanged_rows_and_restore_only_own_rows(self):
         with self.state.lock('config.lock') as config_fd, self.state.lock('tick.lock') as tick_fd:
             receipt = cli.native_settings(self.args, self.state, {'s3_bucket': 'replacement', 'retention_keep_full': '7',
