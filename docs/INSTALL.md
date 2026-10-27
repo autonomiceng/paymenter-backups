@@ -128,6 +128,10 @@ The corresponding launcher is
 `flock PATH /usr/local/bin/php /opt/paymenter/scheduler.php`.
 Use a canonical absolute path without dot segments, duplicate or trailing slashes;
 path characters may be letters, numbers, spaces or `_@%+=:,./-`.
+For `/app`, unrecognized direct `/usr/local/bin/php` launchers remain visible as
+unsupported even after this setting changes or clears. Retire obsolete cron
+entries/services when switching scripts; a second Artisan scheduler does not
+make an unknown PHP launcher safe.
 The script must be a root-owned regular file, not group or world writable, and
 its path must contain no file or parent-directory symlinks. Backups rechecks it
 at discovery, admission and cache reads.

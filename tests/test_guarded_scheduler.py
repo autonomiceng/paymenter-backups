@@ -56,6 +56,46 @@ class GuardedSchedulerTests(unittest.TestCase):
             with self.assertRaisesRegex(BackupError, 'job-command-unsupported'):
                 discovery.parse(line + ' --quiet', self.state.app)
 
+    def test_changed_or_disabled_setting_refuses_obsolete_custom_cron_launchers(self):
+        script = '/opt/paymenter/custom % runner.php'
+        ordinary = f'* * * * * /usr/bin/flock -n {self.lock} /usr/local/bin/php /app/artisan schedule:run'
+        with guarded_host(script):
+            line = self.line.replace('/opt/paymenter/scheduler.php', discovery.cron_quote(script))
+            for value in ('', '/opt/paymenter/renamed.php'):
+                with self.subTest(value=value), patch.dict(os.environ, {'PAYMENTER_BACKUPS_GUARDED_SCHEDULER': value}):
+                    with patch.object(discovery, 'probe', return_value=(0, (line + '\n' + ordinary + '\n').encode(), b'')), patch.object(discovery, 'systemd', return_value=[]):
+                        inventory = discovery.discover(self.state, self.envelope)
+                    self.assertEqual(len(inventory['items']), 2)
+                    errors, _ = discovery.admission(self.envelope, inventory)
+                    self.assertIn('job-command-unsupported', [item['code'] for item in errors])
+                    with self.assertRaisesRegex(BackupError, 'job-locks-unverified'):
+                        _legacy_cron_lock(line, self.state.app, [str(self.lock)])
+
+    def test_changed_or_disabled_setting_refuses_obsolete_custom_systemd_launchers(self):
+        script = '/opt/paymenter/old-runner'
+        command = f'/usr/bin/flock -n {self.lock} /usr/local/bin/php {script}'
+        ordinary = f'/usr/bin/flock -n {self.lock} /usr/local/bin/php /app/artisan schedule:run'
+        def read(arguments, timeout):
+            if '--user' in arguments:
+                return b'[]'
+            if 'list-timers' in arguments:
+                return b'[{"activates":"old.service"},{"activates":"ordinary.service"}]'
+            if 'show' in arguments:
+                return '\n\n'.join(
+                    f'Id={name}.service\nLoadState=loaded\nUser={os.getuid()}\nWorkingDirectory=/\nDynamicUser=no\nRestart=no\nExecStart={{ argv[]={line} ; ignore_errors=no ; }}\n'
+                    for name, line in (('old', command), ('ordinary', ordinary))).encode()
+            return b'[]'
+        tools = {'systemctl': sys.executable}
+        for value in ('', '/opt/paymenter/renamed.php'):
+            with self.subTest(value=value), patch.dict(os.environ, {'PAYMENTER_BACKUPS_GUARDED_SCHEDULER': value}), \
+                    patch.object(discovery, 'run', side_effect=read), patch('paymenter_backups.maintenance.run', side_effect=read):
+                rows = discovery.systemd(self.state.app, tools)
+                self.assertEqual(len(rows), 2)
+                errors, _ = discovery.admission(self.envelope, {'state': 'ok', 'items': rows})
+                self.assertIn('job-command-unsupported', [item['code'] for item in errors])
+                with self.assertRaisesRegex(BackupError, 'job-locks-unverified'):
+                    systemd_locks(self.state.app, [str(self.lock)], tools)
+
     def test_changed_setting_cannot_reuse_previous_guarded_inventory(self):
         inventory = {
             'schema_version': 1, 'parser_version': discovery.PARSER_VERSION,

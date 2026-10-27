@@ -464,6 +464,9 @@ same parser. An unsafe script remains visible as unsupported with its guarded
 command, so diagnostics cannot suggest replacing the guard with Artisan.
 Normalized commands, cached diagnostics and replacement suggestions preserve
 the guarded launcher and its lock, rather than replacing it with Artisan.
+Unrecognized direct `/usr/local/bin/php` launchers for `/app` stay relevant
+after this setting changes or clears, including scripts without a `.php` suffix.
+They refuse admission instead of silently losing their cooperative lock.
 Commands are reconstructed from recognized nonsecret tokens; ini values, raw
 cron/service/process text and process identities never enter discovery records.
 

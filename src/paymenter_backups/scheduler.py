@@ -24,12 +24,23 @@ def guarded_relevant(line, app):
     path = guarded_scheduler_path()
     if 'scheduler.php' in line:
         return True
-    if not path:
-        return False
-    name = pathlib.PurePosixPath(path).name
-    if name in line:
+    name = pathlib.PurePosixPath(path).name if path else ''
+    if name and name in line:
         return True
     try:
-        return name in ' '.join(shlex.split(line.replace(r'\%', '%')))
+        words = shlex.split(line.replace(r'\%', '%'))
     except ValueError:
-        return False
+        return '/usr/local/bin/php' in line
+    if name and name in ' '.join(words):
+        return True
+    # A formerly configured script may have any basename or extension. Keep
+    # direct PHP script launchers visible when the setting changes or clears;
+    # only known Artisan launchers can be delegated to normal app filtering.
+    for index, word in enumerate(words):
+        if word != '/usr/local/bin/php':
+            continue
+        tail = words[index + 1:]
+        if not (tail and pathlib.PurePosixPath(tail[0]).name == 'artisan'
+                and any(value in ('schedule:run', 'schedule:work', 'queue:work', 'queue:listen', 'horizon') for value in tail[1:])):
+            return True
+    return False
