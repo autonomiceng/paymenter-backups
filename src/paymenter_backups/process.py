@@ -36,6 +36,9 @@ def safe_environment(database_context=None):
     # Do not inherit TAR_OPTIONS, MYSQL_PWD, GZIP, LD_PRELOAD, provider/CA/proxy
     # overrides, application variable overrides or TLS session key logging.
     environment = {"PATH": "/usr/local/bin:/usr/bin:/bin", "LANG": "C.UTF-8", "LC_ALL": "C.UTF-8", "TZ": "UTC"}
+    from .scheduler import SETTING, guarded_scheduler_path
+    if guarded_scheduler_path():
+        environment[SETTING] = guarded_scheduler_path()
     if database_context is not None:
         from .config import database_connection_environment
         environment.update(database_connection_environment(database_context))
@@ -291,6 +294,8 @@ def hash_stream(command, timeout, register=None):
 
 
 def app_workers(app):
+    from .scheduler import guarded_scheduler_path
+    script = guarded_scheduler_path()
     found = []
     for path in pathlib.Path("/proc").iterdir():
         if not path.name.isdigit() or int(path.name) == os.getpid():
@@ -299,7 +304,7 @@ def app_workers(app):
             if path.stat().st_uid != os.getuid():
                 continue
             raw = (path / "cmdline").read_bytes()
-            guarded = str(app) == '/app' and raw.rstrip(b'\0').split(b'\0') == [b'/usr/local/bin/php', b'/opt/beco/scheduler.php']
+            guarded = bool(script and str(app) == '/app' and raw.rstrip(b'\0').split(b'\0') == [b'/usr/local/bin/php', os.fsencode(script)])
             arguments = raw.replace(b"\0", b" ").decode(errors="replace")
             if not guarded and ("artisan" not in arguments or not any(word in arguments for word in ("schedule:run", "schedule:work", "queue:work", "queue:listen", "horizon"))):
                 continue

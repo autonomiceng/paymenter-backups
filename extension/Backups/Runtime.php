@@ -38,7 +38,19 @@ final class Runtime
         foreach (array_keys(array_merge(getenv(), $_SERVER, $_ENV)) as $name) {
             if (is_string($name)) { $environment[$name] = false; }
         }
+        $environment['PAYMENTER_BACKUPS_GUARDED_SCHEDULER'] = self::guardedSchedulerPath() ?: false;
         return array_replace($environment, ['PATH' => '/usr/local/bin:/usr/bin:/bin', 'LANG' => 'C.UTF-8', 'LC_ALL' => 'C.UTF-8', 'TZ' => 'UTC']);
+    }
+
+    /** Set this in the service environment for PHP and standalone CLI processes. */
+    public static function guardedSchedulerPath(): string
+    {
+        $path = getenv('PAYMENTER_BACKUPS_GUARDED_SCHEDULER');
+        if (!is_string($path) || !str_starts_with($path, '/') || $path === '/'
+            || !preg_match('~^[A-Za-z0-9_@%+=:,./ -]+$~D', $path)
+            || str_contains($path, '//') || str_ends_with($path, '/')
+            || array_intersect(['.', '..'], explode('/', $path))) { return ''; }
+        return $path;
     }
 
     public static function privateRoot(bool $create = false): string

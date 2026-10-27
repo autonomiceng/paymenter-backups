@@ -418,7 +418,7 @@ active/enabled standalone services, with bounded reads and plain-table fallback.
 Cron suggestions escape every `%` as `\%`. Discovery decodes that cron escape
 before shell parsing, preserves literal backslashes and refuses an unescaped
 `%` because cron would turn the remainder into stdin. Shell and systemd parsing
-remain separate from this cron preprocessing. Discovery parser version 3
+remain separate from this cron preprocessing. Discovery parser version 4
 invalidates older cached interpretations and requires rediscovery.
 No scheduler, failed/incomplete discovery, unsupported/uncoordinated jobs,
 continuous workers, unsafe/missing locks and explicit-list mismatch refuse.
@@ -444,12 +444,18 @@ no timer target does not enter that inventory. Uninstantiated templates from
 instances from `list-units` remain in the inventory.
 The parser accepts documented /dev/null redirection tails, common PHP/Artisan
 flags and hosting PHP basenames, with shell expansion/wrappers refused.
-For an application at `/app`, it also accepts exactly
-`/usr/local/bin/php /opt/beco/scheduler.php` behind the same explicit flock and
+For an application at `/app`, an operator may set the process environment variable
+`PAYMENTER_BACKUPS_GUARDED_SCHEDULER` to a canonical absolute script path, for
+example `/opt/paymenter/scheduler.php`. It defaults to empty (Artisan only).
+PHP Runtime and Python detached launchers explicitly preserve this one nonsecret
+setting through their child environment allowlists. Set it in the operating
+system environment of every PHP web, scheduler/cron and standalone CLI process;
+a Laravel `.env` entry alone does not set it. See [installation](INSTALL.md).
+The parser then accepts exactly `/usr/local/bin/php CONFIGURED_PATH` behind the same explicit flock and
 owner-private lock checks. This guarded scheduler takes no interpreter or script
 arguments. Other interpreters, script paths and application roots refuse.
 The script must be a root-owned regular file with no group or world write bits.
-Its canonical path must remain exactly `/opt/beco/scheduler.php`, with no file
+Its canonical path must remain exactly the configured path, with no file
 or parent-directory symlinks. The canonical-path and `lstat` regular-file checks
 follow `discovery.lock_safe`; script ownership and write restrictions differ
 from that helper's app-owned, exactly 0600 lock policy. Discovery, cache reads

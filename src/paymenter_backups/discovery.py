@@ -16,11 +16,12 @@ import time
 
 from .common import BackupError, atomic_json, private_file, read_json
 from .process import run, probe
+from .scheduler import guarded_scheduler_path, guarded_relevant
 
 PHP_NAME = re.compile(r'(?:php(?:[0-9]+(?:\.[0-9]+)?)?|php-cli|ea-php[0-9]+|lsphp[0-9]+)')
 UNIT_NAME = re.compile(r'(?:[A-Za-z0-9_]|\\x[0-9A-Fa-f]{2})(?:[A-Za-z0-9_.@:-]|\\x[0-9A-Fa-f]{2}){0,199}\.service')
 KINDS = {'schedule:run': 'scheduler', 'queue:work': 'queue-worker', 'queue:listen': 'queue-worker', 'horizon': 'queue-worker', 'schedule:work': 'scheduler'}
-PARSER_VERSION = 3
+PARSER_VERSION = 4
 SYSTEMD_SHOW_PROPERTIES = ('Id', 'ExecStart', 'User', 'WorkingDirectory', 'DynamicUser', 'LoadState', 'Restart')
 SYSTEMD_RESTART_POLICIES = frozenset(('always', 'on-success', 'on-failure', 'on-abnormal', 'on-watchdog', 'on-abort'))
 
@@ -59,17 +60,30 @@ def suggestions(state, envelope, inventory=None):
             parsed = parse(item['command'], state.app, cron=False)
         except (BackupError, KeyError):
             continue
-        if parsed['command'].endswith(' /usr/local/bin/php /opt/beco/scheduler.php'):
+        if guarded_command(parsed['command']):
             scheduler = '* * * * * ' + ' '.join(cron_quote(word) for word in shlex.split(parsed['command'])) + ' >/dev/null 2>&1'
             break
     return {'scheduler': scheduler,
             'queue': prefix + cron_quote(str(state.root / 'queue.lock')) + suffix + ' queue:work --stop-when-empty --max-time=50 >/dev/null 2>&1'}
 
 
-def guarded_script_safe():
-    """Require the fixed root-owned script without file or parent symlinks."""
+def guarded_command(command):
+    path = guarded_scheduler_path()
     try:
-        target = pathlib.Path('/opt/beco/scheduler.php')
+        tokens = shlex.split(command)
+        return bool(path and len(tokens) == 5 and tokens[:2] == ['/usr/bin/flock', '-n']
+                    and tokens[3:] == ['/usr/local/bin/php', path])
+    except ValueError:
+        return False
+
+
+def guarded_script_safe():
+    """Require the configured root-owned script without file or parent symlinks."""
+    try:
+        configured = guarded_scheduler_path()
+        if not configured:
+            return False
+        target = pathlib.Path(configured)
         # Reuse lock_safe's canonical-path and lstat regular-file checks.
         if target.resolve(strict=True) != target:
             return False
@@ -123,10 +137,11 @@ def parse(line, app, cron=True, working=None):
             if not lock.startswith('/') or '\0' in lock or pathlib.Path(lock).as_posix() != lock or any(part in ('.', '..') for part in lock.split('/')):
                 raise ValueError()
         php = tokens.pop(0)
-        if tokens == ['/opt/beco/scheduler.php']:
+        guarded = guarded_scheduler_path()
+        if guarded and tokens == [guarded]:
             if str(app) != '/app' or php != '/usr/local/bin/php' or not lock:
                 raise ValueError()
-            display = ['/usr/bin/flock', '-n', lock, php, '/opt/beco/scheduler.php']
+            display = ['/usr/bin/flock', '-n', lock, php, guarded]
             safe = guarded_script_safe()
             return {'kind': 'scheduler', 'coordination': 'coordinated' if safe else 'unsupported',
                     'command': shlex.join(display), 'lock': lock,
@@ -171,7 +186,7 @@ def parse(line, app, cron=True, working=None):
 
 def relevant(line, app, working=None, cron=True):
     # Include malformed guarded launchers so they refuse rather than disappear.
-    if str(app) == '/app' and 'scheduler.php' in line:
+    if guarded_relevant(line, app):
         return True
     if not any(word in line for word in KINDS):
         return False
@@ -410,7 +425,8 @@ def admission(envelope, inventory):
     for job in jobs:
         if job['coordination'] != 'coordinated':
             add(job['reason'] or 'job-command-unsupported', detail={'job': job['id']})
-        elif job['command'].endswith(' /usr/local/bin/php /opt/beco/scheduler.php') and not guarded_script_safe():
+        elif (not any(word in shlex.split(job['command']) for word in KINDS)
+              and (not guarded_command(job['command']) or not guarded_script_safe())):
             add('job-command-unsupported', detail={'job': job['id']})
         elif not lock_safe(job['lock']):
             add('job-lock-unsafe', 'job_lock_paths', {'job': job['id'], 'lock': job['lock']})

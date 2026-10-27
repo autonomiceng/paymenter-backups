@@ -1,4 +1,4 @@
-"""Isolated host filesystem for the fixed, root-owned scheduler path."""
+"""Isolated host filesystem for the configured, root-owned scheduler path."""
 import contextlib
 import os
 import pathlib
@@ -8,15 +8,15 @@ from unittest.mock import patch
 
 
 @contextlib.contextmanager
-def guarded_host():
+def guarded_host(path='/opt/paymenter/scheduler.php'):
     with tempfile.TemporaryDirectory(prefix='backups-guarded-host-') as temporary:
         host = pathlib.Path(temporary)
-        script = host / 'opt/beco/scheduler.php'
+        script = host / path.lstrip('/')
         script.parent.mkdir(parents=True)
         script.write_text('<?php // fixture scheduler\n')
         script.chmod(0o644)
         fixture = SimpleNamespace(script=script, owner_uid=0)
-        target = pathlib.Path('/opt/beco/scheduler.php')
+        target = pathlib.Path(path)
         resolve, lstat = pathlib.Path.resolve, pathlib.Path.lstat
 
         def host_resolve(path, *arguments, **keywords):
@@ -32,5 +32,6 @@ def guarded_host():
                 return os.stat_result(info)
             return lstat(path, *arguments, **keywords)
 
-        with patch.object(pathlib.Path, 'resolve', host_resolve), patch.object(pathlib.Path, 'lstat', host_lstat):
+        with patch.dict(os.environ, {'PAYMENTER_BACKUPS_GUARDED_SCHEDULER': str(target)}), \
+                patch.object(pathlib.Path, 'resolve', host_resolve), patch.object(pathlib.Path, 'lstat', host_lstat):
             yield fixture
