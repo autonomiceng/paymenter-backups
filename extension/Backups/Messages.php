@@ -350,6 +350,15 @@ final class Messages
         );
     }
 
+    /** Native Extension Settings card copy under the "Backup settings" heading; links to the Backups page when its route is registered. */
+    public static function settingsPointer(?string $url): string|\Illuminate\Support\HtmlString
+    {
+        if ($url === null) { return 'Edit them on the Backups page (System > Backups). Enable this extension to see it.'; }
+        $url = htmlspecialchars($url, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
+        // Paymenter's admin theme has no underline utility; the link keeps the text color for contrast in dark mode.
+        return new \Illuminate\Support\HtmlString('Edit them on the <a class="font-medium" style="text-decoration: underline" href="' . $url . '">Backups page</a>.');
+    }
+
     private static function shellWord(string $word): string
     {
         return preg_match('~^[A-Za-z0-9_@%+=:,./-]+$~D', $word) ? $word : escapeshellarg($word);

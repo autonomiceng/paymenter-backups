@@ -9,7 +9,14 @@ use Illuminate\Console\Scheduling\Schedule;
 class Backups extends Extension
 {
     // Settings are edited on the Backups page; this native page owns lifecycle only.
-    public function getConfig($values = []) { return []; }
+    // Its one read-only entry points there; Filament derives the "Backup settings" heading from the name.
+    // Paymenter registers the page only while the extension is enabled.
+    public function getConfig($values = [])
+    {
+        $route = Admin\Pages\Backups::getRouteName();
+        return [['name' => 'backup_settings', 'type' => 'placeholder',
+            'label' => Messages::settingsPointer(\Illuminate\Support\Facades\Route::has($route) ? route($route) : null)]];
+    }
 
     public function installed()
     {

@@ -236,8 +236,8 @@ cannot start, only private root, document roots and Python/PHP pins can be
 repaired, without secret publication; an initialized root still uses the bounded
 configuration/tick locks. The Backups page is the sole web settings editor;
 the native Extensions page retains enable/disable and uninstall, exposes no
-Backups setting fields, and its Save hook performs no configuration or private
-state work. CLI native writes validate against the internal `Settings::fields`
+Backups setting fields (only a read-only link to the Backups page, which is never
+stored), and its Save hook performs no configuration or private state work. CLI native writes validate against the internal `Settings::fields`
 schema independently of `getConfig()`.
 
 The private root is owned by the site user with mode 0700. Before the first
