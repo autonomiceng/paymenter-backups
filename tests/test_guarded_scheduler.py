@@ -181,7 +181,7 @@ class GuardedSchedulerTests(unittest.TestCase):
 
     def test_invalid_deployment_paths_do_not_enable_guarded_launchers(self):
         from paymenter_backups.scheduler import guarded_scheduler_path
-        for value in ('relative.php', '/', '/opt//runner.php', '/opt/./runner.php',
+        for value in ('relative.php', '/', '/opt//runner.php', '//opt/runner.php', '/opt/./runner.php',
                       '/opt/../runner.php', '/opt/runner.php/', '/opt/runner.php\n', '/opt/$runner.php'):
             with self.subTest(value=value), patch.dict(os.environ, {'PAYMENTER_BACKUPS_GUARDED_SCHEDULER': value}):
                 self.assertEqual(guarded_scheduler_path(), '')

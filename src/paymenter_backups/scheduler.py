@@ -10,6 +10,7 @@ SETTING = 'PAYMENTER_BACKUPS_GUARDED_SCHEDULER'
 def guarded_scheduler_path():
     value = os.environ.get(SETTING, '')
     if (not value.startswith('/') or not re.fullmatch(r'[A-Za-z0-9_@%+=:,./ -]+', value)
+            or '//' in value
             or pathlib.PurePosixPath(value).as_posix() != value
             or any(part in ('.', '..') for part in value.split('/')) or value == '/'):
         return ''
