@@ -127,12 +127,12 @@ class DamagedRetentionTests(PrivateFixture):
         oldest, _ = self.backup('oldest', created_at=1)
         self.backup('good', created_at=2)
         damaged, _ = self.backup('damaged', created_at=3)
-        verify = storage.verify
-        def fail(state, run_id, **kwargs):
+        open_archive = storage.artifacts.open_archive
+        def fail(state, run_id, *args, **kwargs):
             if run_id == 'damaged':
                 raise FileNotFoundError('disposable archive stat failure')
-            return verify(state, run_id, **kwargs)
-        with patch.object(storage, 'verify', side_effect=fail):
+            return open_archive(state, run_id, *args, **kwargs)
+        with patch.object(storage.artifacts, 'open_archive', side_effect=fail):
             for execute in (False, True):
                 with self.subTest(execute=execute):
                     result = storage.retention(self.state, self.envelope, execute=execute)

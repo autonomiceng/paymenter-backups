@@ -923,7 +923,11 @@ def _retention(state, envelope, execute=False, locked=False, local_only=False, m
         for item in items:
             if item.get('local_complete') and not item.get('local_delete_intent'):
                 try:
-                    verify(state, item['run_id'], record=execute)
+                    # A render may reuse a full check bound to the current file
+                    # identity and manifest digest. Applying retention always
+                    # rechecks the bytes under the run lock before deleting.
+                    if execute or artifacts.download_state(state, item) != 'ready':
+                        verify(state, item['run_id'], record=execute)
                     checked_local[item['run_id']] = None
                 except (BackupError, OSError) as error:
                     code = error.code if isinstance(error, BackupError) else 'retention-local-verification-failed'

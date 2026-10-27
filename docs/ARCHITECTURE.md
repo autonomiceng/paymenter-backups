@@ -58,6 +58,13 @@ verification, delivery or deletion from PHP-FPM. Recovery remains CLI plus the
 automatic tick. [ADMIN-UI.md](ADMIN-UI.md) defines the page's journeys and
 language; the contracts below bind it to the engine.
 
+Retention previews reuse a recorded full local verification only while its
+file identity and manifest checksum still match. A changed or unchecked archive
+gets a fresh full check. Applying retention always verifies archive bytes under
+the run lock before deletion; a render's cached result cannot authorize it.
+Application symlink readiness uses directory-entry metadata for ordinary files
+and resolves symlinks without descending into linked directories.
+
 PHP `open_basedir` may exclude system executables while permitting process
 launch. The runtime validates configured Python/PHP paths in a short isolated
 Python child, requiring absolute regular executable paths and canonical CLI
