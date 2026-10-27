@@ -27,7 +27,7 @@ namespace Paymenter\Extensions\Others\Backups\Admin\Pages {
     final class Backups { public static function getRouteName(): string { return 'filament.admin.pages.backups'; } }
 }
 namespace {
-    function route($name) { return 'https://billing.example.test/admin/' . ($name === 'filament.admin.pages.backups' ? 'backups?a="&b' : 'wrong'); }
+    function route($name) { return 'https://billing.example.com/admin/' . ($name === 'filament.admin.pages.backups' ? 'backups?a="&b' : 'wrong'); }
     require $argv[1];
     require $argv[2];
     $describe = static fn (array $config): array => array_map(static fn (array $item): array => array_map(
@@ -52,7 +52,7 @@ class NativeSettingsPointerTests(unittest.TestCase):
         enabled = self.config()['enabled']
         self.assertEqual(enabled, [{'name': 'backup_settings', 'type': 'placeholder', 'label': {'html':
             'Edit them on the <a class="font-medium" style="text-decoration: underline" '
-            'href="https://billing.example.test/admin/backups?a=&quot;&amp;b">Backups page</a>.'}}])
+            'href="https://billing.example.com/admin/backups?a=&quot;&amp;b">Backups page</a>.'}}])
 
     def test_card_names_the_page_when_its_route_is_not_registered(self):
         # Paymenter registers extension pages only while the extension is enabled.
