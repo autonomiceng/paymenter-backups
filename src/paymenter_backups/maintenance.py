@@ -19,7 +19,7 @@ import urllib.error
 import urllib.request
 import uuid
 
-from .scheduler import guarded_relevant
+from .scheduler import cron_environment_assignment, guarded_relevant
 from .common import BackupError, identity, read_json
 from .config import billing_fingerprint
 from .process import app_workers, group_members, run
@@ -234,7 +234,7 @@ def coordination(state, envelope):
                 if error.code != "child-failed":
                     raise
                 crontab = ""
-            jobs = [line for line in crontab.splitlines() if line.strip() and not line.lstrip().startswith("#") and (any(word in line for word in ("schedule:run", "queue:work")) or guarded_relevant(line, state.app))]
+            jobs = [line for line in crontab.splitlines() if line.strip() and not line.lstrip().startswith("#") and not cron_environment_assignment(line) and (any(word in line for word in ("schedule:run", "queue:work")) or guarded_relevant(line, state.app))]
             verified = set()
             for line in jobs:
                 verified.add(_legacy_cron_lock(line, state.app, paths))

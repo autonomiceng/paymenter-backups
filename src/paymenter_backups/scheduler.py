@@ -16,6 +16,15 @@ def guarded_scheduler_path():
     return value
 
 
+def cron_environment_assignment(line):
+    """Standalone crontab variables configure jobs; they do not launch one."""
+    match = re.fullmatch(r"\s*[A-Za-z_][A-Za-z0-9_]*\s*=\s*(.*?)\s*", line)
+    if not match:
+        return False
+    value = match.group(1)
+    return not value.startswith(("'", '"')) or (len(value) >= 2 and value[-1] == value[0])
+
+
 def guarded_relevant(line, app):
     # Malformed guarded launchers must refuse rather than disappear. This is
     # only a relevance filter: the strict parser still authorizes every token.

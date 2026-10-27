@@ -16,7 +16,7 @@ import time
 
 from .common import BackupError, atomic_json, private_file, read_json
 from .process import run, probe
-from .scheduler import guarded_scheduler_path, guarded_relevant
+from .scheduler import cron_environment_assignment, guarded_scheduler_path, guarded_relevant
 
 PHP_NAME = re.compile(r'(?:php(?:[0-9]+(?:\.[0-9]+)?)?|php-cli|ea-php[0-9]+|lsphp[0-9]+)')
 UNIT_NAME = re.compile(r'(?:[A-Za-z0-9_]|\\x[0-9A-Fa-f]{2})(?:[A-Za-z0-9_.@:-]|\\x[0-9A-Fa-f]{2}){0,199}\.service')
@@ -344,7 +344,7 @@ def discover(state, envelope, now=None):
         if returncode and not (returncode == 1 and re.fullmatch(rb'no crontab for [A-Za-z0-9_.\-]+\s*', stderr)):
             raise BackupError('job-discovery-failed')
         for index, line in enumerate(stdout.decode().splitlines()):
-            if line.strip() and not line.lstrip().startswith('#') and relevant(line, state.app):
+            if line.strip() and not line.lstrip().startswith('#') and not cron_environment_assignment(line) and relevant(line, state.app):
                 items.append(record(line, state.app, 'crontab', 'line ' + str(index + 1)))
         items += systemd(state.app, envelope.get('tools', {}))
         if len(items) > 256:

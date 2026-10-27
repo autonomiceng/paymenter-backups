@@ -458,6 +458,9 @@ PHP Runtime and Python detached launchers explicitly preserve this one nonsecret
 setting through their child environment allowlists. Set it in the operating
 system environment of every PHP web, scheduler/cron and standalone CLI process;
 a Laravel `.env` entry alone does not set it. See [installation](INSTALL.md).
+Standalone crontab environment assignments, including quoted values, configure
+job environments and are excluded from both discovery and legacy coordination;
+scheduled commands with environment prefixes remain subject to strict parsing.
 The parser then accepts exactly `/usr/local/bin/php CONFIGURED_PATH` behind the same explicit flock and
 owner-private lock checks. This guarded scheduler takes no interpreter or script
 arguments. Other interpreters, script paths and application roots refuse.

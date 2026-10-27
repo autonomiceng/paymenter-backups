@@ -352,6 +352,33 @@ class GuardedSchedulerTests(unittest.TestCase):
             self.assertEqual(discovery.systemd(self.state.app, tools), [])
             self.assertEqual(systemd_locks(self.state.app, [str(self.lock)], tools), set())
 
+    def test_cron_environment_directives_do_not_become_launchers(self):
+        from paymenter_backups.maintenance import coordination
+        for value in ('/opt/paymenter/scheduler.php', '"/opt/paymenter/scheduler.php"', "'/opt/paymenter/scheduler.php'"):
+            for version in (1, 2):
+                cron = ('  PAYMENTER_BACKUPS_GUARDED_SCHEDULER = ' + value + '\n' + self.line + '\n').encode()
+                envelope = {'settings': {'settings_version': version, 'job_lock_paths': [str(self.lock)], 'lock_timeout': 1},
+                            'tools': {'php': '/usr/local/bin/php'}}
+                with self.subTest(value=value, version=version), \
+                        patch.object(discovery, 'probe', return_value=(0, cron, b'')), patch.object(discovery, 'systemd', return_value=[]), \
+                        patch('paymenter_backups.maintenance.run', return_value=cron), \
+                        patch('paymenter_backups.maintenance.systemd_locks', return_value=set()), \
+                        patch('paymenter_backups.maintenance.app_workers', return_value=[]):
+                    inventory = discovery.discover(self.state, envelope)
+                    self.assertEqual(len(inventory['items']), 1)
+                    self.assertEqual(discovery.admission(envelope, inventory), ([], [str(self.lock)]))
+                    with coordination(self.state, envelope):
+                        pass
+        for line in ('* * * * * PAYMENTER_BACKUPS_GUARDED_SCHEDULER=/opt/paymenter/scheduler.php /usr/local/bin/php /opt/paymenter/scheduler.php',
+                     'export PAYMENTER_BACKUPS_GUARDED_SCHEDULER=/opt/paymenter/scheduler.php',
+                     'PAYMENTER_BACKUPS_GUARDED_SCHEDULER="/opt/paymenter/scheduler.php'):
+            with self.subTest(malformed=line), patch.object(discovery, 'probe', return_value=(0, (line + '\n' + self.line).encode(), b'')), \
+                    patch.object(discovery, 'systemd', return_value=[]):
+                inventory = discovery.discover(self.state, self.envelope)
+                self.assertEqual(len(inventory['items']), 2)
+                errors, _ = discovery.admission(self.envelope, inventory)
+                self.assertIn('job-command-unsupported', [item['code'] for item in errors])
+
     def test_retired_live_scheduler_blocks_replacement_lock_coordination(self):
         from paymenter_backups.maintenance import coordination
         real_path = type(self.state.root)
