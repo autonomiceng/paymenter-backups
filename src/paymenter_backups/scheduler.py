@@ -44,7 +44,13 @@ def guarded_relevant(line, app):
         while tail and tail[0] in ('-q', '-f', '-d'):
             count = 2 if tail[0] == '-d' else 1
             tail = tail[count:]
-        if not (tail and pathlib.PurePosixPath(tail[0]).name == 'artisan'
-                and any(value in ('schedule:run', 'schedule:work', 'queue:work', 'queue:listen', 'horizon') for value in tail[1:])):
-            return True
+        if tail and pathlib.PurePosixPath(tail[0]).name == 'artisan':
+            command = tail[1:]
+            while command and command[0] in ('--quiet', '-q', '--no-interaction', '-n'):
+                command = command[1:]
+            if command and re.fullmatch(r'[A-Za-z][A-Za-z0-9:_-]*', command[0]):
+                continue  # Ordinary app/command filtering handles Artisan.
+        # No command still describes a possible retired guarded script, even
+        # when its basename is artisan and its output is redirected.
+        return True
     return False

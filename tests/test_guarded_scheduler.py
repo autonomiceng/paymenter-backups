@@ -129,6 +129,43 @@ class GuardedSchedulerTests(unittest.TestCase):
                     self.assertEqual(rows[0]['label'], 'own.service')
                     self.assertEqual(systemd_locks(self.state.app, [str(self.lock)], tools), {str(self.lock)})
 
+    def test_unrelated_artisan_commands_do_not_block_cron_or_systemd(self):
+        own = f'/usr/bin/flock -n {self.lock} /usr/local/bin/php /app/artisan schedule:run'
+        tools = {'systemctl': sys.executable}
+        for target in ('/app/artisan', '/other/artisan'):
+            for flags in ('', '-q -d memory_limit=512M -f'):
+                other = f'/usr/local/bin/php {flags} {target} cache:prune-stale-tags'
+                def read(arguments, timeout):
+                    if '--user' in arguments:
+                        return b'[]'
+                    if 'list-timers' in arguments:
+                        return b'[{"activates":"own.service"},{"activates":"other.service"}]'
+                    if 'show' in arguments:
+                        return '\n\n'.join(
+                            f'Id={name}.service\nLoadState=loaded\nUser={os.getuid()}\nWorkingDirectory=/\nDynamicUser=no\nRestart=no\nExecStart={{ argv[]={line} ; ignore_errors=no ; }}\n'
+                            for name, line in (('own', own), ('other', other))).encode()
+                    return b'[]'
+                with self.subTest(target=target, flags=flags), patch.dict(os.environ, {'PAYMENTER_BACKUPS_GUARDED_SCHEDULER': ''}):
+                    cron = ('* * * * * ' + own + '\n* * * * * ' + other + '\n').encode()
+                    with patch.object(discovery, 'probe', return_value=(0, cron, b'')), patch.object(discovery, 'systemd', return_value=[]):
+                        inventory = discovery.discover(self.state, self.envelope)
+                    self.assertEqual(len(inventory['items']), 1)
+                    self.assertEqual(discovery.admission(self.envelope, inventory), ([], [str(self.lock)]))
+                    with patch.object(discovery, 'run', side_effect=read), patch('paymenter_backups.maintenance.run', side_effect=read):
+                        rows = discovery.systemd(self.state.app, tools)
+                        self.assertEqual(len(rows), 1)
+                        self.assertEqual(systemd_locks(self.state.app, [str(self.lock)], tools), {str(self.lock)})
+
+    def test_obsolete_guard_named_artisan_without_command_still_refuses(self):
+        for ending in ('', ' >/dev/null 2>&1'):
+            line = self.line.replace('/opt/paymenter/scheduler.php', '/opt/paymenter/artisan') + ending
+            with self.subTest(ending=ending), patch.dict(os.environ, {'PAYMENTER_BACKUPS_GUARDED_SCHEDULER': ''}):
+                self.assertTrue(discovery.relevant(line, self.state.app))
+                row = discovery.record(line, self.state.app, 'crontab', 'old launcher')
+                self.assertEqual(row['coordination'], 'unsupported')
+                with self.assertRaisesRegex(BackupError, 'job-locks-unverified'):
+                    _legacy_cron_lock(line, self.state.app, [str(self.lock)])
+
     def test_changed_setting_cannot_reuse_previous_guarded_inventory(self):
         inventory = {
             'schema_version': 1, 'parser_version': discovery.PARSER_VERSION,

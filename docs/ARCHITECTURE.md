@@ -474,6 +474,9 @@ the guarded launcher and its lock, rather than replacing it with Artisan.
 Unrecognized direct `/usr/local/bin/php` launchers for `/app` stay relevant
 after this setting changes or clears, including scripts without a `.php` suffix.
 They refuse admission instead of silently losing their cooperative lock.
+Artisan targets with explicit commands retain ordinary application/command
+filtering; a script named `artisan` without a command remains a possible retired
+guarded launcher and refuses.
 Commands are reconstructed from recognized nonsecret tokens; ini values, raw
 cron/service/process text and process identities never enter discovery records.
 
