@@ -58,6 +58,13 @@ verification, delivery or deletion from PHP-FPM. Recovery remains CLI plus the
 automatic tick. [ADMIN-UI.md](ADMIN-UI.md) defines the page's journeys and
 language; the contracts below bind it to the engine.
 
+Retention previews reuse a recorded full local verification only while its
+file identity and manifest checksum still match. A changed or unchecked archive
+gets a fresh full check. Applying retention always verifies archive bytes under
+the run lock before deletion; a render's cached result cannot authorize it.
+Application symlink readiness uses directory-entry metadata for ordinary files
+and resolves symlinks without descending into linked directories.
+
 PHP `open_basedir` may exclude system executables while permitting process
 launch. The runtime validates configured Python/PHP paths in a short isolated
 Python child, requiring absolute regular executable paths and canonical CLI
@@ -229,8 +236,8 @@ cannot start, only private root, document roots and Python/PHP pins can be
 repaired, without secret publication; an initialized root still uses the bounded
 configuration/tick locks. The Backups page is the sole web settings editor;
 the native Extensions page retains enable/disable and uninstall, exposes no
-Backups setting fields, and its Save hook performs no configuration or private
-state work. CLI native writes validate against the internal `Settings::fields`
+Backups setting fields (only a read-only link to the Backups page, which is never
+stored), and its Save hook performs no configuration or private state work. CLI native writes validate against the internal `Settings::fields`
 schema independently of `getConfig()`.
 
 The private root is owned by the site user with mode 0700. Before the first
@@ -418,7 +425,7 @@ active/enabled standalone services, with bounded reads and plain-table fallback.
 Cron suggestions escape every `%` as `\%`. Discovery decodes that cron escape
 before shell parsing, preserves literal backslashes and refuses an unescaped
 `%` because cron would turn the remainder into stdin. Shell and systemd parsing
-remain separate from this cron preprocessing. Discovery parser version 3
+remain separate from this cron preprocessing. Discovery parser version 4
 invalidates older cached interpretations and requires rediscovery.
 No scheduler, failed/incomplete discovery, unsupported/uncoordinated jobs,
 continuous workers, unsafe/missing locks and explicit-list mismatch refuse.
@@ -444,12 +451,21 @@ no timer target does not enter that inventory. Uninstantiated templates from
 instances from `list-units` remain in the inventory.
 The parser accepts documented /dev/null redirection tails, common PHP/Artisan
 flags and hosting PHP basenames, with shell expansion/wrappers refused.
-For an application at `/app`, it also accepts exactly
-`/usr/local/bin/php /opt/beco/scheduler.php` behind the same explicit flock and
+For an application at `/app`, an operator may set the process environment variable
+`PAYMENTER_BACKUPS_GUARDED_SCHEDULER` to a canonical absolute script path, for
+example `/opt/paymenter/scheduler.php`. It defaults to empty (Artisan only).
+PHP Runtime and Python detached launchers explicitly preserve this one nonsecret
+setting through their child environment allowlists. Set it in the operating
+system environment of every PHP web, scheduler/cron and standalone CLI process;
+a Laravel `.env` entry alone does not set it. See [installation](INSTALL.md).
+Standalone crontab environment assignments, including quoted values, configure
+job environments and are excluded from both discovery and legacy coordination;
+scheduled commands with environment prefixes remain subject to strict parsing.
+The parser then accepts exactly `/usr/local/bin/php CONFIGURED_PATH` behind the same explicit flock and
 owner-private lock checks. This guarded scheduler takes no interpreter or script
 arguments. Other interpreters, script paths and application roots refuse.
 The script must be a root-owned regular file with no group or world write bits.
-Its canonical path must remain exactly `/opt/beco/scheduler.php`, with no file
+Its canonical path must remain exactly the configured path, with no file
 or parent-directory symlinks. The canonical-path and `lstat` regular-file checks
 follow `discovery.lock_safe`; script ownership and write restrictions differ
 from that helper's app-owned, exactly 0600 lock policy. Discovery, cache reads
@@ -458,6 +474,15 @@ same parser. An unsafe script remains visible as unsupported with its guarded
 command, so diagnostics cannot suggest replacing the guard with Artisan.
 Normalized commands, cached diagnostics and replacement suggestions preserve
 the guarded launcher and its lock, rather than replacing it with Artisan.
+Unrecognized direct `/usr/local/bin/php` launchers for `/app` stay relevant
+after this setting changes or clears, including scripts without a `.php` suffix.
+They refuse admission instead of silently losing their cooperative lock.
+Artisan targets with explicit commands retain ordinary application/command
+filtering; a script named `artisan` without a command remains a possible retired
+guarded launcher and refuses.
+The final writer check also retains same-owner direct PHP script processes after
+the selected path changes or clears, so retiring a cron entry cannot hide an
+invocation that is still running under its previous lock.
 Commands are reconstructed from recognized nonsecret tokens; ini values, raw
 cron/service/process text and process identities never enter discovery records.
 

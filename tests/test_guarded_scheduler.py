@@ -30,8 +30,188 @@ class GuardedSchedulerTests(unittest.TestCase):
         self.state.app = pathlib.Path('/app')
         self.lock = self.state.root / 'scheduler.lock'
         self.lock.touch(mode=0o600)
-        self.line = f'* * * * * /usr/bin/flock -n {self.lock} /usr/local/bin/php /opt/beco/scheduler.php'
+        self.line = f'* * * * * /usr/bin/flock -n {self.lock} /usr/local/bin/php /opt/paymenter/scheduler.php'
         self.envelope = {'settings': {'job_lock_paths': []}, 'tools': {'php': '/usr/local/bin/php'}}
+
+    def test_unset_guard_refuses_script_but_accepts_standard_artisan(self):
+        with patch.dict(os.environ, {'PAYMENTER_BACKUPS_GUARDED_SCHEDULER': ''}):
+            with self.assertRaisesRegex(BackupError, 'job-command-unsupported'):
+                discovery.parse(self.line, self.state.app)
+            self.assertEqual(discovery.record(self.line, self.state.app, 'crontab', 'line 1')['coordination'], 'unsupported')
+            ordinary = self.line.replace('/opt/paymenter/scheduler.php', '/app/artisan schedule:run')
+            self.assertEqual(discovery.parse(ordinary, self.state.app)['coordination'], 'coordinated')
+            self.assertIn('/app/artisan schedule:run', discovery.suggestions(self.state, self.envelope)['scheduler'])
+
+    def test_configured_custom_name_and_cron_special_characters_round_trip(self):
+        script = '/opt/paymenter/custom % runner.php'
+        with guarded_host(script):
+            line = self.line.replace('/opt/paymenter/scheduler.php', discovery.cron_quote(script))
+            self.assertTrue(discovery.relevant(line, self.state.app))
+            row = discovery.record(line, self.state.app, 'crontab', 'line 1')
+            self.assertEqual(row['coordination'], 'coordinated')
+            self.assertEqual(shlex.split(row['command'])[-1], script)
+            self.assertEqual(_legacy_cron_lock(line, self.state.app, [str(self.lock)]), str(self.lock))
+            self.assertEqual(discovery.admission(self.envelope, {'state': 'ok', 'items': [row]}), ([], [str(self.lock)]))
+            self.assertEqual(discovery.suggestions(self.state, self.envelope, {'items': [row]})['scheduler'], line + ' >/dev/null 2>&1')
+            with self.assertRaisesRegex(BackupError, 'job-command-unsupported'):
+                discovery.parse(line + ' --quiet', self.state.app)
+
+    def test_changed_or_disabled_setting_refuses_obsolete_custom_cron_launchers(self):
+        script = '/opt/paymenter/custom % runner.php'
+        ordinary = f'* * * * * /usr/bin/flock -n {self.lock} /usr/local/bin/php /app/artisan schedule:run'
+        with guarded_host(script):
+            line = self.line.replace('/opt/paymenter/scheduler.php', discovery.cron_quote(script))
+            for value in ('', '/opt/paymenter/renamed.php'):
+                with self.subTest(value=value), patch.dict(os.environ, {'PAYMENTER_BACKUPS_GUARDED_SCHEDULER': value}):
+                    with patch.object(discovery, 'probe', return_value=(0, (line + '\n' + ordinary + '\n').encode(), b'')), patch.object(discovery, 'systemd', return_value=[]):
+                        inventory = discovery.discover(self.state, self.envelope)
+                    self.assertEqual(len(inventory['items']), 2)
+                    errors, _ = discovery.admission(self.envelope, inventory)
+                    self.assertIn('job-command-unsupported', [item['code'] for item in errors])
+                    with self.assertRaisesRegex(BackupError, 'job-locks-unverified'):
+                        _legacy_cron_lock(line, self.state.app, [str(self.lock)])
+
+    def test_changed_or_disabled_setting_refuses_obsolete_custom_systemd_launchers(self):
+        script = '/opt/paymenter/old-runner'
+        command = f'/usr/bin/flock -n {self.lock} /usr/local/bin/php {script}'
+        ordinary = f'/usr/bin/flock -n {self.lock} /usr/local/bin/php /app/artisan schedule:run'
+        def read(arguments, timeout):
+            if '--user' in arguments:
+                return b'[]'
+            if 'list-timers' in arguments:
+                return b'[{"activates":"old.service"},{"activates":"ordinary.service"}]'
+            if 'show' in arguments:
+                return '\n\n'.join(
+                    f'Id={name}.service\nLoadState=loaded\nUser={os.getuid()}\nWorkingDirectory=/\nDynamicUser=no\nRestart=no\nExecStart={{ argv[]={line} ; ignore_errors=no ; }}\n'
+                    for name, line in (('old', command), ('ordinary', ordinary))).encode()
+            return b'[]'
+        tools = {'systemctl': sys.executable}
+        for value in ('', '/opt/paymenter/renamed.php'):
+            with self.subTest(value=value), patch.dict(os.environ, {'PAYMENTER_BACKUPS_GUARDED_SCHEDULER': value}), \
+                    patch.object(discovery, 'run', side_effect=read), patch('paymenter_backups.maintenance.run', side_effect=read):
+                rows = discovery.systemd(self.state.app, tools)
+                self.assertEqual(len(rows), 2)
+                errors, _ = discovery.admission(self.envelope, {'state': 'ok', 'items': rows})
+                self.assertIn('job-command-unsupported', [item['code'] for item in errors])
+                with self.assertRaisesRegex(BackupError, 'job-locks-unverified'):
+                    systemd_locks(self.state.app, [str(self.lock)], tools)
+
+    def test_generic_script_basenames_do_not_claim_other_app_artisan_jobs(self):
+        line = '* * * * * /usr/bin/flock -n /private/other.lock /usr/local/bin/php -q /other/artisan schedule:run'
+        for script in ('/opt/paymenter/artisan', '/opt/paymenter/php'):
+            with self.subTest(script=script), patch.dict(os.environ, {'PAYMENTER_BACKUPS_GUARDED_SCHEDULER': script}):
+                self.assertFalse(discovery.relevant(line, self.state.app))
+
+    def test_direct_obsolete_custom_systemd_launchers_refuse_discovery_and_locks(self):
+        command = '/usr/local/bin/php /opt/paymenter/old-runner'
+        def read(arguments, timeout):
+            if '--user' in arguments:
+                return b'[]'
+            if 'list-timers' in arguments:
+                return b'[{"activates":"old.service"}]'
+            if 'show' in arguments:
+                return (f'Id=old.service\nLoadState=loaded\nUser={os.getuid()}\nWorkingDirectory=/\n'
+                        f'DynamicUser=no\nRestart=no\nExecStart={{ argv[]={command} ; ignore_errors=no ; }}\n').encode()
+            return b'[]'
+        tools = {'systemctl': sys.executable}
+        for value in ('', '/opt/paymenter/renamed.php'):
+            with self.subTest(value=value), patch.dict(os.environ, {'PAYMENTER_BACKUPS_GUARDED_SCHEDULER': value}), \
+                    patch.object(discovery, 'run', side_effect=read), patch('paymenter_backups.maintenance.run', side_effect=read):
+                with self.subTest(check='discovery'):
+                    rows = discovery.systemd(self.state.app, tools)
+                    self.assertEqual(len(rows), 1)
+                    self.assertEqual(rows[0]['coordination'], 'unsupported')
+                    errors, _ = discovery.admission(self.envelope, {'state': 'ok', 'items': rows})
+                    self.assertIn('job-command-unsupported', [item['code'] for item in errors])
+                with self.subTest(check='locks'):
+                    with self.assertRaisesRegex(BackupError, 'job-locks-unverified'):
+                        systemd_locks(self.state.app, [str(self.lock)], tools)
+
+    def test_other_app_artisan_php_flags_do_not_become_unknown_scripts(self):
+        own = f'/usr/bin/flock -n {self.lock} /usr/local/bin/php /app/artisan schedule:run'
+        tools = {'systemctl': sys.executable}
+        for flags in ('-q', '-f', '-d memory_limit=512M', '-q -d memory_limit=512M -f'):
+            other = f'/usr/bin/flock -n /private/other.lock /usr/local/bin/php {flags} /other/artisan schedule:run'
+            def read(arguments, timeout):
+                if '--user' in arguments:
+                    return b'[]'
+                if 'list-timers' in arguments:
+                    return b'[{"activates":"own.service"},{"activates":"other.service"}]'
+                if 'show' in arguments:
+                    return '\n\n'.join(
+                        f'Id={name}.service\nLoadState=loaded\nUser={os.getuid()}\nWorkingDirectory=/\nDynamicUser=no\nRestart=no\nExecStart={{ argv[]={line} ; ignore_errors=no ; }}\n'
+                        for name, line in (('own', own), ('other', other))).encode()
+                return b'[]'
+            with self.subTest(flags=flags), patch.dict(os.environ, {'PAYMENTER_BACKUPS_GUARDED_SCHEDULER': ''}):
+                cron = ('* * * * * ' + own + '\n* * * * * ' + other + '\n').encode()
+                with patch.object(discovery, 'probe', return_value=(0, cron, b'')), patch.object(discovery, 'systemd', return_value=[]):
+                    inventory = discovery.discover(self.state, self.envelope)
+                self.assertEqual(len(inventory['items']), 1)
+                self.assertEqual(discovery.admission(self.envelope, inventory), ([], [str(self.lock)]))
+                with patch.object(discovery, 'run', side_effect=read), patch('paymenter_backups.maintenance.run', side_effect=read):
+                    rows = discovery.systemd(self.state.app, tools)
+                    self.assertEqual(len(rows), 1)
+                    self.assertEqual(rows[0]['label'], 'own.service')
+                    self.assertEqual(systemd_locks(self.state.app, [str(self.lock)], tools), {str(self.lock)})
+
+    def test_unrelated_artisan_commands_do_not_block_cron_or_systemd(self):
+        own = f'/usr/bin/flock -n {self.lock} /usr/local/bin/php /app/artisan schedule:run'
+        tools = {'systemctl': sys.executable}
+        for target in ('/app/artisan', '/other/artisan'):
+            for flags in ('', '-q -d memory_limit=512M -f'):
+                other = f'/usr/local/bin/php {flags} {target} cache:prune-stale-tags'
+                def read(arguments, timeout):
+                    if '--user' in arguments:
+                        return b'[]'
+                    if 'list-timers' in arguments:
+                        return b'[{"activates":"own.service"},{"activates":"other.service"}]'
+                    if 'show' in arguments:
+                        return '\n\n'.join(
+                            f'Id={name}.service\nLoadState=loaded\nUser={os.getuid()}\nWorkingDirectory=/\nDynamicUser=no\nRestart=no\nExecStart={{ argv[]={line} ; ignore_errors=no ; }}\n'
+                            for name, line in (('own', own), ('other', other))).encode()
+                    return b'[]'
+                with self.subTest(target=target, flags=flags), patch.dict(os.environ, {'PAYMENTER_BACKUPS_GUARDED_SCHEDULER': ''}):
+                    cron = ('* * * * * ' + own + '\n* * * * * ' + other + '\n').encode()
+                    with patch.object(discovery, 'probe', return_value=(0, cron, b'')), patch.object(discovery, 'systemd', return_value=[]):
+                        inventory = discovery.discover(self.state, self.envelope)
+                    self.assertEqual(len(inventory['items']), 1)
+                    self.assertEqual(discovery.admission(self.envelope, inventory), ([], [str(self.lock)]))
+                    with patch.object(discovery, 'run', side_effect=read), patch('paymenter_backups.maintenance.run', side_effect=read):
+                        rows = discovery.systemd(self.state.app, tools)
+                        self.assertEqual(len(rows), 1)
+                        self.assertEqual(systemd_locks(self.state.app, [str(self.lock)], tools), {str(self.lock)})
+
+    def test_obsolete_guard_named_artisan_without_command_still_refuses(self):
+        for ending in ('', ' >/dev/null 2>&1'):
+            line = self.line.replace('/opt/paymenter/scheduler.php', '/opt/paymenter/artisan') + ending
+            with self.subTest(ending=ending), patch.dict(os.environ, {'PAYMENTER_BACKUPS_GUARDED_SCHEDULER': ''}):
+                self.assertTrue(discovery.relevant(line, self.state.app))
+                row = discovery.record(line, self.state.app, 'crontab', 'old launcher')
+                self.assertEqual(row['coordination'], 'unsupported')
+                with self.assertRaisesRegex(BackupError, 'job-locks-unverified'):
+                    _legacy_cron_lock(line, self.state.app, [str(self.lock)])
+
+    def test_changed_setting_cannot_reuse_previous_guarded_inventory(self):
+        inventory = {
+            'schema_version': 1, 'parser_version': discovery.PARSER_VERSION,
+            'app': '/app', 'checked_at': 100, 'state': 'ok', 'error': None,
+            'items': [discovery.record(self.line, self.state.app, 'crontab', 'line 1')]}
+        atomic_json(self.state.root / 'discovery.json', inventory)
+        for value in ('', '/opt/other/scheduler.php'):
+            with self.subTest(value=value), patch.dict(os.environ, {'PAYMENTER_BACKUPS_GUARDED_SCHEDULER': value}):
+                self.assertEqual(discovery.cached(self.state, now=101)['state'], 'unknown')
+                errors, _ = discovery.admission(self.envelope, inventory)
+                self.assertIn('job-command-unsupported', [item['code'] for item in errors])
+                self.assertIn('/app/artisan schedule:run', discovery.suggestions(self.state, self.envelope, inventory)['scheduler'])
+
+    def test_invalid_deployment_paths_do_not_enable_guarded_launchers(self):
+        from paymenter_backups.scheduler import guarded_scheduler_path
+        for value in ('relative.php', '/', '/opt//runner.php', '//opt/runner.php', '/opt/./runner.php',
+                      '/opt/../runner.php', '/opt/runner.php/', '/opt/runner.php\n', '/opt/$runner.php'):
+            with self.subTest(value=value), patch.dict(os.environ, {'PAYMENTER_BACKUPS_GUARDED_SCHEDULER': value}):
+                self.assertEqual(guarded_scheduler_path(), '')
+                with self.assertRaisesRegex(BackupError, 'job-command-unsupported'):
+                    discovery.parse(self.line, self.state.app)
 
     def test_exact_guarded_launcher_is_discovered_coordinated_and_round_trips(self):
         with patch.object(discovery, 'probe', return_value=(0, (self.line + '\n').encode(), b'')), patch.object(discovery, 'systemd', return_value=[]):
@@ -39,7 +219,7 @@ class GuardedSchedulerTests(unittest.TestCase):
         self.assertEqual(len(inventory['items']), 1)
         row = inventory['items'][0]
         self.assertEqual((row['kind'], row['coordination']), ('scheduler', 'coordinated'))
-        expected = f'/usr/bin/flock -n {self.lock} /usr/local/bin/php /opt/beco/scheduler.php'
+        expected = f'/usr/bin/flock -n {self.lock} /usr/local/bin/php /opt/paymenter/scheduler.php'
         self.assertEqual(row['command'], expected)
         self.assertEqual(discovery.admission(self.envelope, inventory), ([], [str(self.lock)]))
         self.assertEqual(discovery.parse(row['command'], self.state.app, cron=False)['command'], expected)
@@ -110,7 +290,7 @@ class GuardedSchedulerTests(unittest.TestCase):
 
     def test_guarded_launcher_variants_refuse(self):
         invalid = [self.line + ' --quiet', self.line + ' schedule:run',
-                   self.line.replace('/opt/beco/scheduler.php', '/opt/other/scheduler.php'),
+                   self.line.replace('/opt/paymenter/scheduler.php', '/opt/other/scheduler.php'),
                    self.line.replace('/usr/local/bin/php', '/usr/bin/php'),
                    self.line.replace('/usr/local/bin/php', 'php'),
                    self.line.replace('/usr/local/bin/php', '/usr/local/bin/php -q'),
@@ -138,7 +318,7 @@ class GuardedSchedulerTests(unittest.TestCase):
         self.assertEqual(discovery.cached(self.state, now=101)['state'], 'unknown')
         with patch.object(discovery, 'probe', return_value=(0, (self.line + '\n').encode(), b'')), patch.object(discovery, 'systemd', return_value=[]):
             current = discovery.refresh_cache(self.state, self.envelope, now=101)
-        self.assertEqual(current['parser_version'], 3)
+        self.assertEqual(current['parser_version'], 4)
         self.assertEqual(len(current['items']), 1)
 
     def test_suggestions_preserve_the_discovered_guard_and_lock(self):
@@ -151,11 +331,11 @@ class GuardedSchedulerTests(unittest.TestCase):
 
     def test_guarded_suggestions_keep_cron_percent_escaping(self):
         lock = str(self.state.root / r'job\% archive.lock')
-        command = shlex.join(['/usr/bin/flock', '-n', lock, '/usr/local/bin/php', '/opt/beco/scheduler.php'])
+        command = shlex.join(['/usr/bin/flock', '-n', lock, '/usr/local/bin/php', '/opt/paymenter/scheduler.php'])
         inventory = {'items': [{'command': command}]}
         suggested = discovery.suggestions(self.state, self.envelope, inventory)['scheduler']
         self.assertEqual(discovery.parse(suggested, self.state.app)['lock'], lock)
-        self.assertTrue(suggested.endswith(' /usr/local/bin/php /opt/beco/scheduler.php >/dev/null 2>&1'))
+        self.assertTrue(suggested.endswith(' /usr/local/bin/php /opt/paymenter/scheduler.php >/dev/null 2>&1'))
 
     def test_legacy_validation_preserves_the_same_guarded_contract(self):
         self.assertEqual(_legacy_cron_lock(self.line, self.state.app, [str(self.lock)]), str(self.lock))
@@ -186,7 +366,7 @@ class GuardedSchedulerTests(unittest.TestCase):
             rows = discovery.systemd(self.state.app, tools)
             self.assertEqual(len(rows), 1)
             self.assertEqual(rows[0]['coordination'], 'coordinated')
-            self.assertTrue(rows[0]['command'].endswith(' /usr/local/bin/php /opt/beco/scheduler.php'))
+            self.assertTrue(rows[0]['command'].endswith(' /usr/local/bin/php /opt/paymenter/scheduler.php'))
             self.assertEqual(systemd_locks(self.state.app, [str(self.lock)], tools), {str(self.lock)})
             self.script.chmod(0o666)
             self.assertEqual(discovery.systemd(self.state.app, tools)[0]['coordination'], 'unsupported')
@@ -197,6 +377,60 @@ class GuardedSchedulerTests(unittest.TestCase):
             self.assertEqual(discovery.systemd(self.state.app, tools), [])
             self.assertEqual(systemd_locks(self.state.app, [str(self.lock)], tools), set())
 
+    def test_cron_environment_directives_do_not_become_launchers(self):
+        from paymenter_backups.maintenance import coordination
+        for value in ('/opt/paymenter/scheduler.php', '"/opt/paymenter/scheduler.php"', "'/opt/paymenter/scheduler.php'"):
+            for version in (1, 2):
+                cron = ('  PAYMENTER_BACKUPS_GUARDED_SCHEDULER = ' + value + '\n' + self.line + '\n').encode()
+                envelope = {'settings': {'settings_version': version, 'job_lock_paths': [str(self.lock)], 'lock_timeout': 1},
+                            'tools': {'php': '/usr/local/bin/php'}}
+                with self.subTest(value=value, version=version), \
+                        patch.object(discovery, 'probe', return_value=(0, cron, b'')), patch.object(discovery, 'systemd', return_value=[]), \
+                        patch('paymenter_backups.maintenance.run', return_value=cron), \
+                        patch('paymenter_backups.maintenance.systemd_locks', return_value=set()), \
+                        patch('paymenter_backups.maintenance.app_workers', return_value=[]):
+                    inventory = discovery.discover(self.state, envelope)
+                    self.assertEqual(len(inventory['items']), 1)
+                    self.assertEqual(discovery.admission(envelope, inventory), ([], [str(self.lock)]))
+                    with coordination(self.state, envelope):
+                        pass
+        for line in ('* * * * * PAYMENTER_BACKUPS_GUARDED_SCHEDULER=/opt/paymenter/scheduler.php /usr/local/bin/php /opt/paymenter/scheduler.php',
+                     'export PAYMENTER_BACKUPS_GUARDED_SCHEDULER=/opt/paymenter/scheduler.php',
+                     'PAYMENTER_BACKUPS_GUARDED_SCHEDULER="/opt/paymenter/scheduler.php'):
+            with self.subTest(malformed=line), patch.object(discovery, 'probe', return_value=(0, (line + '\n' + self.line).encode(), b'')), \
+                    patch.object(discovery, 'systemd', return_value=[]):
+                inventory = discovery.discover(self.state, self.envelope)
+                self.assertEqual(len(inventory['items']), 2)
+                errors, _ = discovery.admission(self.envelope, inventory)
+                self.assertIn('job-command-unsupported', [item['code'] for item in errors])
+
+    def test_retired_live_scheduler_blocks_replacement_lock_coordination(self):
+        from paymenter_backups.maintenance import coordination
+        real_path = type(self.state.root)
+        proc = self.state.root / 'proc'
+        child = proc / str(os.getpid() + 100000)
+        child.mkdir(parents=True)
+        (child / 'cwd').symlink_to('/')
+        cmdline = child / 'cmdline'
+        replacement = self.line.replace('/opt/paymenter/scheduler.php', '/app/artisan schedule:run')
+        envelope = {'settings': {'settings_version': 2, 'job_lock_paths': [], 'lock_timeout': 1},
+                    'tools': {'php': '/usr/local/bin/php'}}
+        for retired in ('/opt/paymenter/old-runner', '/opt/paymenter/artisan'):
+            cmdline.write_bytes(b'/usr/local/bin/php\0' + os.fsencode(retired) + b'\0')
+            for setting in ('', '/opt/paymenter/new-runner'):
+                with self.subTest(retired=retired, setting=setting), patch.dict(os.environ, {'PAYMENTER_BACKUPS_GUARDED_SCHEDULER': setting}), \
+                        patch.object(process.pathlib, 'Path', side_effect=lambda value: proc if str(value) == '/proc' else real_path(value)), \
+                        patch.object(discovery, 'probe', return_value=(0, (replacement + '\n').encode(), b'')), \
+                        patch.object(discovery, 'systemd', return_value=[]):
+                    inventory = discovery.discover(self.state, envelope)
+                    self.assertEqual(discovery.admission(envelope, inventory), ([], [str(self.lock)]))
+                    with self.assertRaisesRegex(BackupError, 'job-workers-running'):
+                        with coordination(self.state, envelope):
+                            self.fail('Capture must not start beside a retired scheduler')
+        cmdline.write_bytes(b'/usr/local/bin/php\0-q\0/other/artisan\0cache:prune-stale-tags\0')
+        with patch.object(process.pathlib, 'Path', side_effect=lambda value: proc if str(value) == '/proc' else real_path(value)):
+            self.assertEqual(process.app_workers(self.state.app), [])
+
     def test_running_guarded_scheduler_is_checked_after_lock_acquisition(self):
         real_path = type(self.state.root)
         proc = self.state.root / 'proc'
@@ -204,9 +438,13 @@ class GuardedSchedulerTests(unittest.TestCase):
         child.mkdir(parents=True)
         (child / 'cwd').symlink_to('/')
         cmdline = child / 'cmdline'
-        cmdline.write_bytes(b'/usr/local/bin/php\0/opt/beco/scheduler.php\0')
+        cmdline.write_bytes(b'/usr/local/bin/php\0/opt/paymenter/scheduler.php\0')
         with patch.object(process.pathlib, 'Path', side_effect=lambda value: proc if str(value) == '/proc' else real_path(value)):
             self.assertIn(int(child.name), process.app_workers(self.state.app))
             self.assertEqual(process.app_workers(real_path('/other')), [])
-            cmdline.write_bytes(b'/usr/bin/php\0/opt/beco/scheduler.php\0')
+            with patch.dict(os.environ, {'PAYMENTER_BACKUPS_GUARDED_SCHEDULER': ''}):
+                self.assertIn(int(child.name), process.app_workers(self.state.app))
+            cmdline.write_bytes(b'/usr/local/bin/php\0/opt/paymenter/scheduler.php\0--quiet\0')
+            self.assertIn(int(child.name), process.app_workers(self.state.app))
+            cmdline.write_bytes(b'/usr/bin/php\0/opt/paymenter/scheduler.php\0')
             self.assertEqual(process.app_workers(self.state.app), [])

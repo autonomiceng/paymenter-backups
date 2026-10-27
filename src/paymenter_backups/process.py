@@ -6,6 +6,7 @@ import pathlib
 import signal
 import selectors
 import resource
+import shlex
 import re
 import subprocess
 import time
@@ -36,6 +37,9 @@ def safe_environment(database_context=None):
     # Do not inherit TAR_OPTIONS, MYSQL_PWD, GZIP, LD_PRELOAD, provider/CA/proxy
     # overrides, application variable overrides or TLS session key logging.
     environment = {"PATH": "/usr/local/bin:/usr/bin:/bin", "LANG": "C.UTF-8", "LC_ALL": "C.UTF-8", "TZ": "UTC"}
+    from .scheduler import SETTING, guarded_scheduler_path
+    if guarded_scheduler_path():
+        environment[SETTING] = guarded_scheduler_path()
     if database_context is not None:
         from .config import database_connection_environment
         environment.update(database_connection_environment(database_context))
@@ -291,6 +295,7 @@ def hash_stream(command, timeout, register=None):
 
 
 def app_workers(app):
+    from .scheduler import guarded_relevant
     found = []
     for path in pathlib.Path("/proc").iterdir():
         if not path.name.isdigit() or int(path.name) == os.getpid():
@@ -299,7 +304,10 @@ def app_workers(app):
             if path.stat().st_uid != os.getuid():
                 continue
             raw = (path / "cmdline").read_bytes()
-            guarded = str(app) == '/app' and raw.rstrip(b'\0').split(b'\0') == [b'/usr/local/bin/php', b'/opt/beco/scheduler.php']
+            words = [os.fsdecode(word) for word in raw.rstrip(b'\0').split(b'\0')]
+            # A retired direct script can still be writing after its cron entry
+            # and selected path change. Relevance does not authorize its launch.
+            guarded = bool(words[:1] == ['/usr/local/bin/php'] and guarded_relevant(shlex.join(words), app))
             arguments = raw.replace(b"\0", b" ").decode(errors="replace")
             if not guarded and ("artisan" not in arguments or not any(word in arguments for word in ("schedule:run", "schedule:work", "queue:work", "queue:listen", "horizon"))):
                 continue

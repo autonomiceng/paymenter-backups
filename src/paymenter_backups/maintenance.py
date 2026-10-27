@@ -19,6 +19,7 @@ import urllib.error
 import urllib.request
 import uuid
 
+from .scheduler import cron_environment_assignment, guarded_relevant
 from .common import BackupError, identity, read_json
 from .config import billing_fingerprint
 from .process import app_workers, group_members, run
@@ -233,7 +234,7 @@ def coordination(state, envelope):
                 if error.code != "child-failed":
                     raise
                 crontab = ""
-            jobs = [line for line in crontab.splitlines() if line.strip() and not line.lstrip().startswith("#") and (any(word in line for word in ("schedule:run", "queue:work")) or (str(state.app) == '/app' and 'scheduler.php' in line))]
+            jobs = [line for line in crontab.splitlines() if line.strip() and not line.lstrip().startswith("#") and not cron_environment_assignment(line) and (any(word in line for word in ("schedule:run", "queue:work")) or guarded_relevant(line, state.app))]
             verified = set()
             for line in jobs:
                 verified.add(_legacy_cron_lock(line, state.app, paths))
@@ -285,7 +286,7 @@ def cron_lock(line, app, paths):
 def _legacy_cron_lock(line, app, paths, cron=True):
     """Support explicit path-based flock invocations; ambiguous shell refuses."""
     from .discovery import cron_command, parse
-    if 'scheduler.php' in line:
+    if guarded_relevant(line, app):
         try:
             item = parse(line, app, cron=cron)
             if item['coordination'] == 'coordinated' and item['lock'] in paths:
@@ -418,7 +419,7 @@ def systemd_locks(app, paths, tools):
                 execution = props.get("ExecStart", "")
                 working = props.get("WorkingDirectory", "")
                 relevant = working == str(app) or re.search(re.escape(str(app)) + r"(?:/|[\s;'\"]|$)", execution)
-                guarded = str(app) == '/app' and 'scheduler.php' in execution
+                guarded = guarded_relevant(execution, app)
                 if not guarded and (not relevant or not any(word in execution for word in ("schedule:run", "queue:work"))):
                     continue
                 owner = props.get("User", "")

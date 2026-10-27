@@ -1,11 +1,13 @@
 """Scheduler commands shown by the native page preserve the detected launcher."""
 import contextlib
 import json
+import os
 import pathlib
 import shlex
 import shutil
 import subprocess
 import unittest
+from unittest.mock import patch
 
 from paymenter_backups import discovery
 from guarded_scheduler_fixture import guarded_host
@@ -17,6 +19,7 @@ PROGRAM = r'''
 namespace Paymenter\Extensions\Others\Backups {
     class Runtime {
         public static function privateRoot(): string { return '/private/default'; }
+        public static function guardedSchedulerPath(): string { return getenv('PAYMENTER_BACKUPS_GUARDED_SCHEDULER') ?: ''; }
     }
 }
 namespace {
@@ -39,7 +42,7 @@ namespace {
 
 @unittest.skipUnless(PHP, 'PHP CLI required for scheduler commands')
 class GuardedSchedulerUI(unittest.TestCase):
-    COMMAND = "/usr/bin/flock -n '/private/existing jobs.lock' /usr/local/bin/php /opt/beco/scheduler.php"
+    COMMAND = "/usr/bin/flock -n '/private/existing jobs.lock' /usr/local/bin/php /opt/paymenter/scheduler.php"
 
     def setUp(self):
         contexts = contextlib.ExitStack()
@@ -62,24 +65,35 @@ class GuardedSchedulerUI(unittest.TestCase):
                      'command': self.COMMAND, 'lock': '/private/existing jobs.lock'}, **changes)
 
     def test_engine_scheduler_suggestion_passes_through_unchanged(self):
-        suggestion = '* * * * * /usr/bin/flock -n /private/engine.lock /usr/local/bin/php /opt/beco/scheduler.php >/dev/null 2>&1'
+        suggestion = '* * * * * /usr/bin/flock -n /private/engine.lock /usr/local/bin/php /opt/paymenter/scheduler.php >/dev/null 2>&1'
         self.assertEqual(self.scheduler_line(items=[self.guarded_item()], suggestion=suggestion), suggestion)
 
     def test_guarded_fallback_preserves_exact_normalized_command_and_lock(self):
         self.assertEqual(
             self.scheduler_line(items=[self.guarded_item()]),
-            "* * * * * /usr/bin/flock -n '/private/existing jobs.lock' /usr/local/bin/php /opt/beco/scheduler.php >/dev/null 2>&1",
+            "* * * * * /usr/bin/flock -n '/private/existing jobs.lock' /usr/local/bin/php /opt/paymenter/scheduler.php >/dev/null 2>&1",
         )
 
     def test_guarded_fallback_escapes_percent_and_backslash_percent_locks(self):
         for lock in ('/private/jobs%archive.lock', r'/private/jobs\%archive.lock'):
             with self.subTest(lock=lock):
                 command = shlex.join(['/usr/bin/flock', '-n', lock,
-                                      '/usr/local/bin/php', '/opt/beco/scheduler.php'])
+                                      '/usr/local/bin/php', '/opt/paymenter/scheduler.php'])
                 line = self.scheduler_line(items=[self.guarded_item(command=command, lock=lock)])
                 parsed = discovery.parse(line, pathlib.Path('/app'))
                 self.assertEqual(parsed['lock'], lock)
                 self.assertEqual(parsed['command'], command)
+
+    def test_unset_guard_does_not_reconstruct_a_guarded_command(self):
+        with patch.dict(os.environ, {'PAYMENTER_BACKUPS_GUARDED_SCHEDULER': ''}):
+            self.assertIn('/app/artisan schedule:run', self.scheduler_line(items=[self.guarded_item()]))
+
+    def test_configured_script_with_spaces_and_percent_is_cron_escaped(self):
+        path = '/opt/paymenter/custom % runner.php'
+        command = shlex.join(['/usr/bin/flock', '-n', '/private/existing jobs.lock', '/usr/local/bin/php', path])
+        with guarded_host(path):
+            line = self.scheduler_line(items=[self.guarded_item(command=command)])
+            self.assertEqual(discovery.parse(line, pathlib.Path('/app'))['command'], command)
 
     def test_different_app_fallback_stays_artisan(self):
         self.assertEqual(

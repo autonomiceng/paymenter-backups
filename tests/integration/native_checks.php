@@ -462,7 +462,11 @@ if ($mode === 'upload') {
     $native = Livewire\Livewire::test(App\Admin\Resources\ExtensionResource\Pages\EditExtension::class, ['record' => $record->getRouteKey()]);
     check(!str_contains($native->html(), 'CREDENTIAL-CANARY'), 'native editor secret leak');
     check(!str_contains($native->html(), 'Full backup days') && !str_contains($native->html(), 'Legacy: automatic backups'), 'native duplicate settings returned');
-    check((new Paymenter\Extensions\Others\Backups\Backups)->getConfig() === [], 'Native settings schema is not empty');
+    // The native card only links to the Backups page; it is not a setting and Save never stores it.
+    $pointer = (new Paymenter\Extensions\Others\Backups\Backups)->getConfig();
+    check(count($pointer) === 1 && $pointer[0]['name'] === 'backup_settings' && $pointer[0]['type'] === 'placeholder', 'Native settings card is not a single pointer');
+    check(str_contains($native->html(), 'Edit them on the ')
+        && str_contains($native->html(), 'href="' . e(Paymenter\Extensions\Others\Backups\Admin\Pages\Backups::getUrl()) . '"'), 'Native settings card does not link to the Backups page');
     $lifecycleRows = Paymenter\Extensions\Others\Backups\SettingsWriter::snapshot($record);
     $privateHashes = static function () use ($root): array {
         $hashes = [];
@@ -475,7 +479,8 @@ if ($mode === 'upload') {
     $native->call('save');
     check($native->instance()->getErrorBag()->isEmpty(), 'native edit save has errors: ' . json_encode($native->instance()->getErrorBag()->toArray()));
     check($digest() === $credentialDigest, 'native editor changed credentials');
-    foreach (['data.settings.settings_version' => '1', 'data.settings.retention_keep_full' => '0', 'data.settings.full_weekdays' => '[7]', 'data.settings.database_every_hours' => '5', 'data.settings.extra_docroots' => '["relative"]', 'data.settings.private_root' => $base . '/public', 'data.settings.s3_secret_key' => 'FORGED-SECRET'] as $field => $value) {
+    check(Paymenter\Extensions\Others\Backups\SettingsWriter::snapshot($record) === $lifecycleRows && !$record->settings()->where('key', 'backup_settings')->exists(), 'Native Save stored the settings card');
+    foreach (['data.settings.settings_version' => '1', 'data.settings.retention_keep_full' => '0', 'data.settings.full_weekdays' => '[7]', 'data.settings.database_every_hours' => '5', 'data.settings.extra_docroots' => '["relative"]', 'data.settings.private_root' => $base . '/public', 'data.settings.s3_secret_key' => 'FORGED-SECRET', 'data.settings.backup_settings' => 'FORGED-POINTER'] as $field => $value) {
         $invalid = Livewire\Livewire::test(App\Admin\Resources\ExtensionResource\Pages\EditExtension::class, ['record' => $record->getRouteKey()]);
         $invalid->update(calls: [['method' => 'save', 'params' => []]], updates: [$field => $value]);
         check(Paymenter\Extensions\Others\Backups\SettingsWriter::snapshot($record) === $lifecycleRows

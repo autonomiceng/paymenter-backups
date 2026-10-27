@@ -40,14 +40,15 @@ trait BuildsCommands
     {
         $line = $this->checks()['jobs']['suggestions']['scheduler'] ?? null;
         if (is_string($line) && $line !== '') { return $line; }
-        if (base_path() === '/app') {
+        $script = Runtime::guardedSchedulerPath();
+        if (base_path() === '/app' && $script !== '') {
             foreach ($this->checks()['jobs']['items'] ?? [] as $job) {
                 $command = $job['command'] ?? null;
                 $lock = $job['lock'] ?? null;
                 if (($job['kind'] ?? null) === 'scheduler' && ($job['coordination'] ?? null) === 'coordinated'
                     && is_string($lock) && $lock !== ''
-                    && is_string($command) && str_ends_with($command, ' /usr/local/bin/php /opt/beco/scheduler.php')) {
-                    return '* * * * * /usr/bin/flock -n ' . self::cronShell($lock) . ' /usr/local/bin/php /opt/beco/scheduler.php >/dev/null 2>&1';
+                    && is_string($command) && $command === '/usr/bin/flock -n ' . self::shell($lock) . ' /usr/local/bin/php ' . self::shell($script)) {
+                    return '* * * * * /usr/bin/flock -n ' . self::cronShell($lock) . ' /usr/local/bin/php ' . self::cronShell($script) . ' >/dev/null 2>&1';
                 }
             }
         }

@@ -225,7 +225,7 @@ try {
       assert.equal(await setup.isVisible(), true, 'Setup block hidden while the cron job never ran');
       const text = await setup.innerText();
       assert.doesNotMatch(text, /need \d+ (items|changes)/, 'Setup counts items instead of naming them');
-      assert.match(text, /schedule:run|\/usr\/local\/bin\/php \/opt\/beco\/scheduler\.php/, 'Setup does not give the cron line');
+      assert.match(text, /schedule:run|\/usr\/local\/bin\/php \/opt\/paymenter\/scheduler\.php/, 'Setup does not give the cron line');
       const groups = setup.locator('fieldset');
       const full = groups.filter({has:page.locator('legend').filter({hasText:/^Full backups$/})});
       const database = groups.filter({has:page.locator('legend').filter({hasText:/^Database backups$/})});
@@ -299,7 +299,7 @@ try {
       for (const name of ['Command line', 'Restoring']) await page.getByRole('heading', {name, exact:true}).click();
       const commands = page.locator('[data-backups-command]:visible');
       const commandText = (await commands.allTextContents()).join('\n');
-      assert.match(commandText, /schedule:run|\/usr\/local\/bin\/php \/opt\/beco\/scheduler\.php/, 'Missing scheduler command workflow');
+      assert.match(commandText, /schedule:run|\/usr\/local\/bin\/php \/opt\/paymenter\/scheduler\.php/, 'Missing scheduler command workflow');
       for (const workflow of ['paymenter_backups()', 'overview --offline', 'recover']) assert(commandText.includes(workflow), 'Missing command workflow: ' + workflow);
       const canCopy = await commands.first().getAttribute('role') === 'button';
       if (!canCopy) {

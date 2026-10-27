@@ -51,7 +51,7 @@ try {
         if (!$condition) { throw new RuntimeException($message); }
     }
     $selected = $argv[2] ?? 'all';
-    testCheck(in_array($selected, ['all', 'permission', 'validation', 'credentials', 'recovery_key', 'cron_fallback', 'basic_states', 'root', 'baseline', 'repair', 'cli_config', 'download', 'download_anchor', 'delete_gate', 'modals', 'field_help', 'presentation', 'first_use', 'runtime'], true), 'Unknown test phase');
+    testCheck(in_array($selected, ['all', 'permission', 'validation', 'credentials', 'recovery_key', 'cron_fallback', 'basic_states', 'root', 'baseline', 'repair', 'cli_config', 'download', 'download_anchor', 'delete_gate', 'modals', 'field_help', 'presentation', 'render_performance', 'first_use', 'runtime'], true), 'Unknown test phase');
     function testPhase(string $name): bool {
         global $selected;
         return $selected === 'all' || $selected === $name;
@@ -106,6 +106,30 @@ try {
     config(['audit.console' => true]);
     $results = [];
     try {
+        if (testPhase('render_performance')) {
+        $currentPhase = 'render_performance';
+        $queries = [];
+        $measuring = false;
+        Illuminate\Support\Facades\DB::listen(function ($query) use (&$queries, &$measuring): void {
+            if ($measuring) { $queries[] = ['sql' => $query->sql, 'ms' => $query->time]; }
+        });
+        foreach (['backups', 'settings', 'help'] as $tab) {
+            $queries = [];
+            $measuring = true;
+            $start = hrtime(true);
+            $page = Livewire\Livewire::withQueryParams(['tab' => $tab])->test($class);
+            testCheck(str_contains($page->html(), 'Backups'), 'Backups page did not render');
+            $milliseconds = (hrtime(true) - $start) / 1000000;
+            $measuring = false;
+            // Observed native baseline: 20-21 queries, independent of history.
+            testCheck(count($queries) <= 24, 'Backups render exceeded its query budget: ' . count($queries));
+            $count = count($queries);
+            $databaseMilliseconds = array_sum(array_column($queries, 'ms'));
+            usort($queries, static fn ($a, $b) => $b['ms'] <=> $a['ms']);
+            $results['render_' . $tab] = ['ms' => $milliseconds, 'queries' => $count,
+                'database_ms' => $databaseMilliseconds, 'slowest' => array_slice($queries, 0, 3)];
+        }
+        }
         if (testPhase('runtime')) {
         $currentPhase = 'runtime';
         $runtime = Paymenter\Extensions\Others\Backups\Runtime::class;
@@ -1001,7 +1025,7 @@ JS;
         }
     } finally {
         // Restore fixture configuration and fake encrypted data before the next test.
-        if (!in_array($selected, ['permission', 'download', 'download_anchor', 'presentation', 'runtime'], true)) {
+        if (!in_array($selected, ['permission', 'download', 'download_anchor', 'presentation', 'render_performance', 'runtime'], true)) {
         foreach ($initialRows as $key => $value) {
             $record->settings()->where('key', $key)->update(['value' => $value]);
         }

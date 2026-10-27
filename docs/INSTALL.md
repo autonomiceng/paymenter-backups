@@ -17,8 +17,8 @@ but does not install packages or change hosting configuration.
 Build on a separate development machine:
 
 ```sh
-python3 tools/build_release.py --output dist/Backups-0.4.2.zip
-(cd dist && sha256sum -c Backups-0.4.2.zip.sha256)
+python3 tools/build_release.py --output dist/Backups-0.4.3.zip
+(cd dist && sha256sum -c Backups-0.4.3.zip.sha256)
 ```
 
 The deterministic archive has one top-level `Backups/` directory, compatible
@@ -109,8 +109,29 @@ python3 -I /path/to/app/extensions/Others/Backups/runtime/cli.py \
 
 The native every-minute tick observes the actual native billing event and
 launches durable work. Paymenter's server setup owns the systemd timer or cron
-job invoking `schedule:run` each minute, or the supported guarded launcher
-`flock PATH /usr/local/bin/php /opt/beco/scheduler.php` for an app at `/app`.
+job invoking `schedule:run` each minute. This standard Artisan launcher needs no
+guarded-script setting.
+
+For an app at `/app` using a guarded scheduler instead, set the process environment
+variable `PAYMENTER_BACKUPS_GUARDED_SCHEDULER` to its exact absolute script path,
+for example `/opt/paymenter/scheduler.php`. The default is empty: no guarded
+script is accepted until you set it. Set it for PHP web services, scheduler/cron
+processes and standalone Backups CLI invocations, including detached workers.
+For a container, put it in the container's environment (for example a Dockerfile
+`ENV PAYMENTER_BACKUPS_GUARDED_SCHEDULER=/opt/paymenter/scheduler.php`); for systemd,
+set `Environment=PAYMENTER_BACKUPS_GUARDED_SCHEDULER=/opt/paymenter/scheduler.php`
+in the service. Restart affected services after changing it. A Laravel `.env`
+entry alone is insufficient: this setting reads the operating system environment.
+A standalone invocation can start with
+`export PAYMENTER_BACKUPS_GUARDED_SCHEDULER=/opt/paymenter/scheduler.php`.
+The corresponding launcher is
+`flock PATH /usr/local/bin/php /opt/paymenter/scheduler.php`.
+Use a canonical absolute path without dot segments, duplicate or trailing slashes;
+path characters may be letters, numbers, spaces or `_@%+=:,./-`.
+For `/app`, unrecognized direct `/usr/local/bin/php` launchers remain visible as
+unsupported even after this setting changes or clears. Retire obsolete cron
+entries/services when switching scripts; a second Artisan scheduler does not
+make an unknown PHP launcher safe.
 The script must be a root-owned regular file, not group or world writable, and
 its path must contain no file or parent-directory symlinks. Backups rechecks it
 at discovery, admission and cache reads.

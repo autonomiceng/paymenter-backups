@@ -301,16 +301,35 @@ SHOW GRANTS FOR CURRENT_USER;"""
 
 
 def external_symlinks(app):
-    for directory, dirs, files in os.walk(app, followlinks=False):
-        for name in dirs + files:
-            path = pathlib.Path(directory) / name
-            if path.is_symlink():
-                try:
-                    target = path.resolve(strict=True)
-                except (OSError, RuntimeError):
-                    raise BackupError("external-symlink-target") from None
-                if target != app and app not in target.parents:
-                    raise BackupError("external-symlink-target")
+    # DirEntry uses the filesystem's directory metadata for ordinary files;
+    # constructing a Path and lstat-ing every vendor file made page readiness
+    # proportional to thousands of otherwise unnecessary system calls.
+    pending = [str(app)]
+    while pending:
+        directory = pending.pop()
+        # Recheck queued directories as os.walk does: a directory replaced by
+        # a symlink after enumeration must not lead the scan outside the app.
+        if directory != str(app) and os.path.islink(directory):
+            continue
+        try:
+            with os.scandir(directory) as entries:
+                for entry in entries:
+                    if entry.is_symlink():
+                        try:
+                            target = pathlib.Path(entry.path).resolve(strict=True)
+                        except (OSError, RuntimeError):
+                            raise BackupError("external-symlink-target") from None
+                        if target != app and app not in target.parents:
+                            raise BackupError("external-symlink-target")
+                    else:
+                        try:
+                            is_directory = entry.is_dir(follow_symlinks=False)
+                        except OSError:
+                            is_directory = False
+                        if is_directory:
+                            pending.append(entry.path)
+        except OSError:
+            continue  # Match os.walk's handling of unreadable directories.
 
 
 def interrupted(signum, _):

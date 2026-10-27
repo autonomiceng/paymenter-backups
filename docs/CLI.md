@@ -224,9 +224,14 @@ Defaults and prerequisites:
   The runner reads their service command and Unix user, with a bounded discovery
   deadline. It never installs or changes jobs. Verify cron/service semantics
   and request/worker bounds on the deployment.
-  For an app at `/app`, the guarded scheduler may instead run
-  `flock PATH /usr/local/bin/php /opt/beco/scheduler.php`, with no interpreter or
-  script arguments. Other paths, interpreters and app roots are unsupported.
+  For an app at `/app`, set the process environment variable
+  `PAYMENTER_BACKUPS_GUARDED_SCHEDULER=/opt/paymenter/scheduler.php` for PHP, cron
+  and the standalone CLI (see [installation](INSTALL.md)). It is empty by default,
+  so only the standard Artisan form is accepted until configured.
+  The guarded scheduler may then run
+  `flock PATH /usr/local/bin/php /opt/paymenter/scheduler.php`, with no interpreter or
+  script arguments. Only the configured script path and this interpreter/app root
+  are accepted.
   The script must be root-owned, regular, and not group or world writable, with
   no file or parent-directory symlinks. Its safety is rechecked before admission
   and when reading cached readiness.
