@@ -96,6 +96,12 @@ class GuardedSchedulerTests(unittest.TestCase):
                 with self.assertRaisesRegex(BackupError, 'job-locks-unverified'):
                     systemd_locks(self.state.app, [str(self.lock)], tools)
 
+    def test_generic_script_basenames_do_not_claim_other_app_artisan_jobs(self):
+        line = '* * * * * /usr/bin/flock -n /private/other.lock /usr/local/bin/php -q /other/artisan schedule:run'
+        for script in ('/opt/paymenter/artisan', '/opt/paymenter/php'):
+            with self.subTest(script=script), patch.dict(os.environ, {'PAYMENTER_BACKUPS_GUARDED_SCHEDULER': script}):
+                self.assertFalse(discovery.relevant(line, self.state.app))
+
     def test_other_app_artisan_php_flags_do_not_become_unknown_scripts(self):
         own = f'/usr/bin/flock -n {self.lock} /usr/local/bin/php /app/artisan schedule:run'
         tools = {'systemctl': sys.executable}

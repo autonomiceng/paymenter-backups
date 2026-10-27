@@ -24,14 +24,13 @@ def guarded_relevant(line, app):
     path = guarded_scheduler_path()
     if 'scheduler.php' in line:
         return True
-    name = pathlib.PurePosixPath(path).name if path else ''
-    if name and name in line:
+    if path and path in line:
         return True
     try:
         words = shlex.split(line.replace(r'\%', '%'))
     except ValueError:
         return '/usr/local/bin/php' in line
-    if name and name in ' '.join(words):
+    if path and path in ' '.join(words):
         return True
     # A formerly configured script may have any basename or extension. Keep
     # direct PHP script launchers visible when the setting changes or clears;
