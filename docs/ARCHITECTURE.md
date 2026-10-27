@@ -477,6 +477,9 @@ They refuse admission instead of silently losing their cooperative lock.
 Artisan targets with explicit commands retain ordinary application/command
 filtering; a script named `artisan` without a command remains a possible retired
 guarded launcher and refuses.
+The final writer check also retains same-owner direct PHP script processes after
+the selected path changes or clears, so retiring a cron entry cannot hide an
+invocation that is still running under its previous lock.
 Commands are reconstructed from recognized nonsecret tokens; ini values, raw
 cron/service/process text and process identities never enter discovery records.
 

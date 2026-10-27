@@ -6,6 +6,7 @@ import pathlib
 import signal
 import selectors
 import resource
+import shlex
 import re
 import subprocess
 import time
@@ -294,8 +295,7 @@ def hash_stream(command, timeout, register=None):
 
 
 def app_workers(app):
-    from .scheduler import guarded_scheduler_path
-    script = guarded_scheduler_path()
+    from .scheduler import guarded_relevant
     found = []
     for path in pathlib.Path("/proc").iterdir():
         if not path.name.isdigit() or int(path.name) == os.getpid():
@@ -304,7 +304,10 @@ def app_workers(app):
             if path.stat().st_uid != os.getuid():
                 continue
             raw = (path / "cmdline").read_bytes()
-            guarded = bool(script and str(app) == '/app' and raw.rstrip(b'\0').split(b'\0') == [b'/usr/local/bin/php', os.fsencode(script)])
+            words = [os.fsdecode(word) for word in raw.rstrip(b'\0').split(b'\0')]
+            # A retired direct script can still be writing after its cron entry
+            # and selected path change. Relevance does not authorize its launch.
+            guarded = bool(words[:1] == ['/usr/local/bin/php'] and guarded_relevant(shlex.join(words), app))
             arguments = raw.replace(b"\0", b" ").decode(errors="replace")
             if not guarded and ("artisan" not in arguments or not any(word in arguments for word in ("schedule:run", "schedule:work", "queue:work", "queue:listen", "horizon"))):
                 continue

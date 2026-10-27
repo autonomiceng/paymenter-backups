@@ -352,6 +352,33 @@ class GuardedSchedulerTests(unittest.TestCase):
             self.assertEqual(discovery.systemd(self.state.app, tools), [])
             self.assertEqual(systemd_locks(self.state.app, [str(self.lock)], tools), set())
 
+    def test_retired_live_scheduler_blocks_replacement_lock_coordination(self):
+        from paymenter_backups.maintenance import coordination
+        real_path = type(self.state.root)
+        proc = self.state.root / 'proc'
+        child = proc / str(os.getpid() + 100000)
+        child.mkdir(parents=True)
+        (child / 'cwd').symlink_to('/')
+        cmdline = child / 'cmdline'
+        replacement = self.line.replace('/opt/paymenter/scheduler.php', '/app/artisan schedule:run')
+        envelope = {'settings': {'settings_version': 2, 'job_lock_paths': [], 'lock_timeout': 1},
+                    'tools': {'php': '/usr/local/bin/php'}}
+        for retired in ('/opt/paymenter/old-runner', '/opt/paymenter/artisan'):
+            cmdline.write_bytes(b'/usr/local/bin/php\0' + os.fsencode(retired) + b'\0')
+            for setting in ('', '/opt/paymenter/new-runner'):
+                with self.subTest(retired=retired, setting=setting), patch.dict(os.environ, {'PAYMENTER_BACKUPS_GUARDED_SCHEDULER': setting}), \
+                        patch.object(process.pathlib, 'Path', side_effect=lambda value: proc if str(value) == '/proc' else real_path(value)), \
+                        patch.object(discovery, 'probe', return_value=(0, (replacement + '\n').encode(), b'')), \
+                        patch.object(discovery, 'systemd', return_value=[]):
+                    inventory = discovery.discover(self.state, envelope)
+                    self.assertEqual(discovery.admission(envelope, inventory), ([], [str(self.lock)]))
+                    with self.assertRaisesRegex(BackupError, 'job-workers-running'):
+                        with coordination(self.state, envelope):
+                            self.fail('Capture must not start beside a retired scheduler')
+        cmdline.write_bytes(b'/usr/local/bin/php\0-q\0/other/artisan\0cache:prune-stale-tags\0')
+        with patch.object(process.pathlib, 'Path', side_effect=lambda value: proc if str(value) == '/proc' else real_path(value)):
+            self.assertEqual(process.app_workers(self.state.app), [])
+
     def test_running_guarded_scheduler_is_checked_after_lock_acquisition(self):
         real_path = type(self.state.root)
         proc = self.state.root / 'proc'
@@ -364,8 +391,8 @@ class GuardedSchedulerTests(unittest.TestCase):
             self.assertIn(int(child.name), process.app_workers(self.state.app))
             self.assertEqual(process.app_workers(real_path('/other')), [])
             with patch.dict(os.environ, {'PAYMENTER_BACKUPS_GUARDED_SCHEDULER': ''}):
-                self.assertEqual(process.app_workers(self.state.app), [])
+                self.assertIn(int(child.name), process.app_workers(self.state.app))
             cmdline.write_bytes(b'/usr/local/bin/php\0/opt/paymenter/scheduler.php\0--quiet\0')
-            self.assertEqual(process.app_workers(self.state.app), [])
+            self.assertIn(int(child.name), process.app_workers(self.state.app))
             cmdline.write_bytes(b'/usr/bin/php\0/opt/paymenter/scheduler.php\0')
             self.assertEqual(process.app_workers(self.state.app), [])
