@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "paymenter-backups"
-version = "0.4.2"
+version = "0.4.3"
 description = "Independent, recoverable backups for upstream Paymenter"
 requires-python = ">=3.10"
 license = {text = "MIT"}

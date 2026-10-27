@@ -5,7 +5,7 @@ use App\Attributes\ExtensionMeta;
 use App\Classes\Extension\Extension;
 use Illuminate\Console\Scheduling\Schedule;
 
-#[ExtensionMeta(name: 'Backups', description: 'Scheduled database and full backups for Paymenter, on this server and in encrypted S3 storage, with verified downloads and recovery.', version: '0.4.2', author: 'Autonomic Engineering')]
+#[ExtensionMeta(name: 'Backups', description: 'Scheduled database and full backups for Paymenter, on this server and in encrypted S3 storage, with verified downloads and recovery.', version: '0.4.3', author: 'Autonomic Engineering')]
 class Backups extends Extension
 {
     // Settings are edited on the Backups page; this native page owns lifecycle only.
