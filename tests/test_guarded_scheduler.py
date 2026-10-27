@@ -102,6 +102,31 @@ class GuardedSchedulerTests(unittest.TestCase):
             with self.subTest(script=script), patch.dict(os.environ, {'PAYMENTER_BACKUPS_GUARDED_SCHEDULER': script}):
                 self.assertFalse(discovery.relevant(line, self.state.app))
 
+    def test_direct_obsolete_custom_systemd_launchers_refuse_discovery_and_locks(self):
+        command = '/usr/local/bin/php /opt/paymenter/old-runner'
+        def read(arguments, timeout):
+            if '--user' in arguments:
+                return b'[]'
+            if 'list-timers' in arguments:
+                return b'[{"activates":"old.service"}]'
+            if 'show' in arguments:
+                return (f'Id=old.service\nLoadState=loaded\nUser={os.getuid()}\nWorkingDirectory=/\n'
+                        f'DynamicUser=no\nRestart=no\nExecStart={{ argv[]={command} ; ignore_errors=no ; }}\n').encode()
+            return b'[]'
+        tools = {'systemctl': sys.executable}
+        for value in ('', '/opt/paymenter/renamed.php'):
+            with self.subTest(value=value), patch.dict(os.environ, {'PAYMENTER_BACKUPS_GUARDED_SCHEDULER': value}), \
+                    patch.object(discovery, 'run', side_effect=read), patch('paymenter_backups.maintenance.run', side_effect=read):
+                with self.subTest(check='discovery'):
+                    rows = discovery.systemd(self.state.app, tools)
+                    self.assertEqual(len(rows), 1)
+                    self.assertEqual(rows[0]['coordination'], 'unsupported')
+                    errors, _ = discovery.admission(self.envelope, {'state': 'ok', 'items': rows})
+                    self.assertIn('job-command-unsupported', [item['code'] for item in errors])
+                with self.subTest(check='locks'):
+                    with self.assertRaisesRegex(BackupError, 'job-locks-unverified'):
+                        systemd_locks(self.state.app, [str(self.lock)], tools)
+
     def test_other_app_artisan_php_flags_do_not_become_unknown_scripts(self):
         own = f'/usr/bin/flock -n {self.lock} /usr/local/bin/php /app/artisan schedule:run'
         tools = {'systemctl': sys.executable}

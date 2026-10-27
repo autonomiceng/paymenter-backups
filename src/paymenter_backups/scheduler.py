@@ -46,7 +46,8 @@ def guarded_relevant(line, app):
     # direct PHP script launchers visible when the setting changes or clears;
     # only known Artisan launchers can be delegated to normal app filtering.
     for index, word in enumerate(words):
-        if word != '/usr/local/bin/php':
+        # systemd prefixes the first ExecStart argument with argv[]=.
+        if word.removeprefix('argv[]=') != '/usr/local/bin/php':
             continue
         tail = words[index + 1:]
         # Interpreter options are valid on ordinary Artisan launchers. They
