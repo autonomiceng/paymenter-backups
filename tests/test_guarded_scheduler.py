@@ -96,6 +96,33 @@ class GuardedSchedulerTests(unittest.TestCase):
                 with self.assertRaisesRegex(BackupError, 'job-locks-unverified'):
                     systemd_locks(self.state.app, [str(self.lock)], tools)
 
+    def test_other_app_artisan_php_flags_do_not_become_unknown_scripts(self):
+        own = f'/usr/bin/flock -n {self.lock} /usr/local/bin/php /app/artisan schedule:run'
+        tools = {'systemctl': sys.executable}
+        for flags in ('-q', '-f', '-d memory_limit=512M', '-q -d memory_limit=512M -f'):
+            other = f'/usr/bin/flock -n /private/other.lock /usr/local/bin/php {flags} /other/artisan schedule:run'
+            def read(arguments, timeout):
+                if '--user' in arguments:
+                    return b'[]'
+                if 'list-timers' in arguments:
+                    return b'[{"activates":"own.service"},{"activates":"other.service"}]'
+                if 'show' in arguments:
+                    return '\n\n'.join(
+                        f'Id={name}.service\nLoadState=loaded\nUser={os.getuid()}\nWorkingDirectory=/\nDynamicUser=no\nRestart=no\nExecStart={{ argv[]={line} ; ignore_errors=no ; }}\n'
+                        for name, line in (('own', own), ('other', other))).encode()
+                return b'[]'
+            with self.subTest(flags=flags), patch.dict(os.environ, {'PAYMENTER_BACKUPS_GUARDED_SCHEDULER': ''}):
+                cron = ('* * * * * ' + own + '\n* * * * * ' + other + '\n').encode()
+                with patch.object(discovery, 'probe', return_value=(0, cron, b'')), patch.object(discovery, 'systemd', return_value=[]):
+                    inventory = discovery.discover(self.state, self.envelope)
+                self.assertEqual(len(inventory['items']), 1)
+                self.assertEqual(discovery.admission(self.envelope, inventory), ([], [str(self.lock)]))
+                with patch.object(discovery, 'run', side_effect=read), patch('paymenter_backups.maintenance.run', side_effect=read):
+                    rows = discovery.systemd(self.state.app, tools)
+                    self.assertEqual(len(rows), 1)
+                    self.assertEqual(rows[0]['label'], 'own.service')
+                    self.assertEqual(systemd_locks(self.state.app, [str(self.lock)], tools), {str(self.lock)})
+
     def test_changed_setting_cannot_reuse_previous_guarded_inventory(self):
         inventory = {
             'schema_version': 1, 'parser_version': discovery.PARSER_VERSION,

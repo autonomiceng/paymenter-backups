@@ -40,6 +40,11 @@ def guarded_relevant(line, app):
         if word != '/usr/local/bin/php':
             continue
         tail = words[index + 1:]
+        # Interpreter options are valid on ordinary Artisan launchers. They
+        # cannot turn a different application's job into this app's writer.
+        while tail and tail[0] in ('-q', '-f', '-d'):
+            count = 2 if tail[0] == '-d' else 1
+            tail = tail[count:]
         if not (tail and pathlib.PurePosixPath(tail[0]).name == 'artisan'
                 and any(value in ('schedule:run', 'schedule:work', 'queue:work', 'queue:listen', 'horizon') for value in tail[1:])):
             return True
