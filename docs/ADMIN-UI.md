@@ -107,7 +107,7 @@ Help is a set of collapsible sections with ids for deep links:
 
 Below 640 px the history table uses Filament's stacked-on-mobile layout. Type,
 Size and Stored on move to Details below 768 px (Stored on below 1024 px). The
-two schedule fieldsets stack below 768 px. Commands wrap inside the page.
+two schedule fieldsets stack below 768 px. Commands scroll inside their block.
 
 ### Readiness
 
@@ -160,8 +160,9 @@ shown inline. Use Filament semantic status colors:
 * Use status icons for independent setup conditions. Name each blocker and its
   fix without a blocker count.
 * Render lists with `UnorderedList` and commands with `Text` in the theme's
-  monospace font. Commands are copyable over HTTPS and wrap at 375 px using
-  `overflow-wrap: anywhere; white-space: pre-wrap`.
+  monospace font. Commands are copyable over HTTPS. At 375 px each command line
+  stays whole (`white-space: pre`) and scrolls sideways (`overflow-x: auto`), so
+  words such as `php` never split.
 * Put field help in the field's helper text.
 * Use sentence case and plain labels without decorative headings or metadata.
 

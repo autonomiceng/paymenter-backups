@@ -94,11 +94,11 @@ trait BuildsCommands
         $plain = static fn () => $command instanceof \Closure ? (string) $command() : $command;
         // Keep meaningful whitespace inside its own span: preserving whitespace
         // on the native Text wrapper would also show the template's indentation.
-        return Text::make(static fn () => new \Illuminate\Support\HtmlString('<span style="white-space: pre-wrap">' . e($plain()) . '</span>'))->fontFamily(FontFamily::Mono)
+        return Text::make(static fn () => new \Illuminate\Support\HtmlString('<span style="white-space: pre">' . e($plain()) . '</span>'))->fontFamily(FontFamily::Mono)
             ->copyable(fn () => request()->isSecure())->copyableState($plain)->copyMessage('Copied')
             ->tooltip(fn () => request()->isSecure() ? 'Copy' : null)
-            // The theme's input frame makes a native code block; long paths wrap inside it, copied text is unchanged.
-            ->extraAttributes(['data-backups-command' => true, 'class' => 'fi-input-wrp w-full px-4 py-2 break-words', 'style' => 'overflow-wrap: anywhere']);
+            // Keep command lines intact and scroll long paths inside the theme's input frame.
+            ->extraAttributes(['data-backups-command' => true, 'tabindex' => '0', 'class' => 'fi-input-wrp w-full px-4 py-2', 'style' => 'overflow-wrap: normal; overflow-x: auto; max-width: 100%']);
     }
 
     /** A bulleted list. Items are blocks so each bullet sits on the first line of a wrapped item. */
