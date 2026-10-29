@@ -609,8 +609,8 @@ if ($mode === 'upload') {
         && preg_match('/<a\\b[^>]*href="([^"]+)"[^>]*>the Backups tab<\\/a>/', $queuedView->html(), $schedulerLink)
         && str_contains($schedulerLink[1], 'tab=backups') && str_contains($schedulerLink[1], '#setup'),
         'queued backup does not show one linked scheduler wait line');
-    // Phones stack history rows and wrap long commands instead of pushing actions or text off screen.
-    check(str_contains($queue->html(), 'fi-ta-table-stacked-on-mobile') && str_contains($queue->html(), 'overflow-wrap: anywhere'), 'mobile history or command wrapping missing');
+    // Phones stack history rows. Long commands keep words whole and scroll inside their block, not the page.
+    check(str_contains($queue->html(), 'fi-ta-table-stacked-on-mobile') && str_contains($queue->html(), 'overflow-wrap: normal; overflow-x: auto'), 'mobile history or command scrolling missing');
     // Without a recent cron check-in the page never promises a start time.
     foreach (['within a minute', 'under a minute'] as $promise) { check(!str_contains($queue->html(), $promise), 'unsupported backup-start timing promise: ' . $promise); }
     check(str_contains($queuedText, 'Full backup requirements') && str_contains($queuedText, 'paymenter_backups() {') && str_contains($queuedText, '/usr/bin/flock -n'), 'settings or help guidance missing');

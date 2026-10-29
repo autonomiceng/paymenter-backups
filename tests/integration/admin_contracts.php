@@ -955,7 +955,7 @@ PYTHON;
             $valueNode = $node->getElementsByTagName('span')->item(0);
             testCheck($valueNode !== null && $valueNode->textContent === $passphrase,
                         'Recovery key display changed imported passphrase bytes');
-            testCheck(str_contains($valueNode->getAttribute('style'), 'white-space: pre-wrap'), 'Recovery key display collapses significant whitespace');
+            testCheck($valueNode->getAttribute('style') === 'white-space: pre', 'Recovery key display collapses significant whitespace or splits words');
             testCheck($node->getAttribute('role') === 'button' && $node->getAttribute('tabindex') === '0', 'Recovery key Copy is inaccessible');
             testCheck($node->getAttribute('x-on:keydown.enter.prevent') === '$el.click()'
                         && $node->getAttribute('x-on:keydown.space.prevent') === '$el.click()', 'Recovery key keyboard Copy diverges from click');
