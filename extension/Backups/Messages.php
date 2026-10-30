@@ -8,7 +8,7 @@ final class Messages
         // Scheduling and admission
         'busy' => 'Another backup task was running. This one will try again next minute.',
         'config-changed' => 'Settings changed while you were saving. Open Settings again and re-enter your changes.',
-        'config-save-outcome-unknown' => 'An earlier save wasn\'t confirmed, so backups are paused. Check your settings, enter the new keys again and save.',
+        'config-save-outcome-unknown' => 'The save couldn\'t be confirmed, so backups are paused. Open Settings again and check the settings. Re-enter or remove the S3 keys and site password you tried to change, then save.',
         'config-save-failed' => 'Setup didn\'t finish. Open Settings again and check what was saved.',
         'config-coordination-required' => 'Save couldn\'t lock the settings. Run the normal Save command again.',
         'config-save-incomplete' => 'Save didn\'t finish. Open Settings again and check your settings and keys.',

@@ -30,7 +30,7 @@ trait ManagesCredentials
                 Text::make('Saved')->badge()->color('success')->visible(fn () => $saved() && !$attention()),
                 Text::make('Needs attention')->badge()->color('warning')->visible($attention),
             ])
-            ->description(fn () => 'Only if your web server asks for a username and password before Paymenter loads. Full backups use it to open '
+            ->description(fn () => 'Only if your web server asks for a username and password before Paymenter loads. Full backups use it to check the maintenance page at '
                 . ($site()['probe_base'] ?? 'App URL') . '.')
             ->schema([
                 Text::make(fn () => match ($site()['state'] ?? 'unavailable') {

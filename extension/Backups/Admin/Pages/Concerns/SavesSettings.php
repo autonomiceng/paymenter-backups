@@ -187,7 +187,7 @@ trait SavesSettings
             }
             Notification::make()->title('Save incomplete')->warning()
                 ->body(Messages::withWriterCause((($saved['outcome_unknown'] ?? false)
-                    ? 'Saved settings or keys couldn\'t be confirmed, so backups are paused. Open Settings again, check them, enter the new keys and save.'
+                    ? Messages::error('config-save-outcome-unknown')
                     : (($saved['concurrent_settings_preserved'] ?? false)
                         ? 'Someone else changed settings at the same time, and those changes were kept. Keys you entered weren\'t saved. Open Settings again and check them before trying again.'
                         : 'Some settings couldn\'t be restored, so backups are paused. Keys you entered weren\'t saved. Open Settings again, check them, enter the new keys and save.')), $writerCause))->send();

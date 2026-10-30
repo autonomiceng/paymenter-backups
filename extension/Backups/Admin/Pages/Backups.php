@@ -240,7 +240,7 @@ class Backups extends Page implements HasTable
             ]),
             Section::make('Full backups: what has to be true')->id('full-backups')->collapsible()->schema([
                 Text::make('A full backup waits for running cron jobs and holds their lock files. It then turns on maintenance mode, checks that App URL shows the maintenance page, copies the database and files, and turns maintenance mode off.'),
-                Text::make('A cron job that already started keeps writing during maintenance mode. If it writes during the copy, the database and files in the backup won\'t match. The lock file prevents that.'),
+                Text::make('A cron job without the required lock can keep writing during the backup. The database and files in the backup could then be from different times.'),
                 $bullets([
                     'Every Paymenter cron job uses a lock file. For the scheduler, use the line above.',
                     'No always-on queue worker. A worker started by systemd or Supervisor never stops, so it can\'t be paused. Run queue jobs from cron with their own lock, then stop the service:',
