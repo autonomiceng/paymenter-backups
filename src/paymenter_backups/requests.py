@@ -253,7 +253,7 @@ def tick(state, envelope, command_prefix, envelope_loader=None, database_context
                     atomic_json(path(state, item["request_id"]), item)
                     continue
                 waiting_for_jobs = (item["action"] == "run" and item["arguments"].get("mode") == "database-online"
-                                    and item.get("error") in ("job-lock-busy", "job-coordination-unverified"))
+                                    and "job_wait_since" in item)
                 if now - item["created_at"] > settings["request_max_age"] and not waiting_for_jobs:
                     item["status"] = "expired"
                     atomic_json(path(state, item["request_id"]), item)

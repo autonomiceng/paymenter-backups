@@ -185,7 +185,8 @@ Defaults and prerequisites:
   0 to Sunday 6. Enabling or editing starts at the next future slot. After an
   outage, one fresh backup is queued instead of a backlog. Unstarted tasks
   expire `request_max_age` after creation, default 24 hours, except database
-  backups still waiting for jobs or lock verification.
+  backups that have waited for jobs or lock verification, including later
+  transient deferrals such as billing windows.
   Local DST gaps skip nonexistent slots; repeated wall slots execute once.
 * Mode `full-quiesced`, destination `local`, seven retained runs. Automatic
   retention follows successful run/delivery publication; set

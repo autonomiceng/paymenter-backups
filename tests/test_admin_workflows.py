@@ -248,6 +248,56 @@ class AdminWorkflowTests(unittest.TestCase):
                 self.assertEqual(worker(self.state, self.envelope, item["request_id"])["status"], "complete")
                 self.assertFalse(overview(self.state)["job_wait_overdue"])
 
+    def test_aged_job_wait_retries_through_billing_then_captures(self):
+        # Real admission and durable request transitions catch expiry between attempts.
+        self.fixture.settings["enabled"] = False
+        item = create(self.state, arguments={"mode": "database-online"})
+        now = time.time()
+        item.update(status="deferred", error="job-lock-busy", created_at=now - 86410,
+                    job_wait_since=now - 86401, retry_at=now - 1)
+        atomic_json(requests.path(self.state, item["request_id"]), item)
+        guard_path = self.state.root / "billing-guard.json"
+        guard = read_json(guard_path)
+        guard["instants"] = [now + 20, now + 172800]
+        atomic_json(guard_path, guard)
+        with patch.object(requests, "detach", return_value=os.getpid()):
+            self.assertEqual(requests.tick(self.state, self.envelope, ["fixture-worker"])["launched"], [item["request_id"]])
+            result = worker(self.state, self.envelope, item["request_id"])
+            self.assertEqual((result["status"], result["error"]), ("deferred", "billing-window-protected"))
+            with patch("paymenter_backups.requests.time.time", return_value=now + 241):
+                guard["generated_at"] = now + 241
+                atomic_json(guard_path, guard)
+                self.assertEqual(requests.tick(self.state, self.envelope, ["fixture-worker"])["launched"], [item["request_id"]])
+                self.assertEqual(worker(self.state, self.envelope, item["request_id"])["status"], "complete")
+        self.assertFalse(overview(self.state)["job_wait_overdue"])
+        self.assertEqual(len(overview(self.state)["runs"]), 1)
+
+    def test_no_job_locks_notice_clears_when_configured_capture_defers(self):
+        # Capture must refresh the staff diagnostic even when admission cannot finish.
+        settings = self.fixture.settings
+        lock = pathlib.Path(settings["job_lock_paths"][0])
+        lock.chmod(0o600)
+        settings.update(settings_version=2, lock_timeout=0)
+        crontab = self.envelope["tools"]["crontab"]
+        guard_path = self.state.root / "billing-guard.json"
+        guard = read_json(guard_path)
+        for reason in ("job-lock-busy", "billing-window-protected"):
+            with self.subTest(reason=reason):
+                settings["job_lock_paths"] = []
+                self.envelope["tools"]["crontab"] = str(self.fixture.script("no-jobs", "print('# no jobs')"))
+                self.backup()
+                self.assertEqual(overview(self.state)["database_job_coordination"]["state"], "absent")
+                settings["job_lock_paths"] = [str(lock)]
+                self.envelope["tools"]["crontab"] = crontab
+                if reason == "billing-window-protected":
+                    guard["instants"] = [time.time() + 20, time.time() + 172800]
+                    atomic_json(guard_path, guard)
+                with lock.open("r+b") as held, patch("paymenter_backups.maintenance.DATABASE_LOCK_WAIT", 0):
+                    fcntl.flock(held, fcntl.LOCK_EX)
+                    with self.assertRaisesRegex(BackupError, reason):
+                        capture(self.state, self.envelope)
+                self.assertNotEqual(overview(self.state)["database_job_coordination"]["state"], "absent")
+
     def test_overview_whitelists_presentation_fields(self):
         self.fixture.settings["mode"] = "full-quiesced"
         first = capture(self.state, self.envelope)

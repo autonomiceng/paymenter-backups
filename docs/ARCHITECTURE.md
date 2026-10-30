@@ -455,7 +455,8 @@ excluded from the writer scan; actual children and uncoordinated writers remain 
 initialization do not acquire launcher locks.
 Routine contention stays deferred without a failed run or staff alert. Database
 requests waiting for jobs or failed lock verification retain their retry obligation
-past request_max_age; other age limits and schedule supersession still apply. Requests
+past request_max_age through later transient deferrals; other age limits and schedule
+supersession still apply. Requests
 retain their first job-wait timestamp across superseded hourly slots. Overview
 exposes one job_wait_overdue boolean after a day without a completed capture;
 the page asks staff to inspect stuck scheduler/queue jobs because Backups cannot

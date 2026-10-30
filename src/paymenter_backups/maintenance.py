@@ -280,6 +280,8 @@ def coordination(state, envelope, *, required=True):
             yield False
             return
         if not required:
+            # Freshly verified setup replaces absence even if billing or jobs defer us.
+            atomic_json(state.root / "job-coordination.json", {"state": "verified", "checked_at": time.time()})
             # A partial acquisition can already pause the scheduler.
             billing_admission(state, envelope)
         v2 = envelope["settings"].get("settings_version", 1) == 2
@@ -305,8 +307,6 @@ def coordination(state, envelope, *, required=True):
                 raise BackupError("job-lock-unsafe" if v2 else "job-locks-unverified")
         if app_workers(state.app, held_locks=descriptors):
             raise BackupError("job-workers-running" if v2 else "job-locks-unverified")
-        if not required:
-            atomic_json(state.root / "job-coordination.json", {"state": "verified", "checked_at": time.time()})
         entered = True
         yield True
     except (BackupError, OSError) as error:
