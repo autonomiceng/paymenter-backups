@@ -184,7 +184,8 @@ Defaults and prerequisites:
 * Legacy (settings_version absent/1): schedule disabled; daily at 02:00 UTC when enabled. Weekly weekdays use Monday
   0 to Sunday 6. Enabling or editing starts at the next future slot. After an
   outage, one fresh backup is queued instead of a backlog. Unstarted tasks
-  expire `request_max_age` after creation, default 24 hours.
+  expire `request_max_age` after creation, default 24 hours, except database
+  backups still waiting for jobs or lock verification.
   Local DST gaps skip nonexistent slots; repeated wall slots execute once.
 * Mode `full-quiesced`, destination `local`, seven retained runs. Automatic
   retention follows successful run/delivery publication; set
@@ -211,6 +212,9 @@ Defaults and prerequisites:
   margin 120 seconds, billing guard age 180 seconds. Full capture has a shared
   deadline across inventory, dump, app capture and stability dump. Coordinated
   database-only capture shares one deadline across inventory and dump, with no drain.
+  Its lock wait is max(lock_timeout, 60 seconds), reserving 390 seconds at defaults
+  plus the billing margin. Job/lock-verification waits retain automatic retries
+  past request_max_age. Full mode keeps its configured lock wait.
 * Set `no_concurrent_ddl_acknowledged=true` only after excluding concurrent DDL.
   Full capture also requires `cooperative_writers_acknowledged=true` and
   `external_state_acknowledged=true`, native file maintenance, no external
@@ -247,12 +251,14 @@ php /srv/paymenter/artisan backups:guard
 The native minute tick observes the actual CronJob event expression/timezone and
 next eight days of UTC billing instants. Full admission requires a fresh matching
 guard and excludes the protected billing minute, waits, drain, capture, cleanup
-and margin. Online database mode also needs the guard when job locks are verified;
+and margin. Online database mode also needs the guard when taking job locks;
 it checks before locking and after waiting, without maintenance or a drain.
-If launcher verification fails, database-only mode retains its transactional
-snapshot behavior and needs no guard. Busy verified locks defer until the next tick,
-without a failed backup. One warning appears after a day without progress; check
-for stuck scheduler/queue jobs, which Backups cannot safely stop during data changes.
+Only a complete fresh launcher check proving no coordination is set up permits
+an unlocked database snapshot with no billing guard; the page shows that it can
+overlap jobs. Failed discovery/verification and busy locks defer and retry, without
+a failed backup. Database job waits retain retries past request_max_age. One warning
+appears after a day without progress; check scheduler/queue jobs and their lock setup.
+Backups cannot safely stop jobs during data changes or guess their lock setup.
 Billing daily jobs do not catch up automatically. UTC is recommended.
 
 The tick is the only detached launcher. It launches one durable request with

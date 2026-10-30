@@ -5,6 +5,7 @@ import io
 import json
 import os
 import pathlib
+import select
 import signal
 import subprocess
 import sys
@@ -165,7 +166,7 @@ payload={'status':503,'except':[],'secret':None,'redirect':None,'template':'fixt
                     before = self.state.journals()
                     request = create(self.state, arguments={"mode": "database-online"})
                     atomic_json(request_path(self.state, request["request_id"]), dict(request, status="launching"))
-                    with lock.open("r+b") as held:
+                    with lock.open("r+b") as held, patch("paymenter_backups.maintenance.DATABASE_LOCK_WAIT", 0):
                         fcntl.flock(held, fcntl.LOCK_EX)
                         result = worker(self.state, self.envelope, request["request_id"])
                         self.assertEqual(result["status"], "deferred")
@@ -175,7 +176,7 @@ payload={'status':503,'except':[],'secret':None,'redirect':None,'template':'fixt
                     self.assertTrue(journal["local_complete"])
                     self.assertFalse((self.app / MARKERS[0]).exists())
 
-    def test_online_billing_window_defers_and_unverified_hosts_still_capture(self):
+    def test_online_billing_window_defers_and_proven_unconfigured_hosts_still_capture(self):
         self.settings["mode"] = "database-online"
         lock = pathlib.Path(self.settings["job_lock_paths"][0])
         lock.chmod(0o600)
@@ -197,6 +198,119 @@ payload={'status':503,'except':[],'secret':None,'redirect':None,'template':'fixt
                 self.envelope["tools"]["crontab"] = str(self.script("no-jobs", "print('# no jobs')"))
                 guard_path.unlink()
                 self.assertTrue(capture(self.state, self.envelope)["local_complete"])
+                from paymenter_backups.presentation import overview
+                self.assertEqual(overview(self.state)["database_job_coordination"]["state"], "absent")
+
+    def test_online_discovery_and_verification_failures_never_bypass_known_locks(self):
+        from paymenter_backups.requests import path as request_path, worker
+        self.settings.update(mode="database-online", lock_timeout=0)
+        lock = pathlib.Path(self.settings["job_lock_paths"][0])
+        lock.chmod(0o600)
+        original_crontab = self.envelope["tools"]["crontab"]
+        for version in (1, 2):
+            for failure in ("discovery", "unsafe-lock"):
+                with self.subTest(version=version, failure=failure):
+                    self.settings.update(settings_version=version, job_lock_paths=[str(lock)])
+                    self.envelope["tools"]["crontab"] = (str(self.script("broken-crontab", "raise SystemExit(2)"))
+                                                           if failure == "discovery" else original_crontab)
+                    lock.chmod(0o600 if failure == "discovery" else 0o400)
+                    request = create(self.state, arguments={"mode": "database-online"})
+                    atomic_json(request_path(self.state, request["request_id"]), dict(request, status="launching"))
+                    with lock.open("rb") as held:
+                        fcntl.flock(held, fcntl.LOCK_EX)
+                        result = worker(self.state, self.envelope, request["request_id"])
+                    self.assertEqual((result["status"], result["error"]), ("deferred", "job-coordination-unverified"))
+                    self.assertEqual(self.state.journals(), [])
+                    self.assertIn("job_wait_since", json.loads(request_path(self.state, request["request_id"]).read_text()))
+        # An empty override cannot make failed discovery proof of absent setup.
+        self.settings["job_lock_paths"] = []
+        self.envelope["tools"]["crontab"] = str(self.script("broken-crontab", "raise SystemExit(2)"))
+        with self.assertRaisesRegex(BackupError, "job-coordination-unverified"):
+            capture(self.state, self.envelope)
+
+    def test_online_outlasts_a_normal_fifty_second_queue_run(self):
+        # Real queue process and flock: a short mocked wait misses minute-boundary starvation.
+        self.settings.update(mode="database-online", settings_version=2)
+        scheduler = pathlib.Path(self.settings["job_lock_paths"][0])
+        scheduler.chmod(0o600)
+        queue = self.base / "queue.lock"
+        queue.touch(mode=0o600)
+        cron = (f"* * * * * /usr/bin/flock -n {scheduler} /usr/bin/php {self.app}/artisan schedule:run\n"
+                f"* * * * * /usr/bin/flock -n {queue} /usr/bin/php {self.app}/artisan queue:work --stop-when-empty --max-time=50")
+        self.envelope["tools"]["crontab"] = str(self.script("crontab", "print(" + repr(cron) + ")"))
+        self.settings["job_lock_paths"].append(str(queue))
+        done = self.base / "queue-finished"
+        php = self.script("queue-php", f"import pathlib,time\nprint('ready', flush=True)\ntime.sleep(50)\npathlib.Path({str(done)!r}).touch()")
+        proc = subprocess.Popen(["/usr/bin/flock", "-n", str(queue), str(php), str(self.app / "artisan"),
+                                 "queue:work", "--stop-when-empty", "--max-time=50"], stdout=subprocess.PIPE,
+                                start_new_session=True)
+        try:
+            self.assertTrue(select.select([proc.stdout], [], [], 5)[0])
+            self.assertEqual(proc.stdout.readline(), b"ready\n")
+            journal = capture(self.state, self.envelope)
+            self.assertTrue(journal["local_complete"])
+            self.assertTrue(done.exists())
+            self.assertEqual(proc.wait(timeout=5), 0)
+        finally:
+            if proc.poll() is None:
+                os.killpg(proc.pid, signal.SIGTERM)
+                proc.wait(timeout=5)
+            proc.stdout.close()
+
+    def test_online_billing_reserves_the_longer_queue_wait(self):
+        self.settings.update(mode="database-online", capture_timeout=300, lock_timeout=15, billing_margin_seconds=0)
+        now = time.time()
+        guard_path = self.state.root / "billing-guard.json"
+        guard = json.loads(guard_path.read_text())
+        guard["instants"] = [now + 370, now + 172800]
+        atomic_json(guard_path, guard)
+        with self.assertRaisesRegex(BackupError, "billing-window-protected"):
+            capture(self.state, self.envelope)
+        self.assertEqual(self.state.journals(), [])
+
+    def test_waiting_flock_launcher_is_not_a_writer_but_uncoordinated_php_is(self):
+        from paymenter_backups.maintenance import coordination
+        self.settings.update(mode="database-online", settings_version=2)
+        lock = pathlib.Path(self.settings["job_lock_paths"][0])
+        lock.chmod(0o600)
+        php = self.script("sleeping-php", "import time; print('ready', flush=True); time.sleep(20)")
+        # Spawn the launcher only once Backups owns the lock, immediately before its writer scan.
+        from paymenter_backups.process import app_workers
+        processes = []
+        def scan(app, *args, **kwargs):
+            if not processes:
+                waiter = subprocess.Popen(["/usr/bin/flock", str(lock), str(php), str(self.app / "artisan"), "queue:work"],
+                                          stdout=subprocess.PIPE, start_new_session=True)
+                processes.append(waiter)
+                until = time.monotonic() + 5
+                while time.monotonic() < until:
+                    if any("->" in line and str(waiter.pid) in line.split()
+                           for line in pathlib.Path("/proc/locks").read_text().splitlines()):
+                        break
+                    time.sleep(0.01)
+            return app_workers(app, *args, **kwargs)
+        try:
+            with patch("paymenter_backups.maintenance.app_workers", side_effect=scan):
+                self.assertTrue(capture(self.state, self.envelope)["local_complete"])
+            self.assertTrue(select.select([processes[0].stdout], [], [], 5)[0])
+            self.assertEqual(processes[0].stdout.readline(), b"ready\n")
+            # Stop the cooperating process, then start a real writer without any lock.
+            os.killpg(processes[0].pid, signal.SIGTERM)
+            processes[0].wait(timeout=5)
+            writer = subprocess.Popen([str(php), str(self.app / "artisan"), "queue:work"],
+                                      stdout=subprocess.PIPE, start_new_session=True)
+            processes.append(writer)
+            self.assertTrue(select.select([writer.stdout], [], [], 5)[0])
+            self.assertEqual(writer.stdout.readline(), b"ready\n")
+            with self.assertRaisesRegex(BackupError, "job-workers-running"):
+                with coordination(self.state, self.envelope):
+                    self.fail("a real writer was ignored")
+        finally:
+            for proc in processes:
+                if proc.poll() is None:
+                    os.killpg(proc.pid, signal.SIGTERM)
+                    proc.wait(timeout=5)
+                proc.stdout.close()
 
     def test_online_inventory_and_dump_share_one_deadline(self):
         self.settings.update(mode="database-online", capture_timeout=1.5)

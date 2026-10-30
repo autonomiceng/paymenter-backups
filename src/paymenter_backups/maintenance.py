@@ -20,9 +20,16 @@ import urllib.request
 import uuid
 
 from .scheduler import cron_environment_assignment, guarded_relevant
-from .common import BackupError, identity, read_json
+from .common import BackupError, atomic_json, identity, read_json
 from .config import billing_fingerprint
 from .process import app_workers, group_members, run
+
+
+DATABASE_LOCK_WAIT = 60
+
+
+def job_lock_wait(settings):
+    return max(settings["lock_timeout"], DATABASE_LOCK_WAIT) if settings.get("mode") == "database-online" else settings["lock_timeout"]
 
 
 PROBE_TIMEOUT = 10
@@ -202,7 +209,7 @@ def billing_admission(state, envelope, now=None):
     except (KeyError, TypeError, ValueError, BackupError):
         raise BackupError("billing-guard-stale") from None
     drain = settings["drain_seconds"] if settings["mode"] == "full-quiesced" else 0
-    bound = settings["lock_timeout"] + drain + settings["capture_timeout"] + 30
+    bound = job_lock_wait(settings) + drain + settings["capture_timeout"] + 30
     margin = settings["billing_margin_seconds"]
     for instant in protected:
         if now <= instant + 60 + margin and now + bound >= instant - margin:
@@ -212,13 +219,13 @@ def billing_admission(state, envelope, now=None):
             "expression": guard.get("expression")}
 
 
-def coordination_paths(state, envelope):
+def coordination_paths(state, envelope, inventory=None):
     """Verify launcher configuration before taking any of its locks."""
     paths = envelope["settings"]["job_lock_paths"]
     v2 = envelope["settings"].get("settings_version", 1) == 2
-    if v2:
+    if v2 or (inventory is not None and not paths):
         from .discovery import admission, discover
-        errors, paths = admission(envelope, discover(state, envelope))
+        errors, paths = admission(envelope, inventory if inventory is not None else discover(state, envelope))
         if errors:
             first = errors[0]
             raise BackupError(first["code"], first["field"], first["detail"])
@@ -247,27 +254,36 @@ def coordination_paths(state, envelope):
     return paths
 
 
+def database_coordination_paths(state, envelope):
+    """Only a complete inventory with no configured/discovered locks proves no setup."""
+    from .discovery import discover
+    inventory = discover(state, envelope)
+    if inventory["state"] != "ok":
+        raise BackupError(inventory["error"] or "job-discovery-incomplete")
+    if not envelope["settings"]["job_lock_paths"] and all(
+            item["coordination"] in ("uncoordinated", "continuous") and item["lock"] is None
+            for item in inventory["items"]):
+        return []
+    return coordination_paths(state, envelope, inventory)
+
+
 @contextlib.contextmanager
 def coordination(state, envelope, *, required=True):
-    # Database-only captures remain available on hosts without verified launchers.
-    # Once verified, contention and changed lock identities must never fall back.
-    try:
-        paths = coordination_paths(state, envelope)
-    except (BackupError, OSError) as error:
-        if required:
-            if isinstance(error, OSError):
-                raise BackupError("job-locks-unverified") from None
-            raise
-        yield False
-        return
-    if not required:
-        # Includes the whole wait: the scheduler lock may be acquired before a
-        # busy queue lock, so checking only after all locks would be too late.
-        billing_admission(state, envelope)
-    v2 = envelope["settings"].get("settings_version", 1) == 2
     descriptors = []
+    entered = False
     try:
-        deadline = time.monotonic() + envelope["settings"]["lock_timeout"]
+        paths = coordination_paths(state, envelope) if required else database_coordination_paths(state, envelope)
+        if not paths:
+            # This explicit, successful discovery result is the only unlocked path.
+            atomic_json(state.root / "job-coordination.json", {"state": "absent", "checked_at": time.time()})
+            entered = True
+            yield False
+            return
+        if not required:
+            # A partial acquisition can already pause the scheduler.
+            billing_admission(state, envelope)
+        v2 = envelope["settings"].get("settings_version", 1) == 2
+        deadline = time.monotonic() + (job_lock_wait(envelope["settings"]) if not required else envelope["settings"]["lock_timeout"])
         for path in sorted(set(paths)):
             descriptor = os.open(path, os.O_RDWR | os.O_NOFOLLOW)
             descriptors.append(descriptor)
@@ -287,11 +303,21 @@ def coordination(state, envelope, *, required=True):
             held = os.fstat(descriptor)
             if (current.st_dev, current.st_ino) != (held.st_dev, held.st_ino):
                 raise BackupError("job-lock-unsafe" if v2 else "job-locks-unverified")
-        if app_workers(state.app):
+        if app_workers(state.app, held_locks=descriptors):
             raise BackupError("job-workers-running" if v2 else "job-locks-unverified")
+        if not required:
+            atomic_json(state.root / "job-coordination.json", {"state": "verified", "checked_at": time.time()})
+        entered = True
         yield True
-    except OSError:
-        raise BackupError("job-locks-unverified") from None
+    except (BackupError, OSError) as error:
+        if not required and not entered and (isinstance(error, OSError) or error.code not in (
+                "job-lock-busy", "billing-guard-stale", "billing-window-protected")):
+            cause = error.code if isinstance(error, BackupError) else "job-locks-unverified"
+            atomic_json(state.root / "job-coordination.json", {"state": "unverified", "checked_at": time.time(), "error": cause})
+            raise BackupError("job-coordination-unverified") from None
+        if isinstance(error, OSError):
+            raise BackupError("job-locks-unverified") from None
+        raise
     finally:
         for descriptor in reversed(descriptors):
             os.close(descriptor)

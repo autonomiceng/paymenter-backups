@@ -20,6 +20,7 @@ final class Messages
         'schedule-kind-required' => 'Name the schedule: add --kind full or --kind database.',
         'scheduler-missing' => 'No cron job runs Paymenter\'s scheduler. Add the cron job shown on the Backups tab.',
         'job-lock-busy' => 'A Paymenter scheduled or queue job was still running. The backup will try again next minute.',
+        'job-coordination-unverified' => 'Backups could not verify Paymenter job locks. The backup will try again next minute.',
         'job-locks-unverified' => 'A Paymenter cron job or queue worker has no lock file. The Backups tab shows which one and the line to use instead.',
         'job-uncoordinated' => 'A Paymenter cron job has no lock file. Replace it with the line shown on the Backups tab.',
         'job-unparseable' => 'Backups can\'t read one of Paymenter\'s cron jobs. Replace it with the line shown on the Backups tab.',

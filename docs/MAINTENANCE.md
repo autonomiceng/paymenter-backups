@@ -100,12 +100,15 @@ quota and MariaDB client/object visibility. UTC avoids backup schedule DST gaps
 and repeats. Native billing instants are observed for the next eight days, including
 DST; a fresh guard is mandatory whenever capture takes job locks, including
 database-only capture. Database-only capture waits for verified jobs without
-maintenance or a drain, and defers around billing. Without verified launchers it
-keeps its existing transactional snapshot behavior. Inventory and dumping share
+maintenance or a drain, and defers around billing. Its lock wait is at least
+60 seconds so it can outlast the normal 50-second queue run. Only a complete fresh
+check proving no coordination is set up permits an unlocked snapshot, shown on
+the page as able to overlap jobs. Failed discovery or verification retries safely. Inventory and dumping share
 one capture timeout; compression and upload run after releasing the locks.
 A scheduled native billing minute has no catch-up guarantee after a lock hold.
-Busy jobs are routine: queued backups try again automatically. One warning appears
-after a day without progress; check scheduler and queue jobs for a stuck lock.
+Busy jobs are routine: queued database backups keep retrying past their normal
+request age while jobs or failed lock checks block them. One warning appears
+after a day without progress; check scheduler and queue jobs and their lock setup.
 Backups cannot safely stop a job that may be changing data.
 
 Keep credentials and private operational logs outside this public

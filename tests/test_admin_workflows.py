@@ -215,7 +215,7 @@ class AdminWorkflowTests(unittest.TestCase):
         self.fixture.settings["lock_timeout"] = 0
         item = create(self.state, arguments={"mode": "database-online"})
         atomic_json(requests.path(self.state, item["request_id"]), dict(item, status="launching"))
-        with open(self.fixture.settings["job_lock_paths"][0], "r+b") as held:
+        with open(self.fixture.settings["job_lock_paths"][0], "r+b") as held, patch("paymenter_backups.maintenance.DATABASE_LOCK_WAIT", 0):
             fcntl.flock(held, fcntl.LOCK_EX)
             self.assertEqual(worker(self.state, self.envelope, item["request_id"])["status"], "deferred")
         self.assertEqual(overview(self.state)["runs"], [])
@@ -228,6 +228,25 @@ class AdminWorkflowTests(unittest.TestCase):
         self.assertTrue(overview(self.state)["job_wait_overdue"])
         self.backup()
         self.assertFalse(overview(self.state)["job_wait_overdue"])
+
+    def test_database_job_wait_survives_request_age_then_runs_without_another_click(self):
+        self.fixture.settings.update(enabled=False, lock_timeout=0)
+        for reason in ("job-lock-busy", "job-coordination-unverified"):
+            with self.subTest(reason=reason):
+                item = create(self.state, arguments={"mode": "database-online"})
+                now = time.time()
+                item.update(status="deferred", error=reason, created_at=now - 86410,
+                            job_wait_since=now - 86401, retry_at=now - 1)
+                atomic_json(requests.path(self.state, item["request_id"]), item)
+                with patch("paymenter_backups.presentation.time.time", return_value=now + 86402):
+                    item["job_wait_since"] = now
+                    atomic_json(requests.path(self.state, item["request_id"]), item)
+                    self.assertTrue(overview(self.state)["job_wait_overdue"])
+                with patch.object(requests, "detach", return_value=os.getpid()):
+                    result = requests.tick(self.state, self.envelope, ["fixture-worker"])
+                self.assertEqual(result["launched"], [item["request_id"]])
+                self.assertEqual(worker(self.state, self.envelope, item["request_id"])["status"], "complete")
+                self.assertFalse(overview(self.state)["job_wait_overdue"])
 
     def test_overview_whitelists_presentation_fields(self):
         self.fixture.settings["mode"] = "full-quiesced"

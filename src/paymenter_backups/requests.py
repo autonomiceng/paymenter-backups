@@ -252,7 +252,9 @@ def tick(state, envelope, command_prefix, envelope_loader=None, database_context
                     item.update(status="cancelled", error="schedule-superseded", updated_at=now)
                     atomic_json(path(state, item["request_id"]), item)
                     continue
-                if now - item["created_at"] > settings["request_max_age"]:
+                waiting_for_jobs = (item["action"] == "run" and item["arguments"].get("mode") == "database-online"
+                                    and item.get("error") in ("job-lock-busy", "job-coordination-unverified"))
+                if now - item["created_at"] > settings["request_max_age"] and not waiting_for_jobs:
                     item["status"] = "expired"
                     atomic_json(path(state, item["request_id"]), item)
                     continue
@@ -432,7 +434,7 @@ def worker(state, envelope, request_id, envelope_loader=None, database_context=N
         if error.code == "initial-maintenance-scheduled-skip":
             item["status"] = "skipped"
         item["error"] = error.code
-        if error.code == "job-lock-busy":
+        if error.code in ("job-lock-busy", "job-coordination-unverified"):
             item.setdefault("job_wait_since", time.time())
         if item["status"] == "deferred":
             item["retry_at"] = time.time() + 60

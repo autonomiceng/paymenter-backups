@@ -116,8 +116,10 @@ trait BuildsPageContent
     {
         $pending = fn () => (int) ($this->overview()['s3_pending']['count'] ?? 0);
         return [
+            Text::make('No job locks are set up. Database backups can overlap Paymenter jobs.')
+                ->visible(fn () => ($this->overview()['database_job_coordination']['state'] ?? null) === 'absent'),
             Callout::make('Database backups have waited a day for Paymenter jobs')->warning()
-                ->description('Backups keep trying automatically. A job may be stuck holding its lock. Check the scheduler and queue jobs; let them finish or fix the stuck job. Backups cannot stop a job safely while it may be changing data.')
+                ->description('Check scheduler and queue jobs and their lock setup on this tab. Waiting backups retry automatically. If none is waiting, queue a database backup. Backups cannot safely stop a job that may be changing data or guess which locks protect it.')
                 ->visible(fn () => (bool) ($this->overview()['job_wait_overdue'] ?? false)),
             Callout::make('Backups in S3 aren\'t encrypted')->info()
                 ->description('Save settings to turn on encryption for new uploads. Backups already in S3 stay as they are.')

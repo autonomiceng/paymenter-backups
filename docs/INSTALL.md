@@ -223,7 +223,10 @@ configuration.checks.jobs.suggestions. They include a private flock and accepted
 >/dev/null 2>&1 tail. Replace the existing scheduler entry rather than adding a
 second one. Backups never writes crontab or systemd configuration. A continuous
 queue service must be replaced with bounded coordinated work before full mode;
-database-only mode still works without verified job locks or local store classification.
+database-only mode still works without job-lock setup or local store classification.
+A complete fresh launcher check must prove no coordination is set up; the page
+shows that these database snapshots can overlap jobs. Failed checks retry rather
+than bypassing locks.
 When locks are verified, database-only mode waits for scheduled/queue jobs and
 avoids the daily billing window. It releases the locks after the dump and uses
 no maintenance mode or drain.

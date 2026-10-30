@@ -294,11 +294,40 @@ def hash_stream(command, timeout, register=None):
             proc.stdout.close()
 
 
-def app_workers(app):
+def waiting_launchers(held_locks):
+    """Kernel-proven flock waiters cannot spawn a writer while we own these inodes."""
+    held = set()
+    for descriptor in held_locks:
+        info = os.fstat(descriptor)
+        held.add((os.major(info.st_dev), os.minor(info.st_dev), info.st_ino))
+    if not held:
+        return set()
+    waiting = set()
+    try:
+        lines = pathlib.Path("/proc/locks").read_text().splitlines()
+    except OSError:
+        return waiting  # Missing proof keeps the process in the writer scan.
+    for line in lines:
+        fields = line.split()
+        if len(fields) < 8 or fields[1:4] != ["->", "FLOCK", "ADVISORY"]:
+            continue
+        try:
+            major, minor, inode = fields[6].split(":")
+            if (int(major, 16), int(minor, 16), int(inode)) in held:
+                pid = int(fields[5])
+                if os.path.samefile(f"/proc/{pid}/exe", "/usr/bin/flock"):
+                    waiting.add(pid)
+        except (OSError, ValueError):
+            continue
+    return waiting
+
+
+def app_workers(app, *, held_locks=()):
     from .scheduler import guarded_relevant
     found = []
+    waiters = waiting_launchers(held_locks)
     for path in pathlib.Path("/proc").iterdir():
-        if not path.name.isdigit() or int(path.name) == os.getpid():
+        if not path.name.isdigit() or int(path.name) == os.getpid() or int(path.name) in waiters:
             continue
         try:
             if path.stat().st_uid != os.getuid():

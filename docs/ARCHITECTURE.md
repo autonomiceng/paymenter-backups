@@ -413,8 +413,9 @@ including drain/capture bounds, lock waits, safety margin and deferral. Record
 the protected minute and actual hold interval. Coordinated database-only capture
 checks billing before taking any lock and again after waiting. Its inventory and
 dump share capture_timeout; compression, hashing and upload follow lock release.
-The billing admission bound is lock_timeout + capture_timeout + 30 seconds,
-plus billing_margin_seconds around the native minute (full mode also adds drain).
+The database billing admission bound is max(lock_timeout, 60) + capture_timeout + 30 seconds,
+plus billing_margin_seconds around the native minute. Full mode retains
+lock_timeout + drain_seconds + capture_timeout + 30.
 The extra 30 seconds covers process termination and release overhead. Native
 Laravel daily schedules do not catch up automatically after a skipped minute. UTC is recommended;
 document and test DST gaps and repeated local slots.
@@ -441,15 +442,20 @@ are rechecked after acquisition. init creates only the suggested scheduler.lock
 and queue.lock as 0600 owner-private regular files and validates existing
 descriptors without acquiring these launcher locks. Full capture requires these
 locks. Database-only capture also takes the verified locks, waits up to
-lock_timeout, and defers when a job is still running. It uses
+max(lock_timeout, 60 seconds), and defers when a job is still running. This spans
+the suggested queue worker's 50-second run; billing admission reserves that wait. It uses
 no maintenance mode or drain. Locks keep a multi-step job out of the dump; a
 transactional snapshot alone cannot make its separate writes atomic.
-If launcher verification fails before acquisition,
-database-only capture retains its transactional, uncoordinated behavior so skipped
-host setup does not stop database backups. A busy or changed verified lock never
-falls back to an uncoordinated dump. Settings saves, schedule changes and
+Only a complete fresh launcher inventory with no configured or discovered
+coordination permits database-only capture without locks. The page shows that
+these snapshots may overlap jobs, preserving availability when setup was skipped.
+Discovery or verification failures defer and retry; none authorize an unlocked dump.
+Blocked flock launchers proven by kernel wait records for our held inodes are
+excluded from the writer scan; actual children and uncoordinated writers remain checked. Settings saves, schedule changes and
 initialization do not acquire launcher locks.
-Routine contention stays deferred without a failed run or staff alert. Requests
+Routine contention stays deferred without a failed run or staff alert. Database
+requests waiting for jobs or failed lock verification retain their retry obligation
+past request_max_age; other age limits and schedule supersession still apply. Requests
 retain their first job-wait timestamp across superseded hourly slots. Overview
 exposes one job_wait_overdue boolean after a day without a completed capture;
 the page asks staff to inspect stuck scheduler/queue jobs because Backups cannot
