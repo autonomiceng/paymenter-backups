@@ -193,7 +193,7 @@ trait BuildsSettingsForm
                             $tool('mysql', 'mysql or mariadb client'), $tool('tar', 'tar'), $tool('gzip', 'gzip'), $tool('gpg', 'GnuPG (gpg)'),
                         ]),
                         Fieldset::make('Time limits')->columns(['default' => 1, 'md' => 2])->schema([
-                            $integer('capture_timeout', 'Backup time limit', 'seconds', 'Also the longest a full backup keeps the site in maintenance mode.'),
+                            $integer('capture_timeout', 'Backup time limit', 'seconds', 'Limits the database export and file copy. The site also stays in maintenance mode while it waits for open requests and cleans up.'),
                             $integer('drain_seconds', 'Wait for open requests', 'seconds', 'After maintenance mode starts, wait this long for page loads already in progress to finish.'),
                             $integer('lock_timeout', 'Wait for running cron jobs', 'seconds', 'If a Paymenter cron job is running, wait this long before trying again next minute.'),
                             $integer('billing_margin_seconds', 'Billing safety margin', 'seconds', 'Extra time kept clear before and after Paymenter\'s daily billing run.'),

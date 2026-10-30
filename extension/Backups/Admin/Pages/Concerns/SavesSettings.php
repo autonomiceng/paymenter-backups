@@ -141,7 +141,7 @@ trait SavesSettings
             if (in_array($code, ['config-save-outcome-unknown', 'config-write-outcome-unknown'], true)) {
                 Notification::make()->title('Save outcome unknown')->warning()
                     ->body(Messages::withWriterCause(
-                        'Open Settings again and check what was saved before trying again. Keys you entered were cleared.', $cause
+                        Messages::error('config-save-outcome-unknown'), $cause
                     ))->send();
             } else {
                 $field = $error instanceof \Paymenter\Extensions\Others\Backups\EngineCommandException ? $error->field : null;

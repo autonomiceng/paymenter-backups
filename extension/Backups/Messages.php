@@ -8,7 +8,7 @@ final class Messages
         // Scheduling and admission
         'busy' => 'Another backup task was running. This one will try again next minute.',
         'config-changed' => 'Settings changed while you were saving. Open Settings again and re-enter your changes.',
-        'config-save-outcome-unknown' => 'The save couldn\'t be confirmed, so backups are paused. Open Settings again and check the settings. Re-enter the S3 keys and site password you tried to change, then save.',
+        'config-save-outcome-unknown' => 'The save couldn\'t be confirmed, so backups are paused. Refresh this page, check the saved settings, then re-enter or remove the S3 keys or site password you tried to change and save.',
         'config-save-failed' => 'Setup didn\'t finish. Open Settings again and check what was saved.',
         'config-coordination-required' => 'Save couldn\'t lock the settings. Run the normal Save command again.',
         'config-save-incomplete' => 'Save didn\'t finish. Open Settings again and check your settings and keys.',
@@ -143,7 +143,7 @@ final class Messages
         'legacy-plaintext-delivery-blocked' => 'This unfinished upload isn\'t encrypted, and your settings require encryption. Trying again can\'t change that. Ask your server administrator to resolve the upload, or allow unencrypted uploads in Settings, Storage.',
 
         // Capture
-        'maintenance-probe-failed' => 'Full backup stopped: App URL didn\'t show the maintenance page (HTTP 503). Check App URL and any redirect, proxy or CDN. If the site asks for a password, add it under Site password.',
+        'maintenance-probe-failed' => 'Full backup stopped: App URL didn\'t show Paymenter\'s maintenance page (HTTP 503). Check App URL and any redirect, proxy or CDN. If the site asks for a password, add it under Site password.',
         'maintenance-unsafe' => 'Full backups need Paymenter\'s standard maintenance mode, with no secret bypass URL or redirect. Run php artisan up, then try again.',
         'maintenance-driver-unsupported' => 'Full backups need file-based maintenance mode. Set APP_MAINTENANCE_DRIVER=file in .env.',
         'maintenance-changed' => 'Someone turned maintenance mode on or off during the backup. Try again.',

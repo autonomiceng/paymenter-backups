@@ -226,7 +226,7 @@ class Backups extends Page implements HasTable
         return [
             Section::make('What\'s in a backup')->id('backup-contents')->collapsible()->collapsed()->schema([
                 $bullets([
-                    'Full backup: the database and every file in Paymenter\'s folder, including .env, APP_KEY, uploads and extensions. The site shows its maintenance page (HTTP 503) during the copy, up to the backup time limit.',
+                    'Full backup: the database and every file in Paymenter\'s folder, including .env, APP_KEY, uploads and extensions. The site stays in maintenance mode (HTTP 503) for the copy, plus the wait for open requests and cleanup.',
                     'Database backup: the database only. The site stays online. To restore, you also need Paymenter\'s files, from a full backup or your own copy.',
                     'Backups contain customer data and secrets (.env, APP_KEY). Keep downloads private. Saved S3 keys, site passwords and recovery keys are never included.',
                 ]),
