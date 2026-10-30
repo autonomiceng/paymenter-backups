@@ -213,7 +213,7 @@ trait ManagesRecoveryKeys
         return Action::make('rotateRecoveryKey')->label('Create a new recovery key')->color('gray')->link()
             ->visible(fn () => $this->keyState() === 'active' && $this->pendingKeyShort() === null)
             ->requiresConfirmation()->modalHeading('Create a new recovery key?')
-            ->modalDescription('New backups in S3 will use the new key. Earlier backups still need their earlier keys, so keep every recovery key you\'ve saved. Uploads keep using the current key until you save the new one and confirm.')
+            ->modalDescription('Keep every recovery key you\'ve saved: earlier backups still need them. New uploads switch to the new key after you save it and confirm.')
             ->modalSubmitActionLabel('Create key')
             ->action(function () {
                 $this->authorizeAction();

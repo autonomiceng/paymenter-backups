@@ -30,11 +30,11 @@ final class RecoveryKeyController
             $record = Runtime::exportRecoveryKey($fingerprint);
         } catch (\Throwable $error) {
             // A safe code only. Never interpolate child output or secret-bearing exceptions.
-            return new Response('Recovery key unavailable. Open Backups and try again.', 409, self::headers());
+            return new Response('Could not load the recovery key. Open Backups and try again.', 409, self::headers());
         }
         $uuid = $record['installation_uuid'] ?? '';
         if (!is_string($uuid) || !preg_match('/^[a-f0-9-]{36}$/D', $uuid)) {
-            return new Response('Recovery key unavailable.', 409, self::headers());
+            return new Response('Could not load the recovery key. Open Backups and try again.', 409, self::headers());
         }
         $parameters = $record['parameters'];
         $body = "Paymenter Backups recovery key\n\n"

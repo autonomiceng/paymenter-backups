@@ -78,7 +78,7 @@ trait BuildsHistoryTable
             }
             $origin = $run['request_id'] && isset($scheduled[$run['request_id']]) ? ($scheduled[$run['request_id']] ? 'Scheduled' : 'Manual') : null;
             $rows[] = ['__key' => $run['run_id'], 'kind' => 'run', 'request_id' => null, 'created_at' => $run['created_at'],
-                'type' => Messages::type($run['mode']), 'origin' => $origin, 'size' => $run['size'], 'size_label' => $run['size'] === null ? 'Unknown' : Messages::bytes($run['size']), 'status_label' => $label, 'status_color' => $color,
+                'type' => Messages::type($run['mode']), 'origin' => $origin, 'size' => $run['size'], 'size_label' => Messages::bytes($run['size']), 'status_label' => $label, 'status_color' => $color,
                 'detail' => $detail, 'location' => Messages::location($run, $uploads), 'cancel_request' => $cancel,
                 'run_id' => $run['run_id'], 'run' => $run];
         }
@@ -276,7 +276,7 @@ trait BuildsHistoryTable
                 TextEntry::make('d_size')->label('Size')->state(Messages::bytes($run['size'])),
                 TextEntry::make('d_location')->label('Stored on')->state($record['location']),
                 TextEntry::make('d_remote_format')->label('S3 copy')->state($format . (($run['ciphertext_size'] ?? null) !== null ? ', ' . Messages::bytes($run['ciphertext_size']) : ''))->visible($format !== null),
-                TextEntry::make('d_verified')->label('Last verified')->state($run['verified_at'] ? $this->time($run['verified_at'], true) . ($run['verification_source'] === 'capture' ? ' (at creation)' : '') : 'Not recorded'),
+                TextEntry::make('d_verified')->label('Last verified')->state($run['verified_at'] ? $this->time($run['verified_at'], true) . ($run['verification_source'] === 'capture' ? ' (at creation)' : '') : 'Not verified yet'),
                 TextEntry::make('d_status')->label('Status')->state($record['status_label']),
                 TextEntry::make('d_retrieved')->label('Downloaded copy kept until')->state(fn () => $this->time($run['local_download_until'] ?? null, true))
                     ->visible((bool) ($run['local_download_until'] ?? null)),

@@ -178,7 +178,7 @@ echo json_encode([
         self.assertEqual(json.loads(result.stdout), [
             'Settings were not saved. Writer cause: busy.',
             'Settings were not saved.',
-            'Saved credentials or recovery keys could not be read. Restore the matching APP_KEY or APP_PREVIOUS_KEYS and keep credentials.json. Replacing it can lose keys needed for earlier S3 backups.',
+            'Saved keys can\'t be read. Restore the matching APP_KEY or APP_PREVIOUS_KEYS and keep credentials.json. Replacing it can lose keys for earlier S3 backups.',
         ])
 
     def test_save_errors_keep_the_field_and_have_direct_repair_guidance(self):
@@ -325,12 +325,12 @@ echo json_encode([
                                   'credentials-unreadable'))
         cipher = messages['delivery-ciphertext-unavailable'][1].lower()
         legacy = messages['legacy-plaintext-delivery-blocked'][1].lower()
-        self.assertIn('exact bytes', cipher)
-        self.assertIn('operator', cipher)
-        self.assertIn('cannot recreate', cipher)
+        self.assertIn('exact file', cipher)
+        self.assertIn('server administrator', cipher)
+        self.assertIn("can't recreate", cipher)
         self.assertIn('unencrypted', legacy)
-        self.assertIn('explicitly authorize', legacy)
-        self.assertIn('cannot change its format', legacy)
+        self.assertIn('allow unencrypted uploads', legacy)
+        self.assertIn("can't change that", legacy)
         self.assertNotIn('upload again', cipher + legacy)
         credential = messages['credentials-unreadable'][1]
         self.assertIn('keep credentials.json', credential)

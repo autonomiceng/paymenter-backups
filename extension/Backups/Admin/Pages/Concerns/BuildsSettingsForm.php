@@ -68,7 +68,7 @@ trait BuildsSettingsForm
         return $schema->components([
             Form::make([
                 Section::make('Public web folders need correction')->visible(fn () => in_array('extra_docroots', $this->malformedKeys, true))
-                    ->description('The saved list of public web folders is invalid. Enter the complete list and confirm it before saving. Save the folder list by itself first.')
+                    ->description('The saved list is damaged. Enter the complete list, confirm it, and save it by itself first.')
                     ->schema([
                         $lineList('extra_docroots', 'Other public web folders', 'One full path per line. Leave empty only if this account has no other public web folders.'),
                         Checkbox::make('confirm_public_directories')->label('I have listed all public web folders for this account.')
@@ -160,7 +160,7 @@ trait BuildsSettingsForm
                                 Actions::make(fn () => [...$this->recoveryKeyActions(), $this->rotateRecoveryKeyAction(), $this->discardRecoveryKeyAction()]),
                             ])->dense()->visible(fn () => $this->keyState() !== 'none')->visibleJs("\$get('s3_encryption')"),
                             Checkbox::make('plaintext_offsite_acknowledged')->label('I understand backups in S3 won\'t be encrypted')
-                                ->helperText('They contain customer data, .env and APP_KEY. Give these keys access to this bucket only, and turn on server-side encryption in the bucket if you need it.')
+                                ->helperText('They contain customer data, .env and APP_KEY. Give these keys access to this bucket only.')
                                 ->accepted(fn (Get $get) => (bool) $get('upload_s3') && !$get('s3_encryption'))
                                 ->validationMessages(['accepted' => 'Confirm this, or turn encryption on.'])
                                 ->visibleJs("! \$get('s3_encryption')"),
@@ -171,12 +171,12 @@ trait BuildsSettingsForm
                 ]),
 
                 Section::make('Full backup requirements')->id('full-backup-requirements')
-                    ->description('A full backup pauses Paymenter\'s cron jobs and shows the maintenance page, so the database and files are copied in one consistent state.')
+                    ->description('A full backup pauses Paymenter\'s cron jobs and shows the maintenance page while it copies.')
                     ->collapsible()->collapsed(fn () => ($this->formValues()['full_schedule'] ?? 'off') === 'off' && $this->blockers('full-quiesced') === [])
                     ->schema(fn () => [
                         ...$this->detectedChecks(),
                         Checkbox::make('full_host_assumptions_acknowledged')->label('No other program writes to Paymenter\'s database or files.')
-                            ->helperText('Paymenter\'s cron jobs are paused during a full backup. Other programs aren\'t, and their writes would make the backup inconsistent.'),
+                            ->helperText('Only Paymenter\'s cron jobs are paused. Writes from other programs can leave a broken backup.'),
                         $this->sitePasswordSection(),
                     ]),
 
@@ -193,7 +193,7 @@ trait BuildsSettingsForm
                             $tool('mysql', 'mysql or mariadb client'), $tool('tar', 'tar'), $tool('gzip', 'gzip'), $tool('gpg', 'GnuPG (gpg)'),
                         ]),
                         Fieldset::make('Time limits')->columns(['default' => 1, 'md' => 2])->schema([
-                            $integer('capture_timeout', 'Backup time limit', 'seconds', 'Longest the database export and file copy may take. For full backups, the longest the site stays in maintenance mode.'),
+                            $integer('capture_timeout', 'Backup time limit', 'seconds', 'Also the longest a full backup keeps the site in maintenance mode.'),
                             $integer('drain_seconds', 'Wait for open requests', 'seconds', 'After maintenance mode starts, wait this long for page loads already in progress to finish.'),
                             $integer('lock_timeout', 'Wait for running cron jobs', 'seconds', 'If a Paymenter cron job is running, wait this long before trying again next minute.'),
                             $integer('billing_margin_seconds', 'Billing safety margin', 'seconds', 'Extra time kept clear before and after Paymenter\'s daily billing run.'),
@@ -279,7 +279,7 @@ trait BuildsSettingsForm
         foreach ($this->checks()['stores'] ?? [] as $store) {
             if (!is_array($store)) { continue; }
             $name = Messages::STORES[$store['kind'] ?? ''] ?? 'Storage';
-            $driver = (string) ($store['driver'] ?? 'unknown');
+            $driver = (string) ($store['driver'] ?? 'not detected');
             $rows[] = match ($store['supported'] ?? null) {
                 true => $row('success', $name . ': ' . $driver),
                 false => $row('warning', $name . ': ' . $driver . '. Full backups need local storage. Change it in .env:',

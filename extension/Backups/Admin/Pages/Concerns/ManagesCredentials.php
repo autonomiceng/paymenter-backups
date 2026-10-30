@@ -30,8 +30,8 @@ trait ManagesCredentials
                 Text::make('Saved')->badge()->color('success')->visible(fn () => $saved() && !$attention()),
                 Text::make('Needs attention')->badge()->color('warning')->visible($attention),
             ])
-            ->description(fn () => 'Only if your web server asks for a username and password before Paymenter loads. A full backup opens '
-                . ($site()['probe_base'] ?? 'App URL') . ' to check that visitors see the maintenance page, and needs this password to get past the prompt.')
+            ->description(fn () => 'Only if your web server asks for a username and password before Paymenter loads. Full backups use it to open '
+                . ($site()['probe_base'] ?? 'App URL') . '.')
             ->schema([
                 Text::make(fn () => match ($site()['state'] ?? 'unavailable') {
                     'saved' => 'Saved for ' . ($site()['origin'] ?? 'App URL') . '. Only sent there.',
@@ -39,7 +39,7 @@ trait ManagesCredentials
                         : 'Your App URL uses http://. A site password can only be sent over https://.',
                     'unavailable' => 'Your App URL (Settings, General) isn\'t a valid web address.',
                     'origin-changed' => 'The saved password is for ' . ($site()['saved_origin'] ?? 'another address') . ', but App URL is now ' . ($site()['origin'] ?? 'different') . '. Enter it again or remove it.',
-                    default => 'Not set.',
+                    default => 'No site password saved. You only need one if your web server asks for a password.',
                 }),
                 EmbeddedSchema::make('siteAccessForm')->visible(fn () => $this->httpsOrigin() !== null),
                 Actions::make([$this->removeSitePasswordAction()]),

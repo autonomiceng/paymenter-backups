@@ -226,21 +226,21 @@ class Backups extends Page implements HasTable
         return [
             Section::make('What\'s in a backup')->id('backup-contents')->collapsible()->collapsed()->schema([
                 $bullets([
-                    'Full backup: the database plus every file in Paymenter\'s folder, including .env, APP_KEY, uploads and extensions. While the database and files are copied, the site shows its maintenance page (HTTP 503), up to the backup time limit. Compression and verification run after the site is back online.',
+                    'Full backup: the database and every file in Paymenter\'s folder, including .env, APP_KEY, uploads and extensions. The site shows its maintenance page (HTTP 503) during the copy, up to the backup time limit.',
                     'Database backup: the database only. The site stays online. To restore, you also need Paymenter\'s files, from a full backup or your own copy.',
                     'Backups contain customer data and secrets (.env, APP_KEY). Keep downloads private. Saved S3 keys, site passwords and recovery keys are never included.',
                 ]),
             ]),
             Section::make('How backups run')->id('how-backups-run')->collapsible()->schema([
-                Text::make('Paymenter\'s cron job runs the scheduler every minute. Each minute, Backups starts what is queued: scheduled backups, Create backup, uploads, verification and deletion. If the cron job isn\'t running, nothing happens. Backups never edits your crontab or systemd units.'),
+                Text::make('Backups runs from Paymenter\'s cron job, once a minute. If the cron job isn\'t running, nothing happens. Backups never edits your crontab or systemd units.'),
                 Text::make(fn () => 'Add this line to the crontab of ' . ($this->checks()['jobs']['crontab_user'] ?? 'the user that owns Paymenter') . ' with crontab -e. If a scheduler entry is already there, replace it:'),
                 $this->command(fn () => $this->schedulerLine()),
                 Text::make('flock lets a full backup pause this job while it copies. Database backups work without it.'),
                 Text::make('Copying needs HTTPS. Over HTTP, select the text to copy it.')->visible(fn () => !request()->isSecure()),
             ]),
             Section::make('Full backups: what has to be true')->id('full-backups')->collapsible()->schema([
-                Text::make('During a full backup, Backups waits for running Paymenter cron jobs to finish and holds their lock files so new ones wait. It then puts the site into maintenance mode, waits for open page loads, checks that App URL shows the maintenance page, copies the database and files, and takes the site out of maintenance mode.'),
-                Text::make('Maintenance mode stops new page loads, but a cron job that already started keeps writing. If it writes while files are copied, the database and files in the backup won\'t match. Holding the same lock file as the job prevents that.'),
+                Text::make('A full backup waits for running cron jobs and holds their lock files. It then turns on maintenance mode, checks that App URL shows the maintenance page, copies the database and files, and turns maintenance mode off.'),
+                Text::make('A cron job that already started keeps writing during maintenance mode. If it writes during the copy, the database and files in the backup won\'t match. The lock file prevents that.'),
                 $bullets([
                     'Every Paymenter cron job uses a lock file. For the scheduler, use the line above.',
                     'No always-on queue worker. A worker started by systemd or Supervisor never stops, so it can\'t be paused. Run queue jobs from cron with their own lock, then stop the service:',
@@ -250,13 +250,14 @@ class Backups extends Page implements HasTable
                     'No Redis or other outside storage for cache, sessions, queue or files. Data held there isn\'t in the backup. The Backups tab names the .env keys to change.',
                     'File-based maintenance mode: APP_MAINTENANCE_DRIVER=file, Paymenter\'s default.',
                     'Nothing else writes to Paymenter\'s database or files, such as another app, a sync script or manual SQL.',
-                    'If your web server asks for a username and password before Paymenter loads, enter it under Settings, Site password.',
+                    'If your web server asks for a username and password before Paymenter loads, enter them under Settings, Site password. A full backup needs them to check the maintenance page.',
                 ]),
             ]),
             Section::make('Encrypted backups in S3')->id('encryption')->collapsible()->collapsed()->schema([
                 Text::make('Backups uploaded to S3 are encrypted on this server with GnuPG (AES-256) before upload. Copies on this server and downloads from this page aren\'t encrypted.'),
                 Text::make('The recovery key decrypts them. Keep it in a password manager or another safe place outside this server. If this server is lost, APP_KEY and your S3 keys can\'t replace it.'),
                 Text::make('A new recovery key applies to new uploads only. Earlier backups keep needing the key they were encrypted with, so keep every key you\'ve saved.'),
+                Text::make('If you turn encryption off, turn on server-side encryption in the bucket if you need it.'),
             ]),
             Section::make('Schedules and missed backups')->id('schedules')->collapsible()->collapsed()->schema([
                 $bullets([
