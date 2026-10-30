@@ -432,6 +432,8 @@ def worker(state, envelope, request_id, envelope_loader=None, database_context=N
         if error.code == "initial-maintenance-scheduled-skip":
             item["status"] = "skipped"
         item["error"] = error.code
+        if error.code == "job-lock-busy":
+            item.setdefault("job_wait_since", time.time())
         if item["status"] == "deferred":
             item["retry_at"] = time.time() + 60
     item["finished_at"] = time.time()

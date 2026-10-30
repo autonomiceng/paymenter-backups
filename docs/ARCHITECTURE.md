@@ -397,7 +397,8 @@ is authoritative. It invokes the short launcher with Python `-I`. Each tick
 observes the actual native CronJob event's expression/effective timezone and
 next eight days of UTC instants into an atomic private billing guard, fingerprinted
 against cold-read native billing settings. Full admission requires a fresh
-matching guard; stale/unknown billing state refuses full mode. Provide a booted
+matching guard; stale/unknown billing state defers full mode and coordinated
+database-only capture. Provide a booted
 CLI guard-refresh command for terminal use before a scheduler tick is available.
 
 The tick is the sole detached launcher. Foreground terminal execution is also
@@ -409,8 +410,13 @@ caller job lock or through the ordinary queue. FPM never launches capture.
 Protect the native daily billing minute: schedule validation and runtime
 admission reject/defer holds overlapping `cronjob_time` in its actual timezone,
 including drain/capture bounds, lock waits, safety margin and deferral. Record
-the protected minute and actual hold interval. Native Laravel daily schedules
-do not catch up automatically after a skipped minute. UTC is recommended;
+the protected minute and actual hold interval. Coordinated database-only capture
+checks billing before taking any lock and again after waiting. Its inventory and
+dump share capture_timeout; compression, hashing and upload follow lock release.
+The billing admission bound is lock_timeout + capture_timeout + 30 seconds,
+plus billing_margin_seconds around the native minute (full mode also adds drain).
+The extra 30 seconds covers process termination and release overhead. Native
+Laravel daily schedules do not catch up automatically after a skipped minute. UTC is recommended;
 document and test DST gaps and repeated local slots.
 
 V2 full admission uses the same sanitized discovery/parser module as overview.
@@ -433,9 +439,21 @@ Empty v2 job_lock_paths derives the verified union; nonempty lists must match.
 Locks open without creation, in stable order, and identity/remaining workers
 are rechecked after acquisition. init creates only the suggested scheduler.lock
 and queue.lock as 0600 owner-private regular files and validates existing
-descriptors without acquiring these launcher locks. Only full-mode admission
-and capture coordination acquire launcher locks; held launchers do not block
-database-only capture, settings saves, schedule changes or initialization.
+descriptors without acquiring these launcher locks. Full capture requires these
+locks. Database-only capture also takes the verified locks, waits up to
+lock_timeout, and defers when a job is still running. It uses
+no maintenance mode or drain. Locks keep a multi-step job out of the dump; a
+transactional snapshot alone cannot make its separate writes atomic.
+If launcher verification fails before acquisition,
+database-only capture retains its transactional, uncoordinated behavior so skipped
+host setup does not stop database backups. A busy or changed verified lock never
+falls back to an uncoordinated dump. Settings saves, schedule changes and
+initialization do not acquire launcher locks.
+Routine contention stays deferred without a failed run or staff alert. Requests
+retain their first job-wait timestamp across superseded hourly slots. Overview
+exposes one job_wait_overdue boolean after a day without a completed capture;
+the page asks staff to inspect stuck scheduler/queue jobs because Backups cannot
+safely stop a job that may be changing data. Capture success clears the warning.
 Backups never edits host launchers.
 Legacy `systemd_locks` skips an explicit `activates: null` timer entry: it has
 no target and cannot launch `schedule:run` or `queue:work`. Other entries must

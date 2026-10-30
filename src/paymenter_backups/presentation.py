@@ -383,6 +383,17 @@ def scheduler(state):
         return {"last_tick_at": None}
 
 
+def job_wait_overdue(requests, journals, now):
+    # Keep the first contention time across superseded hourly slots. A successful
+    # full checkpoint also resolves the missing database snapshot.
+    latest = max((item.get("created_at", 0) for item in journals
+                  if item.get("capture_complete") and item.get("service_recovered")), default=0)
+    return any(item.get("action") == "run" and item.get("arguments", {}).get("mode") == "database-online"
+               and (item.get("status") != "cancelled" or item.get("error") == "schedule-superseded")
+               and latest < item.get("job_wait_since", now) <= now - 86400
+               for item in requests)
+
+
 def overview(state, envelope=None, error=None, writer_cause=None):
     journals = state.journals() if state.initialized else []
     requests = list_requests(state) if state.initialized else []
@@ -406,6 +417,7 @@ def overview(state, envelope=None, error=None, writer_cause=None):
             "configuration": configuration(state, envelope, error, encryption_key_status=destination_binding.get("key_status"),
                                             writer_cause=writer_cause), "runs": runs,
             "last_good": last_good,
+            "job_wait_overdue": job_wait_overdue(requests, journals, time.time()),
             "s3_pending": {"count": len(pending_s3) if envelope and envelope["settings"]["destination"] == "s3" else 0,
                            "oldest_at": min((number(item.get("created_at")) or 0 for item in pending_s3), default=None) if envelope and envelope["settings"]["destination"] == "s3" else None},
             "requests": active + recent}

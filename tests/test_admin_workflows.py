@@ -1,5 +1,6 @@
 """Admin history, download, verification, per-backup delete and config check."""
 import copy
+import fcntl
 import json
 import os
 import pathlib
@@ -210,6 +211,24 @@ class AdminWorkflowTests(unittest.TestCase):
         self.assertEqual(summary["runs"][0]["status"], "damaged")
         self.assertEqual(summary["runs"][0]["download"], "verify")
 
+    def test_job_contention_warns_only_after_a_day_and_clears_on_capture(self):
+        self.fixture.settings["lock_timeout"] = 0
+        item = create(self.state, arguments={"mode": "database-online"})
+        atomic_json(requests.path(self.state, item["request_id"]), dict(item, status="launching"))
+        with open(self.fixture.settings["job_lock_paths"][0], "r+b") as held:
+            fcntl.flock(held, fcntl.LOCK_EX)
+            self.assertEqual(worker(self.state, self.envelope, item["request_id"])["status"], "deferred")
+        self.assertEqual(overview(self.state)["runs"], [])
+        self.assertFalse(overview(self.state)["job_wait_overdue"])
+        item = read_json(requests.path(self.state, item["request_id"]))
+        self.assertIn("job_wait_since", item)
+        # Superseding an hourly slot must not reset a day of unsuccessful waits.
+        item.update(status="cancelled", error="schedule-superseded", job_wait_since=time.time() - 86401)
+        atomic_json(requests.path(self.state, item["request_id"]), item)
+        self.assertTrue(overview(self.state)["job_wait_overdue"])
+        self.backup()
+        self.assertFalse(overview(self.state)["job_wait_overdue"])
+
     def test_overview_whitelists_presentation_fields(self):
         self.fixture.settings["mode"] = "full-quiesced"
         first = capture(self.state, self.envelope)
@@ -384,23 +403,26 @@ class AdminWorkflowTests(unittest.TestCase):
         self.assertEqual(retried["launched"], [request["request_id"]])
 
     def test_billing_window_race_does_not_leave_a_failed_run(self):
-        self.envelope["settings"].update(mode="full-quiesced", enabled=False, settings_version=1)
-        request = create(self.state, "run", {"mode": "full-quiesced"})
-        checks = 0
+        for mode in ("full-quiesced", "database-online"):
+            with self.subTest(mode=mode):
+                self.envelope["settings"].update(mode=mode, enabled=False, settings_version=1)
+                request = create(self.state, "run", {"mode": mode})
+                checks = 0
 
-        def admission(*_args, **_kwargs):
-            nonlocal checks
-            checks += 1
-            if checks == 1:
-                return {"admitted_at": time.time(), "hold_deadline": time.time() + 60, "protected_instants": []}
-            raise BackupError("billing-window-protected")
+                def admission(*_args, **_kwargs):
+                    nonlocal checks
+                    checks += 1
+                    if checks == 1:
+                        return {"admitted_at": time.time(), "hold_deadline": time.time() + 60, "protected_instants": []}
+                    raise BackupError("billing-window-protected")
 
-        with patch.object(engine, "billing_admission", side_effect=admission):
-            result = self.launch(request)
-        stored = read_json(self.state.root / "requests" / (request["request_id"] + ".json"))
-        self.assertEqual((result["status"], stored["status"], stored["error"]),
-                         ("deferred", "deferred", "billing-window-protected"))
-        self.assertEqual(overview(self.state, self.envelope)["runs"], [])
+                with patch.object(engine, "billing_admission", side_effect=admission), \
+                        patch("paymenter_backups.maintenance.billing_admission", side_effect=admission):
+                    result = self.launch(request)
+                stored = read_json(self.state.root / "requests" / (request["request_id"] + ".json"))
+                self.assertEqual((result["status"], stored["status"], stored["error"]),
+                                 ("deferred", "deferred", "billing-window-protected"))
+                self.assertEqual(overview(self.state, self.envelope)["runs"], [])
 
     def test_config_check_validates_without_writing(self):
         args = parser().parse_args(["--app", str(self.fixture.app), "--private-root", str(self.state.root), "config", "check"])

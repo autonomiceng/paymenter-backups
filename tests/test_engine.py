@@ -1,4 +1,5 @@
 import contextlib
+import fcntl
 import hashlib
 import io
 import json
@@ -145,6 +146,69 @@ payload={'status':503,'except':[],'secret':None,'redirect':None,'template':'fixt
         manifest = verify(self.state, journal["run_id"], True)
         self.assertEqual(set(manifest["payloads"]), {"database.sql"})
         self.assertFalse((self.app / MARKERS[0]).exists())
+
+    def test_online_waits_for_job_lock_and_defers_without_failed_run(self):
+        from paymenter_backups.requests import path as request_path, worker
+        self.settings.update(mode="database-online", lock_timeout=0)
+        scheduler = pathlib.Path(self.settings["job_lock_paths"][0])
+        scheduler.chmod(0o600)
+        queue = self.base / "queue.lock"
+        queue.touch(mode=0o600)
+        self.settings["job_lock_paths"].append(str(queue))
+        cron = (f"* * * * * /usr/bin/flock {scheduler} /usr/bin/php {self.app}/artisan schedule:run\n"
+                f"* * * * * /usr/bin/flock {queue} /usr/bin/php {self.app}/artisan queue:work --stop-when-empty")
+        self.envelope["tools"]["crontab"] = str(self.script("crontab", "print(" + repr(cron) + ")"))
+        for version in (1, 2):
+            for lock in (scheduler, queue):
+                with self.subTest(version=version, job=lock.name):
+                    self.settings["settings_version"] = version
+                    before = self.state.journals()
+                    request = create(self.state, arguments={"mode": "database-online"})
+                    atomic_json(request_path(self.state, request["request_id"]), dict(request, status="launching"))
+                    with lock.open("r+b") as held:
+                        fcntl.flock(held, fcntl.LOCK_EX)
+                        result = worker(self.state, self.envelope, request["request_id"])
+                        self.assertEqual(result["status"], "deferred")
+                        self.assertEqual(result["error"], "job-lock-busy")
+                        self.assertEqual(self.state.journals(), before)
+                    journal = capture(self.state, self.envelope)
+                    self.assertTrue(journal["local_complete"])
+                    self.assertFalse((self.app / MARKERS[0]).exists())
+
+    def test_online_billing_window_defers_and_unverified_hosts_still_capture(self):
+        self.settings["mode"] = "database-online"
+        lock = pathlib.Path(self.settings["job_lock_paths"][0])
+        lock.chmod(0o600)
+        crontab = self.envelope["tools"]["crontab"]
+        now = time.time()
+        guard_path = self.state.root / "billing-guard.json"
+        guard = json.loads(guard_path.read_text())
+        guard["instants"] = [now + 20, now + 172800]
+        for version in (1, 2):
+            with self.subTest(version=version):
+                self.settings.update(settings_version=version, job_lock_paths=[str(lock)])
+                self.envelope["tools"]["crontab"] = crontab
+                atomic_json(guard_path, guard)
+                before = self.state.journals()
+                with self.assertRaisesRegex(BackupError, "billing-window-protected"):
+                    capture(self.state, self.envelope)
+                self.assertEqual(self.state.journals(), before)
+                self.settings["job_lock_paths"] = []
+                self.envelope["tools"]["crontab"] = str(self.script("no-jobs", "print('# no jobs')"))
+                guard_path.unlink()
+                self.assertTrue(capture(self.state, self.envelope)["local_complete"])
+
+    def test_online_inventory_and_dump_share_one_deadline(self):
+        self.settings.update(mode="database-online", capture_timeout=1.5)
+        mysql = pathlib.Path(self.envelope["tools"]["mysql"])
+        mysql.write_text(mysql.read_text().replace("import sys", "import time; time.sleep(0.9); import sys"))
+        dump = pathlib.Path(self.envelope["tools"]["dump"])
+        dump.write_text(dump.read_text().replace("import sys", "import time; time.sleep(0.9); import sys"))
+        with self.assertRaisesRegex(BackupError, "child-timeout|capture-timeout"):
+            capture(self.state, self.envelope)
+        self.assertFalse((self.app / MARKERS[0]).exists())
+        with open(self.settings["job_lock_paths"][0], "r+b") as contender:
+            fcntl.flock(contender, fcntl.LOCK_EX | fcntl.LOCK_NB)
 
     def test_operator_replacement_same_bytes_refuses_release(self):
         journal = self.journal()

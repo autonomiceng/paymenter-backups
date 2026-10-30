@@ -116,6 +116,9 @@ trait BuildsPageContent
     {
         $pending = fn () => (int) ($this->overview()['s3_pending']['count'] ?? 0);
         return [
+            Callout::make('Database backups have waited a day for Paymenter jobs')->warning()
+                ->description('Backups keep trying automatically. A job may be stuck holding its lock. Check the scheduler and queue jobs; let them finish or fix the stuck job. Backups cannot stop a job safely while it may be changing data.')
+                ->visible(fn () => (bool) ($this->overview()['job_wait_overdue'] ?? false)),
             Callout::make('Backups in S3 aren\'t encrypted')->info()
                 ->description('Save settings to turn on encryption for new uploads. Backups already in S3 stay as they are.')
                 ->actions([$this->link('alertEncryption', 'Go to Storage settings', $this->settingsUrl('storage'))->button()])

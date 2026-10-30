@@ -58,7 +58,7 @@ the first save if the defaults do not fit the host. The first save creates the p
 installation ID. Afterwards the private directory can only be moved from the
 terminal. The page checks each save with the engine before writing, including
 field rules, the S3 endpoint and backup directory location. A billing window
-can delay a queued full backup without blocking the save.
+can delay a queued backup that pauses jobs without blocking the save.
 
 Backups settings is the only web settings editor. The native Extensions page
 controls enabling, disabling and uninstalling the extension. CLI configuration
@@ -223,4 +223,7 @@ configuration.checks.jobs.suggestions. They include a private flock and accepted
 >/dev/null 2>&1 tail. Replace the existing scheduler entry rather than adding a
 second one. Backups never writes crontab or systemd configuration. A continuous
 queue service must be replaced with bounded coordinated work before full mode;
-database-only mode does not depend on job locks or local store classification.
+database-only mode still works without verified job locks or local store classification.
+When locks are verified, database-only mode waits for scheduled/queue jobs and
+avoids the daily billing window. It releases the locks after the dump and uses
+no maintenance mode or drain.
