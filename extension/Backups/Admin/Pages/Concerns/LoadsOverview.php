@@ -86,7 +86,7 @@ trait LoadsOverview
 
     private function time(?float $timestamp, bool $withZone = false): string
     {
-        if ($timestamp === null) { return 'Unknown'; }
+        if ($timestamp === null) { return '—'; }
         $date = CarbonImmutable::createFromTimestamp((int) $timestamp)->setTimezone($this->zone());
         return $date->format('j M Y, H:i') . ($withZone ? ' ' . $this->zone() : '');
     }
@@ -99,7 +99,7 @@ trait LoadsOverview
     /** "13 Oct 2026, 02:00 UTC (4 hours ago)" */
     private function when(?float $timestamp): string
     {
-        return $timestamp === null ? 'Unknown' : $this->time($timestamp, true) . ' (' . $this->ago($timestamp) . ')';
+        return $timestamp === null ? '—' : $this->time($timestamp, true) . ' (' . $this->ago($timestamp) . ')';
     }
 
     private function storage(): array

@@ -197,7 +197,7 @@ trait BuildsPageContent
                     })->visible(fn () => $this->uploadsToS3()),
                     TextEntry::make('overview_storage')->label('Stored on')->state(function () {
                         $storage = $this->storage();
-                        if (!($this->configuration()['valid'] ?? false)) { return 'Unknown until settings are valid'; }
+                        if (!($this->configuration()['valid'] ?? false)) { return 'Fix your settings to see this'; }
                         $places = [];
                         if ($storage['keep_local'] ?? true) { $places[] = 'This server'; }
                         if ($storage['upload_s3'] ?? false) { $places[] = 'S3 (' . ($storage['s3_bucket'] ?: 'no bucket') . ')' . ($this->savedS3Keys() ? '' : ', keys missing'); }

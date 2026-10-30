@@ -7,12 +7,12 @@ final class Messages
     private const ERRORS = [
         // Scheduling and admission
         'busy' => 'Another backup task was running. This one will try again next minute.',
-        'config-changed' => 'Settings changed while Save was in progress. Refresh and enter your changes again.',
-        'config-save-outcome-unknown' => 'A previous Save could not be confirmed. Check settings and enter replacement keys again to complete Save before backup work resumes.',
-        'config-save-failed' => 'Setup could not finish. Refresh and check the saved settings.',
-        'config-coordination-required' => 'The configuration writer could not prove that Save owns its locks. Run the ordinary Save command again.',
-        'config-save-incomplete' => 'The configuration save did not finish. Refresh and check the saved settings and keys.',
-        'config-write-outcome-unknown' => 'The setting write could not be confirmed. Check settings and complete Save before backup work resumes.',
+        'config-changed' => 'Settings changed while you were saving. Open Settings again and re-enter your changes.',
+        'config-save-outcome-unknown' => 'The save couldn\'t be confirmed, so backups are paused. Refresh this page, check the saved settings, then re-enter or remove the S3 keys or site password you tried to change and save.',
+        'config-save-failed' => 'Setup didn\'t finish. Open Settings again and check what was saved.',
+        'config-coordination-required' => 'Save couldn\'t lock the settings. Run the normal Save command again.',
+        'config-save-incomplete' => 'Save didn\'t finish. Open Settings again and check your settings and keys.',
+        'config-write-outcome-unknown' => 'A setting wasn\'t confirmed as saved, so backups are paused. Check your settings and save again.',
         'billing-guard-stale' => 'Full backups need Paymenter\'s cron job to have run in the last few minutes, so they can avoid the daily billing run. Check the cron job on the Backups tab.',
         'billing-window-protected' => 'Waiting until Paymenter\'s daily billing run is over.',
         'schedule-overlaps-billing' => 'This time is too close to Paymenter\'s daily billing run. Pick a time outside the window shown under the time.',
@@ -34,7 +34,7 @@ final class Messages
         'job-discovery-unknown' => 'Cron jobs haven\'t been checked yet. The check runs from Paymenter\'s cron job.',
         'job-lock-unsafe' => 'A lock file is missing or unsafe. It must be a regular file owned by the site user, with permissions 600.',
         'job-lock-override-mismatch' => 'The lock files under Advanced don\'t match the ones your cron jobs use. Clear the field to use the detected ones.',
-        'job-workers-running' => 'A Paymenter writer is still running after its lock files were acquired. Full backups wait until it stops.',
+        'job-workers-running' => 'A Paymenter job is still running even though its lock files are held. Full backups wait until it stops.',
         'tool-capability-unsupported' => 'A binary is installed but lacks a feature backups need. Check its version under Advanced, Binary paths.',
         'cooperative-writers-acknowledged' => 'Confirm in Settings that no other program writes to Paymenter\'s database or files.',
         'external-state-acknowledged' => 'Confirm in Settings that no other program writes to Paymenter\'s database or files.',
@@ -47,11 +47,11 @@ final class Messages
         'request-not-cancellable' => 'This task has already started and can\'t be cancelled.',
         'request-action-invalid' => 'This task type isn\'t supported.',
         'request-arguments-invalid' => 'This task request isn\'t valid.',
-        'request-not-launchable' => 'This task is no longer waiting to start. Refresh the task list before trying again.',
+        'request-not-launchable' => 'This task is no longer waiting to start. Check the task list, then try again.',
 
         // Configuration
         'config-invalid' => 'A saved setting is invalid. Review the settings and try again.',
-        'timezone-data-unavailable' => 'The time zone database is unavailable. Install the tzdata package.',
+        'timezone-data-unavailable' => 'Time zone data is missing. Install the tzdata package.',
         'gzip-busybox' => 'gzip on this server is BusyBox; Backups needs GNU gzip',
         'storage-required' => 'Keep backups on this server, upload them to S3, or enable both under Storage.',
         'storage-untested' => 'Test storage with the current settings and recovery key before enabling automatic uploads.',
@@ -69,7 +69,7 @@ final class Messages
         'private-root-inside-docroot' => 'The data directory is inside a public web folder. Choose a folder that no site serves.',
         'private-root-unsafe' => 'The data directory can\'t be a symlink. Enter its real path.',
         'private-root-unavailable' => 'The web server can\'t open the data directory. Choose a new, dedicated, empty folder for Backups data, or ask the server administrator to check PHP\'s open_basedir.',
-        'document-roots-invalid' => 'The saved list of other public web folders is damaged. In Backups settings, enter every other public web folder, one full path per line, and confirm the complete list. Backups stay blocked until the list is corrected.',
+        'document-roots-invalid' => 'The saved list of public web folders is damaged, so backups are blocked. In Settings, enter every other public web folder, one full path per line, and confirm the list.',
         'owner-mismatch' => 'Paymenter and its Backups data directory are owned by different users. Choose a new, dedicated, empty folder for Backups data.',
         'private-state-permissions' => 'A Backups data file has an unsafe owner or mode. Ask the server administrator to inspect the data directory before changing it.',
         'private-file-invalid' => 'A Backups data file has an unsafe owner or mode. Ask the server administrator to inspect the data directory before changing it.',
@@ -80,8 +80,8 @@ final class Messages
         'extension-uninstalled' => 'The Backups extension isn\'t installed.',
         'native-secret-row-refused' => 'A Backups setting in Paymenter\'s database looks like a secret. Ask your server administrator to remove that setting. Enter keys in Backups settings only.',
         'billing-settings-unreadable' => 'Paymenter\'s daily billing time isn\'t set. Save "Cron Job Time" in Paymenter\'s settings.',
-        'framework-store-context-invalid' => 'Paymenter\'s active framework stores could not be read.',
-        'database-connection-invalid' => 'Paymenter\'s active database connection could not be read.',
+        'framework-store-context-invalid' => 'Backups couldn\'t read Paymenter\'s cache, session and queue settings. Check that the site user can read Paymenter\'s configuration.',
+        'database-connection-invalid' => 'Backups couldn\'t read Paymenter\'s database connection. Check the database settings in .env.',
         'database-pdo-driver-unavailable' => 'The configured PHP CLI needs the PDO MySQL driver to read Paymenter\'s database.',
         'database-connection-failed' => 'The configured PHP CLI could not connect to Paymenter\'s database. Check the active database settings and network access.',
         'database-tls-unsupported' => 'Databases that require TLS aren\'t supported yet.',
@@ -93,16 +93,16 @@ final class Messages
         'engine-unavailable' => 'Backups couldn\'t start Python. Check the Python and PHP binaries under Advanced, Binary paths.',
         'bridge-failed' => 'Backups couldn\'t read Paymenter\'s .env or database.',
         'bridge-identity-mismatch' => 'Backups read a different Paymenter installation than expected.',
-        'bridge-required' => 'This command needs the extension\'s configuration bridge. Use the command shown under Help, Command line.',
-        'bridge-command-invalid' => 'The configuration bridge does not support this operation. Reinstall a matching extension ZIP.',
-        'bridge-unavailable' => 'The configuration bridge could not finish. Check that Paymenter\'s configuration and database are readable by the site user.',
-        'private-pipe-required' => 'Runtime configuration must travel through a private pipe. Use the extension page or its documented command.',
+        'bridge-required' => 'Run this with the command shown under Help, Command line.',
+        'bridge-command-invalid' => 'This version of the extension can\'t run this command. Reinstall a matching extension ZIP.',
+        'bridge-unavailable' => 'Backups couldn\'t read Paymenter\'s settings. Check that the site user can read Paymenter\'s configuration and database.',
+        'private-pipe-required' => 'Use the Backups page or the command shown under Help, Command line.',
         'billing-event-unverified' => 'Backups could not verify Paymenter\'s daily billing schedule. Check the native cron job and billing time before running full backups.',
         'billing-guard-unavailable' => 'The cron job could not record Paymenter\'s billing schedule. Check that the site user can write the data directory.',
         'backup-tick-unavailable' => 'Paymenter\'s scheduler could not start Backups. Check the configured binaries and the data directory.',
 
         // Credentials
-        'credentials-unreadable' => 'Saved credentials or recovery keys could not be read. Restore the matching APP_KEY or APP_PREVIOUS_KEYS and keep credentials.json. Replacing it can lose keys needed for earlier S3 backups.',
+        'credentials-unreadable' => 'Saved keys can\'t be read. Restore the matching APP_KEY or APP_PREVIOUS_KEYS and keep credentials.json. Replacing it can lose keys for earlier S3 backups.',
         'credentials-invalid' => 'Enter both access key ID and secret access key.',
         'credentials-save-failed' => 'The encrypted keys file couldn\'t be written. Check that the site user can write the data directory.',
         'maintenance-probe-credentials-invalid' => 'Enter both username and password. The username can\'t contain ":".',
@@ -117,7 +117,7 @@ final class Messages
         'archive-encryption-tool-unusable' => 'GnuPG (gpg) or its gpg-agent and gpgconf helpers aren\'t usable here. Install the complete gnupg package and check the path under Advanced, Binary paths.',
         'archive-key-required' => 'Uploads to S3 need a recovery key. Save settings with "Encrypt backups in S3" on to create one.',
         'archive-key-save-required' => 'Save the recovery key outside this server and confirm it. Uploads to S3 start after that.',
-        'archive-key-invalid' => 'The recovery key or its fingerprint is invalid. Passphrases need at least 20 characters, no control characters, and at most 1024 UTF-8 bytes.',
+        'archive-key-invalid' => 'This recovery key or its fingerprint isn\'t valid. A passphrase needs at least 20 characters, at most 1024 bytes and no control characters.',
         'archive-key-unavailable' => 'The recovery key for this S3 backup isn\'t on this server. Restore it from the copy you saved.',
         'archive-key-mismatch' => 'This key doesn\'t match the key the backup was encrypted with.',
         'archive-key-change-busy' => 'A backup task is running. Try again in a minute.',
@@ -139,11 +139,11 @@ final class Messages
         'archive-integrity-failed' => 'The S3 backup failed its integrity check after decryption. Don\'t restore from it.',
         'remote-format-unsupported' => 'This S3 backup uses a format this version doesn\'t read.',
         'remote-descriptor-invalid' => 'The S3 backup\'s description file is invalid or doesn\'t match the backup.',
-        'delivery-ciphertext-unavailable' => 'The encrypted bytes for this unfinished upload changed or are missing. An operator must restore those exact bytes or resolve the unfinished upload. Retrying cannot recreate them.',
-        'legacy-plaintext-delivery-blocked' => 'This unfinished upload was recorded as unencrypted and is blocked by the current encryption policy. An operator must resolve it, or explicitly authorize plaintext uploads. Retrying cannot change its format.',
+        'delivery-ciphertext-unavailable' => 'The encrypted file for this unfinished upload changed or is missing. Trying again can\'t recreate it. Ask your server administrator to put back the exact file or resolve the upload.',
+        'legacy-plaintext-delivery-blocked' => 'This unfinished upload isn\'t encrypted, and your settings require encryption. Trying again can\'t change that. Ask your server administrator to resolve the upload, or allow unencrypted uploads in Settings, Storage.',
 
         // Capture
-        'maintenance-probe-failed' => 'Full backup stopped: App URL didn\'t show Paymenter\'s maintenance page (HTTP 503). Check App URL and any redirect, proxy or CDN in front of the site. If the site asks for a password, add it under Site password.',
+        'maintenance-probe-failed' => 'Full backup stopped: App URL didn\'t show Paymenter\'s maintenance page (HTTP 503). Check App URL and any redirect, proxy or CDN. If the site asks for a password, add it under Site password.',
         'maintenance-unsafe' => 'Full backups need Paymenter\'s standard maintenance mode, with no secret bypass URL or redirect. Run php artisan up, then try again.',
         'maintenance-driver-unsupported' => 'Full backups need file-based maintenance mode. Set APP_MAINTENANCE_DRIVER=file in .env.',
         'maintenance-changed' => 'Someone turned maintenance mode on or off during the backup. Try again.',
@@ -161,7 +161,7 @@ final class Messages
         'child-output-limit' => 'Not enough space: the backup would go over the space limit or minimum free disk space.',
         'capture-failed' => 'The backup failed unexpectedly.',
         'capture-interrupted' => 'The backup stopped, for example because the server restarted.',
-        'failed-work-cleanup-failed' => 'Temporary files from a failed backup could not be removed safely. Check their ownership and the private task record before trying again.',
+        'failed-work-cleanup-failed' => 'Temporary files from a failed backup couldn\'t be removed safely. Check who owns them, then try again.',
         'recovery-failed' => 'Backups could not confirm that the site reopened safely. Run paymenter_backups recover and follow the recovery steps in Help.',
         'unresolved-run-not-found' => 'That backup has no unresolved recovery record. Run paymenter_backups recover to see the records that still need attention.',
         'dump-empty' => 'The database export was empty. Check the database name and user in Paymenter\'s .env.',
@@ -233,7 +233,7 @@ final class Messages
         'retention-mode-unknown' => 'Cleanup could not confirm whether this is a full or database backup, so it was kept. Check its backup record and manifest.',
         'delete-mode-unknown' => 'Deletion could not confirm whether this is a full or database backup. Check its backup record and manifest before deleting it.',
         'staging-removal-conflict' => 'Another deletion of this backup is unfinished. Resolve it before removing the temporary copy on this server.',
-        'staging-removal-remote-proof-required' => 'The temporary local copy was kept because Backups could not prove its completed S3 copy in the current bucket and folder.',
+        'staging-removal-remote-proof-required' => 'The temporary local copy was kept because Backups couldn\'t confirm its S3 copy in the current bucket and folder.',
         'staging-removal-ownership-mismatch' => 'The temporary local files have unexpected ownership, paths or links, so they were kept.',
         'staging-removal-local-verification-failed' => 'The temporary local files changed or failed verification, so they were kept. Verify the backup before resolving the cleanup.',
         'staging-removal-local-delete-failed' => 'The S3 upload completed, but its temporary local files could not be removed. Check the backup directory and retry the upload task to finish cleanup.',
@@ -241,8 +241,8 @@ final class Messages
         'isolated-s3-sdk-missing' => 'The bundled S3 library is missing. Reinstall the extension ZIP.',
         's3-readback-mismatch' => 'The S3 copy didn\'t match after upload. The copy on this server is kept. Upload again.',
         's3-manifest-readback-mismatch' => 'The S3 copy didn\'t match after upload. The copy on this server is kept. Upload again.',
-        's3-pointer-readback-mismatch' => 'The S3 latest-backup record didn\'t match after upload. The copy on this server is kept. Check that record in S3 before uploading again.',
-        's3-pointer-invalid' => 'The S3 latest-backup record doesn\'t match this installation\'s backup history. The copy on this server is kept. Check the S3 destination and its latest-backup record before uploading again.',
+        's3-pointer-readback-mismatch' => 'The latest-backup record in S3 didn\'t match after upload. The copy on this server is kept. Check that record, then upload again.',
+        's3-pointer-invalid' => 'The latest-backup record in S3 doesn\'t match this site\'s backups. The copy on this server is kept. Check the S3 bucket, folder and that record, then upload again.',
         's3-delivery-failed' => 'Upload to S3 failed. The copy on this server is kept. Check S3 settings and keys, then upload again.',
         'destination-probe-failed' => 'The storage test couldn\'t write and read back a test file.',
         'destination-readback-mismatch' => 'The storage test read back different data than it wrote.',
@@ -271,16 +271,16 @@ final class Messages
         'input-too-large' => 'The command input exceeds its allowed size. Submit only the required settings or credentials.',
         'run-id-required' => 'Name the backup to use. The backup list shows its ID.',
         'request-id-required' => 'Name the task to use. The task list shows its ID.',
-        'execute-required' => 'This command needs --execute to perform the requested operation.',
+        'execute-required' => 'Add --execute to run this command.',
         'artifact-stream-pipe-required' => 'Downloads must use a private stream. Use Download on the page or the documented export command.',
-        'operation-interrupted' => 'The command was interrupted. Check its task record before starting it again.',
-        'operation-failed' => 'The command could not finish. Check its private task record and the configured binaries before trying again.',
+        'operation-interrupted' => 'The command stopped before it finished. Check the task list before starting it again.',
+        'operation-failed' => 'The command didn\'t finish. Check the task list and Advanced, Binary paths, then try again.',
     ];
 
     public static function error(?string $code): string
     {
         if ($code === null || $code === '') { return ''; }
-        return self::ERRORS[$code] ?? 'The task failed with an unrecognized error. Check its private task record from the command line.';
+        return self::ERRORS[$code] ?? 'The task failed with an unrecognized error. See the task with paymenter_backups overview --offline (Help, Command line).';
     }
 
     public static function known(string $code): bool { return isset(self::ERRORS[$code]); }
@@ -407,7 +407,7 @@ final class Messages
                 default => match ($run['remote']) {
                     'missing' => ['S3 copy missing', 'warning'], 'damaged' => ['S3 copy damaged', 'danger'],
                     'scope-changed' => ['Old S3 folder', 'warning'], 'unbound' => ['S3 copy unchecked', 'warning'],
-                    default => ['Unavailable', 'danger'],
+                    default => ['Not usable', 'danger'],
                 },
             },
             'damaged' => ['Damaged', 'danger'],
@@ -418,7 +418,7 @@ final class Messages
             'deleting' => ['Deleting', 'info'],
             'delete-interrupted' => ['Deletion incomplete', 'warning'],
             'deleted' => ['Deleted', 'gray'],
-            default => ['Unknown', 'gray'],
+            default => ['Not recognized', 'gray'],
         };
     }
 
@@ -474,7 +474,7 @@ final class Messages
             'openpgp-symmetric-aes256-seipd-v1' => 'Encrypted' . ($keyShort ? ' with recovery key ' . $keyShort : ''),
             'plaintext-v1' => 'Not encrypted',
             null => null,
-            default => 'Unknown format',
+            default => 'Format not recognized',
         };
     }
 
@@ -511,13 +511,13 @@ final class Messages
             'expired' => ['Expired', 'gray'],
             'skipped' => ['Skipped', 'gray'],
             'satisfied' => ['Covered', 'gray'],
-            default => ['Unknown', 'gray'],
+            default => ['Not recognized', 'gray'],
         };
     }
 
     public static function bytes(?int $bytes): string
     {
-        if ($bytes === null) { return 'Unknown'; }
+        if ($bytes === null) { return '—'; }
         $units = ['bytes', 'KiB', 'MiB', 'GiB', 'TiB'];
         $value = (float) $bytes;
         $unit = 0;

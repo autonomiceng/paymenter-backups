@@ -141,7 +141,7 @@ trait SavesSettings
             if (in_array($code, ['config-save-outcome-unknown', 'config-write-outcome-unknown'], true)) {
                 Notification::make()->title('Save outcome unknown')->warning()
                     ->body(Messages::withWriterCause(
-                        'Refresh and check the saved settings before trying again. Keys you entered were cleared.', $cause
+                        Messages::error('config-save-outcome-unknown'), $cause
                     ))->send();
             } else {
                 $field = $error instanceof \Paymenter\Extensions\Others\Backups\EngineCommandException ? $error->field : null;
@@ -187,15 +187,15 @@ trait SavesSettings
             }
             Notification::make()->title('Save incomplete')->warning()
                 ->body(Messages::withWriterCause((($saved['outcome_unknown'] ?? false)
-                    ? 'The saved settings or keys could not be confirmed. Backup work is paused. Refresh, check settings and enter the replacement keys again to complete Save.'
+                    ? Messages::error('config-save-outcome-unknown')
                     : (($saved['concurrent_settings_preserved'] ?? false)
-                        ? 'Concurrent settings changes were preserved. Keys you entered weren\'t saved. Refresh and check settings before trying again.'
-                        : 'Some settings could not be restored. Backup work is paused. Keys you entered weren\'t saved. Refresh, check settings and enter the replacement keys again to complete Save.')), $writerCause))->send();
+                        ? 'Someone else changed settings at the same time, and those changes were kept. Keys you entered weren\'t saved. Open Settings again and check them before trying again.'
+                        : 'Some settings couldn\'t be restored, so backups are paused. Keys you entered weren\'t saved. Open Settings again, check them, enter the new keys and save.')), $writerCause))->send();
             return;
         }
         $problems = [];
         if ($saved['partial'] ?? false) {
-            $problems[] = 'Settings and entered keys were saved, but final setup did not finish: ' . Messages::error($saved['error'] ?? 'config-save-failed') . ' Refresh and check setup.';
+            $problems[] = 'Settings and keys were saved, but setup didn\'t finish: ' . Messages::error($saved['error'] ?? 'config-save-failed') . ' Check setup on the Backups tab.';
         }
         $created = false;
         if ($keySetup !== null) {

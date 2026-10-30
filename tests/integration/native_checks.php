@@ -352,7 +352,7 @@ if ($mode === 'upload') {
     App\Providers\SettingsProvider::flushCache();
     try {
         $probe = Livewire\Livewire::test($page);
-        check(str_contains($text($probe), 'opens https://fixture.example.invalid'), 'site address not shown from app URL');
+        check(str_contains(html_entity_decode(strip_tags($probe->html())), 'https://fixture.example.invalid'), 'site address not shown from app URL');
         check(str_contains($text($probe), 'asks for a username and password') && str_contains($text($probe), 'Not your Paymenter login'), 'site password purpose missing before it is saved');
         // The browser cannot choose the address; a sent origin is ignored.
         $probeSecrets = ['siteAccess.origin' => 'https://other.invalid', 'siteAccess.username' => 'PROBE-USER-CREDENTIAL-CANARY', 'siteAccess.password' => 'PROBE-PASSWORD-CREDENTIAL-CANARY'];

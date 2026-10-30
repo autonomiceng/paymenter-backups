@@ -341,7 +341,7 @@ try {
         assert.match(await section.innerText(), /asks for a username and password[\s\S]*maintenance page/);
         await shot(client, viewport.width < 640 ? 'mobile-site-password-collapsed' : 'desktop-site-password-collapsed');
         await heading.click(); await client.waitForTimeout(300);
-        assert.match(await section.innerText(), /uses http:\/\/|Saved for|Not set/);
+        assert.match(await section.innerText(), /uses http:\/\/|Saved for|No site password saved/);
         await shot(client, viewport.width < 640 ? 'mobile-site-password-expanded' : 'desktop-site-password-expanded');
         await client.context().close();
       }
