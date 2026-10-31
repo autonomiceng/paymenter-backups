@@ -325,6 +325,31 @@ class SchedulerTests(PrivateFixture):
         self.assertEqual(items['full']['status'], 'cancelled')
         self.assertEqual(items['database']['status'], 'deferred')
 
+    def test_captured_delivery_survives_worker_exit_schedule_disable_and_age_limit(self):
+        self.remote()
+        self.enable()
+        at = instant('2026-10-02T03:00:00+00:00')
+        request_id = self.tick(at)['launched'][0]
+        self.backup('captured', 'full-quiesced', created_at=at)
+        journal = self.item('captured')
+        journal.update(request_id=request_id, delivery_required=True,
+                       delivery_scope=storage.remote_scope(self.state, self.envelope))
+        self.state.save(journal)
+        item = read_json(requests.path(self.state, request_id))
+        item.update(status='running', worker=None)
+        atomic_json(requests.path(self.state, request_id), item)
+        self.settings.update(full_schedule='off', database_schedule='off', request_max_age=1)
+        later = at + 86400
+        requests.sync_schedule(self.state, self.settings, now=later)
+        self.assertEqual(self.tick(later)['launched'], [request_id])
+        resumed = read_json(requests.path(self.state, request_id))
+        self.assertEqual((resumed['action'], resumed['arguments']), ('deliver', {'run_id': 'captured'}))
+        self.assertEqual(resumed['delivery_scope'], journal['delivery_scope'])
+        # Storage edits cannot let retention discard an upload still owed.
+        self.backup('newer', 'full-quiesced', created_at=later)
+        self.settings.update(destination='local', upload_s3=False, retention_keep_full=1)
+        self.assertNotIn('captured', storage.retention(self.state, self.envelope)['local_delete'])
+
     def test_every_supported_hour_interval_is_wall_clock_anchored(self):
         at = instant('2026-10-02T23:59:00+00:00')
         for hours in (1, 2, 3, 4, 6, 8, 12):
@@ -522,7 +547,7 @@ class SchedulerTests(PrivateFixture):
         self.store.fail_put = True
         with patch.object(engine, 'capture', return_value=journal):
             result = requests.worker(self.state, self.envelope, full['request_id'])
-        self.assertEqual(result['status'], 'failed')
+        self.assertEqual(result['status'], 'deferred')
         covered = read_json(requests.path(self.state, waiting['request_id']))
         self.assertEqual((covered['status'], covered['covered_by']), ('satisfied', 'covered-full'))
         self.assertTrue(self.item('covered-full')['local_complete'])

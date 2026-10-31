@@ -194,8 +194,8 @@ python3 -I /path/to/Backups/runtime/cli.py --app /srv/paymenter \
 Recovery takes the same private run lock as capture and never relies on PID
 alone. It checks recorded boot ID, process group emptiness and every maintenance
 file's exact device, inode, size, mtime, ctime and SHA256. It removes only this
-run's unchanged markers, down first and early-bootstrap stub second. Normal
-completion uses this identical path. Pre-existing markers remain. Matching
+run's unchanged markers, down first and early-bootstrap stub second. Historical maintenance captures used this path at normal completion. New full
+captures keep the site online and require no marker cleanup. Pre-existing markers remain. Matching
 bytes on a new inode, an operator rewrite, uncertain process state or a missing
 ownership record refuses reopening. There remains a small check/unlink race;
 owner-private cooperative administration is a required assumption.
@@ -276,8 +276,8 @@ Full restore into an isolated new host/path:
    verified backup. Open service only after this isolated validation.
 
 Full mode preserves safe pre-existing maintenance files in the archive; restore
-may therefore remain in maintenance intentionally. A normal full run excludes
-only its newly created markers and declares those paths. No automatic restore
+may therefore remain in maintenance intentionally. New full captures keep the site online and create no maintenance markers.
+Historical full runs excluded only their newly created markers and declared those paths. No automatic restore
 command mutates a destination app or database. The documented restore drill
 and CI fixture use disposable applications; real hosts and S3 providers
 remain deployment work.

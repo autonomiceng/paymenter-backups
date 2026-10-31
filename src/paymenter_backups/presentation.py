@@ -366,9 +366,9 @@ def billing_window(settings, billing):
     try:
         daily = datetime.datetime.strptime(value['time'], '%H:%M')
         from .maintenance import job_lock_wait
-        wait = job_lock_wait(settings) + (settings['drain_seconds'] if settings['mode'] == 'full-quiesced' else 0)
+        wait = job_lock_wait(settings)
         if settings.get('settings_version', 1) == 2:
-            wait = max(settings['lock_timeout'] + settings['drain_seconds'],
+            wait = max(settings['lock_timeout'],
                        job_lock_wait(dict(settings, mode='database-online')))
         before = wait + settings['capture_timeout'] + 30 + settings['billing_margin_seconds']
         after = 60 + settings['billing_margin_seconds']

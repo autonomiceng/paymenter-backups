@@ -105,10 +105,11 @@ class RecoveryVerifierTests(unittest.TestCase):
     def test_database_and_full_synthetic_archives_verify(self):
         self.assertEqual(verifier.verify(self.args)["verification"], "plaintext-content-verified")
         self.payloads["app.tar"] = b"synthetic application payload (not a capture)"
-        self.manifest.update(mode="full-quiesced", guarantee="database-and-full-app-checkpoint",
-                             payloads={name: hashed(data) for name, data in self.payloads.items()})
-        self.publish()
-        self.assertEqual(verifier.verify(self.args)["mode"], "full-quiesced")
+        for guarantee in ("database-and-full-app-checkpoint", "transactional-database-and-live-app-files"):
+            self.manifest.update(mode="full-quiesced", guarantee=guarantee,
+                                 payloads={name: hashed(data) for name, data in self.payloads.items()})
+            self.publish()
+            self.assertEqual(verifier.verify(self.args)["mode"], "full-quiesced")
 
     def test_copied_script_runs_without_original_repository_or_sdk(self):
         copied = self.base / "verify_recovery.py"

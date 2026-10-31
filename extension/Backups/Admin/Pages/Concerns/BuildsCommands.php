@@ -76,7 +76,7 @@ trait BuildsCommands
         }
         $stored = $this->formValues();
         $margin = (int) ($stored['billing_margin_seconds'] ?? 120);
-        $before = (int) $stored['lock_timeout'] + (int) $stored['drain_seconds'] + max(1, (int) $stored['capture_timeout']) + 30 + $margin;
+        $before = (int) $stored['lock_timeout'] + max(1, (int) $stored['capture_timeout']) + 30 + $margin;
         $after = 60 + $margin;
         try { $at = CarbonImmutable::createFromFormat('H:i', $billing['time'], $zone); } catch (\Throwable $error) { return null; }
         return ['time' => $billing['time'], 'timezone' => $zone, 'start' => $at->subSeconds($before)->format('H:i'), 'end' => $at->addSeconds($after)->format('H:i')];

@@ -92,7 +92,7 @@ complete remote scope/manifest/checksum/archive proof. Retrieval is queued and
 protects the local Download copy for 24 hours.
 
 Both modes require no concurrent updates/migrations/DDL. Full additionally
-requires the merged host assumptions confirmation, file maintenance, supported
+requires the merged host assumptions confirmation, supported
 resolved stores inside the app/default database, and verified job coordination.
 The tick caches sanitized account-crontab/systemd diagnostics for the page;
 capture rediscovers. Empty v2 lock overrides derive the verified union. No
@@ -162,12 +162,11 @@ old file outside active state with an explicit operator filesystem action,
 then save new credentials. Do not erase or overwrite unreadable data silently.
 Restore the old APP_KEY/previous-key config first when it is available.
 
-On HTTPS sites protected by an outer HTTP Basic guard, save optional write-only
-maintenance probe credentials on the Backups page or through the private JSON
-stdin contract in [CLI.md](CLI.md). Enter the exact configured HTTPS origin.
-Saving or clearing preserves S3 credentials. Full capture continues to require
-an exact native maintenance 503 response without cookies or redirects. An
-unauthenticated 401, a normal page or an origin mismatch refuses full capture.
+Full backups no longer contact the web server or enter maintenance. Previously
+saved probe credentials remain readable/clearable through the CLI for compatibility;
+they do not gate capture. Full backups require verified job locks. If the host
+cannot provide them, full capture refuses; database-only snapshots may run under
+the explicitly documented no-coordination fallback.
 
 S3 requires TLS. V2 encryption defaults on. When **Upload to S3** and **Encrypt
 backups in S3** are on with no recovery key, Save generates a pending random key

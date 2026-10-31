@@ -147,6 +147,7 @@ final class Messages
         'maintenance-probe-failed' => 'Full backup stopped: App URL didn\'t show Paymenter\'s maintenance page (HTTP 503). Check App URL and any redirect, proxy or CDN. If the site asks for a password, add it under Site password.',
         'maintenance-unsafe' => 'Full backups need Paymenter\'s standard maintenance mode, with no secret bypass URL or redirect. Run php artisan up, then try again.',
         'maintenance-driver-unsupported' => 'Full backups need file-based maintenance mode. Set APP_MAINTENANCE_DRIVER=file in .env.',
+        'extension-files-changed' => 'Extension files changed during the copy. Backups will try again at the next backup time.',
         'maintenance-changed' => 'Someone turned maintenance mode on or off during the backup. Try again.',
         'maintenance-ownership-uncertain' => 'The site may still be in maintenance mode. Run paymenter_backups recover (Help, Recovery).',
         'process-state-uncertain' => 'A backup process may still be running. Run paymenter_backups recover (Help, Recovery).',
@@ -440,8 +441,7 @@ final class Messages
                 default => self::error($run['download']),
             },
             'damaged' => self::error($run['verification_error']),
-            'running' => $run['mode'] === 'database-online' ? 'Copying the database. The site stays online.'
-                : (in_array($run['phase'] ?? '', ['entering-maintenance', 'draining', 'capturing'], true) ? 'Copying. The site is in maintenance mode.' : 'Compressing. The site is back online.'),
+            'running' => 'Backup running. The site stays online.',
             'failed' => self::error($run['error'] ?: 'capture-failed'),
             'attention' => (($run['maintenance'] ?? false) ? 'Site in maintenance mode. ' : 'Site online. ') . self::error($run['recovery_error'] ?: 'maintenance-ownership-uncertain'),
             'interrupted' => 'The backup stopped before it finished.',

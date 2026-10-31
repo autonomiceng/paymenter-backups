@@ -226,7 +226,7 @@ class Backups extends Page implements HasTable
         return [
             Section::make('What\'s in a backup')->id('backup-contents')->collapsible()->collapsed()->schema([
                 $bullets([
-                    'Full backup: the database and every file in Paymenter\'s folder, including .env, APP_KEY, uploads and extensions. The site stays in maintenance mode (HTTP 503) for the copy, plus the wait for open requests and cleanup.',
+                    'Full backup: the database and every file in Paymenter\'s folder, including .env, APP_KEY, uploads and extensions. The site stays online. Cron jobs are paused for the database and file copy; page requests can still change live data.',
                     'Database backup: the database only. The site stays online. To restore, you also need Paymenter\'s files, from a full backup or your own copy.',
                     'Backups contain customer data and secrets (.env, APP_KEY). Keep downloads private. Saved S3 keys, site passwords and recovery keys are never included.',
                 ]),
@@ -239,7 +239,7 @@ class Backups extends Page implements HasTable
                 Text::make('Copying needs HTTPS. Over HTTP, select the text to copy it.')->visible(fn () => !request()->isSecure()),
             ]),
             Section::make('Full backups: what has to be true')->id('full-backups')->collapsible()->schema([
-                Text::make('A full backup waits for running cron jobs and holds their lock files. It then turns on maintenance mode, checks that App URL shows the maintenance page, copies the database and files, and turns maintenance mode off.'),
+                Text::make('A full backup waits for running cron jobs, holds their lock files, and copies the database and files. The site stays online. If extension files change during a scheduled copy, it retries at the next full backup time.'),
                 Text::make('A cron job without the required lock can keep writing during the backup. The database and files in the backup could then be from different times.'),
                 $bullets([
                     'Every Paymenter cron job uses a lock file. For the scheduler, use the line above.',
@@ -248,9 +248,7 @@ class Backups extends Page implements HasTable
                 $this->command(fn () => $this->queueLine()),
                 $bullets([
                     'No Redis or other outside storage for cache, sessions, queue or files. Data held there isn\'t in the backup. The Backups tab names the .env keys to change.',
-                    'File-based maintenance mode: APP_MAINTENANCE_DRIVER=file, Paymenter\'s default.',
                     'Nothing else writes to Paymenter\'s database or files, such as another app, a sync script or manual SQL.',
-                    'If your web server asks for a username and password before Paymenter loads, enter them under Settings, Site password. A full backup needs them to check the maintenance page.',
                 ]),
             ]),
             Section::make('Encrypted backups in S3')->id('encryption')->collapsible()->collapsed()->schema([
@@ -265,6 +263,7 @@ class Backups extends Page implements HasTable
                     'If the cron job was down and a backup was missed in the last 8 days, one backup of that type runs once it\'s back. Missed backups don\'t pile up.',
                     'When a full and a database backup are due together, the full backup runs first. If it succeeds, it also counts as the database backup.',
                     'Full backups never start close to Paymenter\'s daily billing run.',
+                    'A failed upload retries the same backup, without taking a new copy. Keep its original S3 destination and recovery key available.',
                     'With a time zone other than UTC, a time skipped by a daylight-saving change doesn\'t run that day, and a repeated time runs once.',
                 ]),
             ]),

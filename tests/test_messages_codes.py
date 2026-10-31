@@ -27,7 +27,7 @@ NON_ERRORS = {
     'paymenter-backups-private', 'pbkdf2-hmac-sha256-v1', 'plaintext-content-verified',
     'plaintext-v1', 'queue-worker', 'read-settings', 'recovery-document-bound',
     'recovery-key', 'request-worker', 's3-delivery', 's3-verify', 'scope-changed',
-    'staging-removal', 'transactional-database-only', 'untrusted-transport-only',
+    'staging-removal', 'transactional-database-only', 'transactional-database-and-live-app-files', 'untrusted-transport-only',
     'us-east-1', 'utf-8', 'visible-zero',
     'command-not-registered', 'writer-failed', 'writer-output-invalid',
     'native-writer-failed', 'writer-exited-without-output', 'writer-process-failed', 'writer-timeout',

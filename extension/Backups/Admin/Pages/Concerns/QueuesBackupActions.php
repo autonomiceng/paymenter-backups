@@ -79,7 +79,7 @@ trait QueuesBackupActions
             return implode('. ', array_keys($titles)) . '.';
         };
         $base = [
-            'full-quiesced' => 'Database and all files. The site shows its maintenance page while the copy runs.',
+            'full-quiesced' => 'Database and all files. The site stays online while the copy runs.',
             'database-online' => 'Database only. The site stays online.',
         ];
         return Action::make($name)->label('Create backup')->icon('ri-add-line')

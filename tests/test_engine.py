@@ -103,7 +103,7 @@ payload={'status':503,'except':[],'secret':None,'redirect':None,'template':'fixt
         result = verify(self.state, journal["run_id"], True)
         self.assertTrue(journal["service_recovered"])
         self.assertFalse((self.app / MARKERS[0]).exists())
-        self.assertEqual(result["excluded_paths"], list(MARKERS))
+        self.assertEqual(result["excluded_paths"], [])
         with tarfile.open(journal["archive_path"], "r:gz") as outer:
             inner = outer.extractfile("./app.tar").read()
         with tarfile.open(fileobj=io.BytesIO(inner)) as app_tar:
@@ -113,6 +113,61 @@ payload={'status':503,'except':[],'secret':None,'redirect':None,'template':'fixt
         raw_journal = json.dumps(journal)
         self.assertNotIn("fake-canary-secret", raw_journal)
         self.assertNotIn("fixture-canary-key", raw_journal)
+
+    def test_full_stays_online_uses_one_dump_and_requires_job_locks(self):
+        # Real dump/tar children inspect HTTP availability and the held lock.
+        dump = pathlib.Path(self.envelope["tools"]["dump"])
+        count = self.base / "dump-count"
+        dump.write_text(dump.read_text() + f"\nimport fcntl,pathlib,urllib.request\n"
+                        f"assert urllib.request.urlopen({self.envelope['framework']['app_url']!r}).status == 200\n"
+                        f"with open({self.settings['job_lock_paths'][0]!r},'rb') as lock:\n"
+                        "    try: fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)\n"
+                        "    except BlockingIOError: pass\n"
+                        "    else: raise AssertionError('backup lost its job lock')\n"
+                        f"with open({str(count)!r},'a') as stream: stream.write('dump\\n')\n")
+        # Maintenance driver/probe settings are no longer capture prerequisites.
+        self.envelope["framework"]["maintenance_driver"] = "cache"
+        self.envelope["maintenance_probe_credentials"] = {"origin": "https://old.invalid"}
+        journal = capture(self.state, self.envelope)
+        self.assertTrue(journal["local_complete"])
+        self.assertEqual(count.read_text(), "dump\n")
+        self.settings["job_lock_paths"] = []
+        with self.assertRaisesRegex(BackupError, "job-locks-unverified"):
+            capture(self.state, self.envelope)
+        self.assertEqual(count.read_text(), "dump\n")
+
+    def test_extension_change_during_copy_skips_scheduled_capture_then_next_slot_succeeds(self):
+        from paymenter_backups.requests import path as request_path, worker
+        extension = self.app / "extensions/Others/Fixture/code.php"
+        extension.parent.mkdir(parents=True)
+        extension.write_text("original")
+        # The real tar copies the app, then an installer changes extension code.
+        changing_tar = self.script("changing-tar", f"import subprocess,sys,pathlib\n"
+                                   "subprocess.run(['/usr/bin/tar',*sys.argv[1:]],check=True)\n"
+                                   f"pathlib.Path({str(extension)!r}).write_text('updated')")
+        self.envelope["tools"]["tar"] = str(changing_tar)
+        request = create(self.state, arguments={"mode": "full-quiesced"}, slot="first-full-slot")
+        atomic_json(request_path(self.state, request["request_id"]), dict(request, status="launching"))
+        result = worker(self.state, self.envelope, request["request_id"])
+        self.assertEqual((result["status"], result["error"]), ("skipped", "extension-files-changed"))
+        self.assertFalse(any(run.get("capture_complete") for run in self.state.journals()))
+        self.assertFalse((self.app / MARKERS[0]).exists())
+        self.envelope["tools"]["tar"] = "/usr/bin/tar"
+        request = create(self.state, arguments={"mode": "full-quiesced"}, slot="next-full-slot")
+        atomic_json(request_path(self.state, request["request_id"]), dict(request, status="launching"))
+        self.assertEqual(worker(self.state, self.envelope, request["request_id"])["status"], "complete")
+
+    def test_failed_capture_retries_are_bounded(self):
+        from paymenter_backups.requests import path as request_path, worker
+        self.envelope["tools"]["dump"] = str(self.script("faildump", "raise SystemExit(1)"))
+        request = create(self.state, arguments={"mode": "full-quiesced"})
+        statuses = []
+        for _ in range(3):
+            item = json.loads(request_path(self.state, request["request_id"]).read_text())
+            atomic_json(request_path(self.state, request["request_id"]), dict(item, status="launching"))
+            statuses.append(worker(self.state, self.envelope, request["request_id"])["status"])
+        self.assertEqual(statuses, ["deferred", "deferred", "failed"])
+        self.assertEqual(len(self.state.journals()), 3)
 
     def test_full_capture_uses_fixture_launchers_with_invalid_host_timer(self):
         host_systemctl = self.script("host-systemctl", "print(" + repr(json.dumps([

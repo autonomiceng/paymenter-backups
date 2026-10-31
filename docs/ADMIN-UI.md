@@ -88,7 +88,7 @@ Settings tab, one form, one "Save settings" button at the bottom (mod+s):
    Delete old backups automatically
   Full backup requirements
    Detected cron jobs and queue workers, each with status and fix line
-   Detected cache, session, queue, file storage and maintenance drivers
+   Detected cache, session, queue and file storage drivers
    [ ] No other program writes to Paymenter's database or files.
    Site password (HTTP Basic), collapsed unless saved or needed
   Before backups run
@@ -102,7 +102,7 @@ Help is a set of collapsible sections with ids for deep links:
 `backup-contents`, `how-backups-run`, `full-backups`, `encryption`,
 `schedules`, `cleanup`, `restoring`, `command-line`. Settings sections use
 `first-time-setup`, `schedule`, `storage`, `s3`, `full-backup-requirements`,
-`site-password`, `before-backups-run` and `advanced`. Setup items link to
+`before-backups-run` and `advanced`. Setup items link to
 `?tab=settings#SECTION` or `?tab=help#SECTION`.
 
 Below 640 px the history table uses Filament's stacked-on-mobile layout. Type,
@@ -177,13 +177,12 @@ to S3, Download from S3, Delete old backups now, Verify, Create backup.
 Each sentence does one job. Never repeat an explanation in a description,
 helper and status line. Don't describe the interface ("click X to Y"). Errors
 say what happened and what to do; they never apologise. Name what the person
-sees ("the site shows its maintenance page"), not internals.
+sees ("the site stays online"), not internals.
 
 Start times: "Starts within a minute" appears only while the cron job checked
 in within five minutes and no other task is active. Otherwise the page says
 when the cron job last ran and that work starts when it next runs. A full
-backup's maintenance page lasts until the copy finishes, up to the backup time
-limit.
+backup keeps the site online and pauses cron jobs only for the database and file copy.
 
 Details may show a safe error code labelled "Error code"; private paths,
 stderr and JSON never appear. Engine codes, statuses, setup items and task names

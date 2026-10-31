@@ -169,8 +169,8 @@ def manifest_schema(manifest, run_id, installation):
     require(manifest["mode"] in ("full-quiesced", "database-online"))
     created = manifest["created_at"]
     require(type(created) in (int, float) and math.isfinite(created) and created >= 0)
-    guarantee = "database-and-full-app-checkpoint" if manifest["mode"] == "full-quiesced" else "transactional-database-only"
-    require(manifest["guarantee"] == guarantee)
+    guarantees = ("database-and-full-app-checkpoint", "transactional-database-and-live-app-files") if manifest["mode"] == "full-quiesced" else ("transactional-database-only",)
+    require(manifest["guarantee"] in guarantees)
     text(manifest["external_state"])
     exclusions = manifest["excluded_paths"]
     require(isinstance(exclusions, list) and len(exclusions) <= 16)
