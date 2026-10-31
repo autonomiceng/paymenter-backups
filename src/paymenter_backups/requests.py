@@ -237,7 +237,7 @@ def tick(state, envelope, command_prefix, envelope_loader=None, database_context
     settings = envelope["settings"]
     if not settings.get("extension_enabled", True):
         return {"enabled": False}
-    with state.lock("config.lock"), state.lock("tick.lock"):
+    with state.lock("config.lock", timeout=10), state.lock("tick.lock"):
         if envelope_loader is not None:
             envelope = envelope_loader()
             settings = envelope["settings"]
