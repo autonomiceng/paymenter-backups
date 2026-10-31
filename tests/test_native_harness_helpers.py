@@ -4,6 +4,7 @@ import json
 import pathlib
 import subprocess
 import sys
+import unittest
 from unittest.mock import patch
 
 from paymenter_backups import cli, config, requests, tools
@@ -12,6 +13,22 @@ import test_engine_schedules as fixtures
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / 'tools'))
 import native_integration
+
+
+@unittest.skipUnless(fixtures.PHP, 'PHP required for fixture bridge exit behavior')
+class LauncherBridgeChecks(fixtures.PrivateFixture):
+    def test_launcher_inventory_survives_read_settings_early_exit(self):
+        bridge = self.base / 'native-bridge.php'
+        bridge.write_text('<?php echo json_encode(["tools"=>["php"=>PHP_BINARY]]); if ($argv[1] === "read-settings") { exit; }')
+        adapter = self.base / 'fixture-bridge.php'
+        adapter.write_text(native_integration.launcher_bridge_source(bridge, '/fixture/crontab', '/fixture/systemctl'))
+        for verb in ('read', 'read-settings'):
+            with self.subTest(verb=verb):
+                result = subprocess.run([fixtures.PHP, str(adapter), verb], check=True, capture_output=True)
+                inventory = json.loads(result.stdout)['tools']
+                self.assertEqual(inventory['crontab'], '/fixture/crontab')
+                self.assertEqual(inventory['systemctl'], '/fixture/systemctl')
+                self.assertTrue(inventory['php'])
 
 
 class GuardedWriteChecks(fixtures.PrivateFixture):

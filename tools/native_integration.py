@@ -60,6 +60,14 @@ def execute_env_only_database_parent(command, database_environment, cwd=None, in
     return result.stdout
 
 
+def launcher_bridge_source(bridge, cron, systemctl):
+    # Output callbacks also run when read-settings exits inside the native bridge.
+    return ('<?php ob_start(static function ($output) { $value=json_decode($output,true); '
+            'if (!is_array($value) || !isset($value["tools"])) { return $output; } '
+            '$value["tools"]["crontab"]=' + json.dumps(str(cron)) + '; $value["tools"]["systemctl"]=' + json.dumps(str(systemctl)) + '; '
+            'return json_encode($value)."\\n"; }); require ' + json.dumps(str(bridge)) + ';')
+
+
 def guarded_write(cli, arguments, **kwargs):
     """Refresh billing state before fixture captures; configuration saves do not need it."""
     if arguments and arguments[0] == 'run':
@@ -564,7 +572,7 @@ def main():
             # Adapter envelope instrumentation is confined to this fixture. The
             # production bridge has no configurable crontab override.
             fixture_bridge = work / 'fixture-bridge.php'
-            fixture_bridge.write_text('<?php ob_start(); require ' + json.dumps(str(bridge)) + '; $value=json_decode(ob_get_clean(),true); $value["tools"]["crontab"]=' + json.dumps(str(cron)) + '; $value["tools"]["systemctl"]=' + json.dumps(str(systemctl)) + '; echo json_encode($value)."\\n";')
+            fixture_bridge.write_text(launcher_bridge_source(bridge, cron, systemctl))
             capture_cli = cli[:]
             capture_cli[capture_cli.index('--bridge') + 1] = fixture_bridge
             execution_env = child_environment({'PATH': str(fakebin) + ':' + child_environment()['PATH']})
