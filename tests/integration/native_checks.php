@@ -537,6 +537,21 @@ if ($mode === 'upload') {
         }
     } finally { unlink($rootAlias); }
 
+    // Installed Filament rendering is needed to verify the diagnostic is visible immediately.
+    $coordinationPath = $root . '/job-coordination.json';
+    $coordinationBefore = is_file($coordinationPath) ? file_get_contents($coordinationPath) : null;
+    try {
+        file_put_contents($coordinationPath, json_encode(['state' => 'unverified', 'checked_at' => time(), 'error' => 'job-uncoordinated'], JSON_THROW_ON_ERROR));
+        chmod($coordinationPath, 0600);
+        $waiting = Livewire\Livewire::test($page);
+        check(str_contains($text($waiting), Paymenter\Extensions\Others\Backups\Messages::JOB_COORDINATION_UNVERIFIED)
+            && str_contains($text($waiting), Paymenter\Extensions\Others\Backups\Messages::error('job-uncoordinated')),
+            'Unverified database job locks did not show the specific repair immediately');
+    } finally {
+        if ($coordinationBefore === null) { unlink($coordinationPath); }
+        else { file_put_contents($coordinationPath, $coordinationBefore); chmod($coordinationPath, 0600); }
+    }
+
     $configuredPython = $record->settings()->where('key', 'python')->value('value');
     try {
         $record->settings()->where('key', 'python')->update(['value' => 'python3']);

@@ -205,8 +205,8 @@ def admin_history(args, app, checker, cli, private, run, native_url, work):
     execute(ui + ['delete-refused', run['run_id'], 'only usable backup'])
     # V2 deletion requires a survivor of the same kind. Two database copies
     # exercise retention and deletion without another full capture.
-    online = json.loads(execute(cli + ['run', '--execute', '--mode', 'database-online'], timeout=300))
-    survivor = json.loads(execute(cli + ['run', '--execute', '--mode', 'database-online'], timeout=300))
+    online = json.loads(guarded_write(cli, ['run', '--execute', '--mode', 'database-online'], timeout=300))
+    survivor = json.loads(guarded_write(cli, ['run', '--execute', '--mode', 'database-online'], timeout=300))
     survivor_archive = pathlib.Path(survivor['archive_path'])
     survivor_digest = hashlib.sha256(survivor_archive.read_bytes()).hexdigest()
     current = json.loads(execute(cli + ['config', 'show']))['settings']
@@ -636,7 +636,8 @@ def main():
                 if len(successful) != 1:
                     raise RuntimeError('full native checkpoint incomplete: ' + str(journals))
                 run = successful[0]
-                results['admin_history'] = admin_history(args, app, checker, cli, private, run, native_url, work)
+                # Database captures now need the same real fixture launcher proof as full capture.
+                results['admin_history'] = admin_history(args, app, checker, capture_cli, private, run, native_url, work)
             forbidden_export = work / 'additional-site-public' / 'forbidden-recovery-kit'
             denied_export = subprocess.run(cli + ['export', run['run_id'], '--output', str(forbidden_export)], stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=child_environment())
             if denied_export.returncode == 0 or forbidden_export.exists():

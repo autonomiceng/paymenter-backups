@@ -19,7 +19,7 @@ class BackupError(Exception):
         super().__init__(code)
 
 
-TRANSIENT_ERRORS = frozenset({"busy", "billing-guard-stale", "billing-window-protected", "job-lock-busy"})
+TRANSIENT_ERRORS = frozenset({"busy", "billing-guard-stale", "billing-window-protected", "job-lock-busy", "job-coordination-unverified"})
 PREINSTALL_RUNTIME_FILES = frozenset({"identity.lock", "billing-guard.json"})
 WRITER_CAUSE_CODES = frozenset({
     "actor-login-failed", "actor-not-authorized", "archive-key-change-busy", "application-unavailable", "billing-settings-unreadable",

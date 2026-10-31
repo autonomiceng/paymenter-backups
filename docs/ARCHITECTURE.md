@@ -397,7 +397,8 @@ is authoritative. It invokes the short launcher with Python `-I`. Each tick
 observes the actual native CronJob event's expression/effective timezone and
 next eight days of UTC instants into an atomic private billing guard, fingerprinted
 against cold-read native billing settings. Full admission requires a fresh
-matching guard; stale/unknown billing state refuses full mode. Provide a booted
+matching guard; stale/unknown billing state defers full mode and coordinated
+database-only capture. Provide a booted
 CLI guard-refresh command for terminal use before a scheduler tick is available.
 
 The tick is the sole detached launcher. Foreground terminal execution is also
@@ -409,8 +410,14 @@ caller job lock or through the ordinary queue. FPM never launches capture.
 Protect the native daily billing minute: schedule validation and runtime
 admission reject/defer holds overlapping `cronjob_time` in its actual timezone,
 including drain/capture bounds, lock waits, safety margin and deferral. Record
-the protected minute and actual hold interval. Native Laravel daily schedules
-do not catch up automatically after a skipped minute. UTC is recommended;
+the protected minute and actual hold interval. Coordinated database-only capture
+checks billing before taking any lock and again after waiting. Its inventory and
+dump share capture_timeout; compression, hashing and upload follow lock release.
+The database billing admission bound is max(lock_timeout, 60) + capture_timeout + 30 seconds,
+plus billing_margin_seconds around the native minute. Full mode retains
+lock_timeout + drain_seconds + capture_timeout + 30.
+The extra 30 seconds covers process termination and release overhead. Native
+Laravel daily schedules do not catch up automatically after a skipped minute. UTC is recommended;
 document and test DST gaps and repeated local slots.
 
 V2 full admission uses the same sanitized discovery/parser module as overview.
@@ -433,9 +440,40 @@ Empty v2 job_lock_paths derives the verified union; nonempty lists must match.
 Locks open without creation, in stable order, and identity/remaining workers
 are rechecked after acquisition. init creates only the suggested scheduler.lock
 and queue.lock as 0600 owner-private regular files and validates existing
-descriptors without acquiring these launcher locks. Only full-mode admission
-and capture coordination acquire launcher locks; held launchers do not block
-database-only capture, settings saves, schedule changes or initialization.
+descriptors without acquiring these launcher locks. Full capture requires these
+locks. Database-only capture takes the verified locks for finite jobs, waits up to
+max(lock_timeout, 60 seconds), and defers when a finite job is still running. This spans
+the suggested queue worker's 50-second run; billing admission reserves that wait. It uses
+no maintenance mode or drain. Locks keep a multi-step job out of the dump; a
+transactional snapshot alone cannot make its separate writes atomic.
+Continuous workers, including stock systemd `queue:work`, may keep running during
+a database-only snapshot. Their lifetime lock cannot provide a boundary between
+jobs, so database admission excludes it and the continuous process from its writer
+check. Bounded workers with a cooperative lock still wait, even when systemd
+restarts them. V1 with explicit locks retains the legacy finite launcher syntax,
+including queue selection options; v2 retains its strict parser. Full admission
+continues to refuse continuous workers.
+Worker classification reads the command after `artisan`, skipping only `--quiet`,
+`-q`, `--no-interaction` and `-n`, as discovery does. Queue names and other argument
+values do not identify continuous workers.
+A database snapshot may therefore contain a continuous job's intermediate commits;
+it guarantees transactional InnoDB consistency, not atomic multi-step jobs.
+Fresh discovery still verifies all finite coordination and any explicit lock list;
+discovery failures, unknown locks and unsafe finite locks defer and retry.
+Only a complete fresh inventory with no finite coordination to acquire, or with no
+configured/discovered coordination at all, permits capture without locks. The page
+shows that these snapshots can overlap jobs. Backups never stops a continuous worker.
+Blocked flock launchers proven by kernel wait records for our held inodes are
+excluded from the writer scan; actual children and uncoordinated writers remain checked. Settings saves, schedule changes and
+initialization do not acquire launcher locks.
+Routine contention stays deferred without a failed run or staff alert. Database
+requests waiting for jobs or failed lock verification retain their retry obligation
+past request_max_age through later transient deferrals; other age limits and schedule
+supersession still apply. Requests
+retain their first job-wait timestamp across superseded hourly slots. Overview
+exposes one job_wait_overdue boolean after a day without a completed capture;
+the page asks staff to inspect stuck scheduler/queue jobs because Backups cannot
+safely stop a job that may be changing data. Capture success clears the warning.
 Backups never edits host launchers.
 Legacy `systemd_locks` skips an explicit `activates: null` timer entry: it has
 no target and cannot launch `schedule:run` or `queue:work`. Other entries must
@@ -494,7 +532,7 @@ other connections, panel/Supervisor launchers and undeclared writers. Both kinds
 retain the no-concurrent-DDL confirmation; absence of visible migrations proves
 nothing. Busy/billing/job-lock states are waiting, recovery is needs-recovery,
 other refusals are needs-setup. Bounded running jobs retain coordination's wait;
-continuous workers are setup blockers.
+continuous workers are full-backup setup blockers.
 
 ## Capture modes
 

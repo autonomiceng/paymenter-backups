@@ -365,7 +365,12 @@ def billing_window(settings, billing):
              'window_before': None, 'window_after': None}
     try:
         daily = datetime.datetime.strptime(value['time'], '%H:%M')
-        before = settings['lock_timeout'] + settings['drain_seconds'] + settings['capture_timeout'] + 30 + settings['billing_margin_seconds']
+        from .maintenance import job_lock_wait
+        wait = job_lock_wait(settings) + (settings['drain_seconds'] if settings['mode'] == 'full-quiesced' else 0)
+        if settings.get('settings_version', 1) == 2:
+            wait = max(settings['lock_timeout'] + settings['drain_seconds'],
+                       job_lock_wait(dict(settings, mode='database-online')))
+        before = wait + settings['capture_timeout'] + 30 + settings['billing_margin_seconds']
         after = 60 + settings['billing_margin_seconds']
         value['window_before'] = (daily - datetime.timedelta(seconds=before)).strftime('%H:%M')
         value['window_after'] = (daily + datetime.timedelta(seconds=after)).strftime('%H:%M')
@@ -381,6 +386,27 @@ def scheduler(state):
         return {"last_tick_at": number(read_json(path).get("last_tick_at"))}
     except (OSError, BackupError):
         return {"last_tick_at": None}
+
+
+def job_wait_overdue(requests, journals, now):
+    # Keep the first contention time across superseded hourly slots. A successful
+    # full checkpoint also resolves the missing database snapshot.
+    latest = max((item.get("created_at", 0) for item in journals
+                  if item.get("capture_complete") and item.get("service_recovered")), default=0)
+    return any(item.get("action") == "run" and item.get("arguments", {}).get("mode") == "database-online"
+               and (item.get("status") != "cancelled" or item.get("error") == "schedule-superseded")
+               and latest < item.get("job_wait_since", now) <= now - 86400
+               for item in requests)
+
+
+def database_job_coordination(state):
+    try:
+        value = read_json(state.root / "job-coordination.json")
+        if value.get("state") in ("absent", "verified", "unverified"):
+            return {"state": value["state"], "checked_at": number(value.get("checked_at")), "error": code(value.get("error"))}
+    except (OSError, BackupError):
+        pass
+    return {"state": "unknown", "checked_at": None, "error": None}
 
 
 def overview(state, envelope=None, error=None, writer_cause=None):
@@ -406,6 +432,8 @@ def overview(state, envelope=None, error=None, writer_cause=None):
             "configuration": configuration(state, envelope, error, encryption_key_status=destination_binding.get("key_status"),
                                             writer_cause=writer_cause), "runs": runs,
             "last_good": last_good,
+            "job_wait_overdue": job_wait_overdue(requests, journals, time.time()),
+            "database_job_coordination": database_job_coordination(state),
             "s3_pending": {"count": len(pending_s3) if envelope and envelope["settings"]["destination"] == "s3" else 0,
                            "oldest_at": min((number(item.get("created_at")) or 0 for item in pending_s3), default=None) if envelope and envelope["settings"]["destination"] == "s3" else None},
             "requests": active + recent}

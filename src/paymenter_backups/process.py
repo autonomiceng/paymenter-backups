@@ -14,6 +14,7 @@ import warnings
 
 from .common import BackupError
 
+ARTISAN_GLOBAL_FLAGS = ('--quiet', '-q', '--no-interaction', '-n')
 _DETACHED_CHILDREN = []
 
 
@@ -294,11 +295,54 @@ def hash_stream(command, timeout, register=None):
             proc.stdout.close()
 
 
-def app_workers(app):
+def waiting_launchers(held_locks):
+    """Kernel-proven flock waiters cannot spawn a writer while we own these inodes."""
+    held = set()
+    for descriptor in held_locks:
+        info = os.fstat(descriptor)
+        held.add((os.major(info.st_dev), os.minor(info.st_dev), info.st_ino))
+    if not held:
+        return set()
+    waiting = set()
+    try:
+        lines = pathlib.Path("/proc/locks").read_text().splitlines()
+    except OSError:
+        return waiting  # Missing proof keeps the process in the writer scan.
+    for line in lines:
+        fields = line.split()
+        if len(fields) < 8 or fields[1:4] != ["->", "FLOCK", "ADVISORY"]:
+            continue
+        try:
+            major, minor, inode = fields[6].split(":")
+            if (int(major, 16), int(minor, 16), int(inode)) in held:
+                pid = int(fields[5])
+                if os.path.samefile(f"/proc/{pid}/exe", "/usr/bin/flock"):
+                    waiting.add(pid)
+        except (OSError, ValueError):
+            continue
+    return waiting
+
+
+def _continuous_worker(words):
+    index = next((index + 1 for index, word in enumerate(words)
+                  if pathlib.Path(word).name == 'artisan'), len(words))
+    while index < len(words) and words[index] in ARTISAN_GLOBAL_FLAGS:
+        index += 1
+    command = words[index] if index < len(words) else None
+    if command in ('queue:listen', 'horizon', 'schedule:work'):
+        return True
+    if command == 'queue:work':
+        bounded = any(word in words for word in ('--stop-when-empty', '--once')) or any(re.fullmatch(r'--(?:max-time|max-jobs)=[1-9][0-9]*', word) for word in words)
+        return not bounded or '--force' in words
+    return False
+
+
+def app_workers(app, *, held_locks=(), allow_continuous=False):
     from .scheduler import guarded_relevant
     found = []
+    waiters = waiting_launchers(held_locks)
     for path in pathlib.Path("/proc").iterdir():
-        if not path.name.isdigit() or int(path.name) == os.getpid():
+        if not path.name.isdigit() or int(path.name) == os.getpid() or int(path.name) in waiters:
             continue
         try:
             if path.stat().st_uid != os.getuid():
@@ -313,6 +357,8 @@ def app_workers(app):
                 continue
             cwd = (path / "cwd").resolve()
             if guarded or cwd == app or str(app / "artisan") in arguments:
+                if allow_continuous and not guarded and _continuous_worker(words):
+                    continue
                 found.append(int(path.name))
         except (OSError, RuntimeError):
             continue
@@ -327,12 +373,8 @@ def continuous_workers(app):
             # flock waiting to spawn a child is not itself an application writer.
             if pathlib.Path(words[0]).name in ('flock', 'env'):
                 continue
-            if any(word in words for word in ('queue:listen', 'horizon', 'schedule:work')):
+            if _continuous_worker(words):
                 return True
-            if 'queue:work' in words:
-                bounded = any(word in words for word in ('--stop-when-empty', '--once')) or any(re.fullmatch(r'--(?:max-time|max-jobs)=[1-9][0-9]*', word) for word in words)
-                if not bounded or '--force' in words:
-                    return True
         except (OSError, UnicodeError):
             continue
     return False

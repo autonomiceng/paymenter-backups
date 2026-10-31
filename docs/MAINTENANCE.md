@@ -98,8 +98,20 @@ flags, cron service KillMode, bounded request/job duration, effective PHP binary
 FPM UID/open_basedir, cached configuration, maintenance template correctness,
 quota and MariaDB client/object visibility. UTC avoids backup schedule DST gaps
 and repeats. Native billing instants are observed for the next eight days, including
-DST; a fresh guard is mandatory for full mode. A scheduled native billing minute
-has no catch-up guarantee after a maintenance hold.
+DST; a fresh guard is mandatory whenever capture takes job locks, including
+database-only capture. Database-only capture waits for verified jobs without
+maintenance or a drain, and defers around billing. Its lock wait is at least
+60 seconds so it can outlast the normal 50-second queue run. Only a complete fresh
+check proving no coordination is set up permits an unlocked snapshot, shown on
+the page as able to overlap jobs. That notice clears when a fresh attempt verifies
+lock setup, even if it must wait for jobs or billing. Failed discovery or verification
+retries safely. Inventory and dumping share
+one capture timeout; compression and upload run after releasing the locks.
+A scheduled native billing minute has no catch-up guarantee after a lock hold.
+Busy jobs are routine: queued database backups keep retrying past their normal
+request age, including later billing or other transient deferrals. One warning appears
+after a day without progress; check scheduler and queue jobs and their lock setup.
+Backups cannot safely stop a job that may be changing data.
 
 Keep credentials and private operational logs outside this public
 repository. Preserve failed/unresolved runs and explicitly acknowledge operator

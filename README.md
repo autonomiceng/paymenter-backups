@@ -7,8 +7,8 @@ Backups** or the command line.
 
 Full backups briefly put Paymenter into native maintenance mode while capturing
 the application and database. Compression and upload happen after service
-reopens. Online database backups avoid maintenance and have a narrower recovery
-scope. Read [recovery](docs/RECOVERY.md) before relying on either kind.
+reopens. Online database backups avoid maintenance, wait for verified scheduler
+and queue jobs outside the billing window, and have a narrower recovery scope. Read [recovery](docs/RECOVERY.md) before relying on either kind.
 
 ## Requirements
 
@@ -68,7 +68,7 @@ first, following [the recovery guide](docs/RECOVERY.md).
 ## Troubleshoot
 
 - **A backup is blocked:** open the setup checklist for the named requirement.
-  Full backups need additional host and billing-window checks.
+  Full backups need additional host checks. Both kinds avoid billing when pausing jobs.
 - **Tasks stay queued:** check the cron check-in and Paymenter's scheduler.
 - **S3 upload fails:** run Test storage and check the destination, credentials,
   GnuPG, and acknowledged recovery key. Failed delivery keeps its local source.

@@ -13,13 +13,14 @@ final class Messages
         'config-coordination-required' => 'Save couldn\'t lock the settings. Run the normal Save command again.',
         'config-save-incomplete' => 'Save didn\'t finish. Open Settings again and check your settings and keys.',
         'config-write-outcome-unknown' => 'A setting wasn\'t confirmed as saved, so backups are paused. Check your settings and save again.',
-        'billing-guard-stale' => 'Full backups need Paymenter\'s cron job to have run in the last few minutes, so they can avoid the daily billing run. Check the cron job on the Backups tab.',
+        'billing-guard-stale' => 'Backups need Paymenter\'s cron job to have run in the last few minutes, so they can avoid the daily billing run. Check the cron job on the Backups tab.',
         'billing-window-protected' => 'Waiting until Paymenter\'s daily billing run is over.',
         'schedule-overlaps-billing' => 'This time is too close to Paymenter\'s daily billing run. Pick a time outside the window shown under the time.',
         'schedule-field-invalid' => 'A schedule setting is invalid. Review the schedule settings and try again.',
         'schedule-kind-required' => 'Name the schedule: add --kind full or --kind database.',
         'scheduler-missing' => 'No cron job runs Paymenter\'s scheduler. Add the cron job shown on the Backups tab.',
-        'job-lock-busy' => 'A Paymenter cron job was still running. The backup will try again next minute.',
+        'job-lock-busy' => 'A Paymenter scheduled or queue job was still running. The backup will try again next minute.',
+        'job-coordination-unverified' => 'Backups could not verify Paymenter job locks. The backup will try again next minute.',
         'job-locks-unverified' => 'A Paymenter cron job or queue worker has no lock file. The Backups tab shows which one and the line to use instead.',
         'job-uncoordinated' => 'A Paymenter cron job has no lock file. Replace it with the line shown on the Backups tab.',
         'job-unparseable' => 'Backups can\'t read one of Paymenter\'s cron jobs. Replace it with the line shown on the Backups tab.',
@@ -385,6 +386,8 @@ final class Messages
         'database-online' => 'Database backup',
     ];
 
+    public const JOB_COORDINATION_UNVERIFIED = 'Paymenter job locks need attention';
+
     /** Short type names for the history table. */
     public const TYPES = [
         'full-quiesced' => 'Full',
@@ -664,7 +667,7 @@ final class Messages
             case 'timezone-data-unavailable':
                 return $item('Install time zone data', self::error($code), [], $settings('Go to Settings', 'settings'));
             case 'billing-settings-unreadable':
-                return $item('Set Paymenter\'s billing time', 'Full backups avoid Paymenter\'s daily billing run and need its time. Save "Cron Job Time" in Paymenter\'s settings.');
+                return $item('Set Paymenter\'s billing time', 'Backups avoid Paymenter\'s daily billing run and need its time. Save "Cron Job Time" in Paymenter\'s settings.');
             case 'recovery-required':
             case 'maintenance-ownership-uncertain':
             case 'process-state-uncertain':
