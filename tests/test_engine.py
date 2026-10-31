@@ -255,6 +255,47 @@ else: print({show!r})"""))
         diagnostic = json.loads((self.state.root / "job-coordination.json").read_text())
         self.assertEqual(diagnostic["error"], "job-command-unsupported")
 
+    def test_online_waits_for_finite_queue_named_horizon(self):
+        from paymenter_backups.process import app_workers, continuous_workers
+        self.settings.update(mode="database-online", settings_version=1, lock_timeout=0)
+        scheduler = pathlib.Path(self.settings["job_lock_paths"][0])
+        scheduler.chmod(0o600)
+        queue = self.base / "finite.lock"
+        queue.touch(mode=0o600)
+        self.settings["job_lock_paths"].append(str(queue))
+        php = self.script("worker-php", "import time; print('ready', flush=True); time.sleep(30)")
+        # Real flock and /proc workers exercise both admission and the writer scan.
+        with contextlib.ExitStack() as children:
+            def start(*arguments):
+                proc = subprocess.Popen(arguments, cwd=self.app, stdout=subprocess.PIPE, start_new_session=True)
+                children.callback(proc.stdout.close)
+                children.callback(proc.wait, timeout=5)
+                children.callback(os.killpg, proc.pid, signal.SIGTERM)
+                self.assertTrue(select.select([proc.stdout], [], [], 5)[0])
+                self.assertEqual(proc.stdout.readline(), b"ready\n")
+                return proc
+
+            finite = start("/usr/bin/flock", str(queue), str(php), str(self.app / "artisan"),
+                           "queue:work", "--stop-when-empty", "--queue", "horizon")
+            with queue.open("r+b") as probe:
+                with self.assertRaises(BlockingIOError):
+                    fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            for prefix, artisan in (("", str(self.app / "artisan")), (f"cd {self.app} && ", "artisan")):
+                with self.subTest(prefix=prefix):
+                    cron = (f"* * * * * /usr/bin/flock {scheduler} /usr/bin/php {self.app}/artisan schedule:run\n"
+                            f"* * * * * {prefix}/usr/bin/flock {queue} /usr/bin/php {artisan} queue:work --stop-when-empty --queue horizon")
+                    self.envelope["tools"]["crontab"] = str(self.script("horizon-queue-crontab", "print(" + repr(cron) + ")"))
+                    with patch("paymenter_backups.maintenance.DATABASE_LOCK_WAIT", 0):
+                        with self.assertRaisesRegex(BackupError, "^job-lock-busy$"):
+                            capture(self.state, self.envelope)
+            self.assertFalse(continuous_workers(self.app))
+            self.assertTrue(app_workers(self.app, allow_continuous=True))
+            horizon = start(str(php), str(self.app / "artisan"), "horizon")
+            self.assertTrue(continuous_workers(self.app))
+            self.assertIn(horizon.pid, app_workers(self.app))
+            self.assertNotIn(horizon.pid, app_workers(self.app, allow_continuous=True))
+            self.assertIsNone(finite.poll())
+
     def test_online_billing_window_defers_and_proven_unconfigured_hosts_still_capture(self):
         self.settings["mode"] = "database-online"
         lock = pathlib.Path(self.settings["job_lock_paths"][0])

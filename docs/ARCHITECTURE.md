@@ -453,6 +453,8 @@ check. Bounded workers with a cooperative lock still wait, even when systemd
 restarts them. V1 with explicit locks retains the legacy finite launcher syntax,
 including queue selection options; v2 retains its strict parser. Full admission
 continues to refuse continuous workers.
+Worker classification uses the command immediately after `artisan`; queue names
+and other argument values do not identify continuous workers.
 A database snapshot may therefore contain a continuous job's intermediate commits;
 it guarantees transactional InnoDB consistency, not atomic multi-step jobs.
 Fresh discovery still verifies all finite coordination and any explicit lock list;

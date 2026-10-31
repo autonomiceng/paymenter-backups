@@ -323,9 +323,11 @@ def waiting_launchers(held_locks):
 
 
 def _continuous_worker(words):
-    if any(word in words for word in ('queue:listen', 'horizon', 'schedule:work')):
+    command = next((words[index + 1] for index, word in enumerate(words[:-1])
+                    if pathlib.Path(word).name == 'artisan'), None)
+    if command in ('queue:listen', 'horizon', 'schedule:work'):
         return True
-    if 'queue:work' in words:
+    if command == 'queue:work':
         bounded = any(word in words for word in ('--stop-when-empty', '--once')) or any(re.fullmatch(r'--(?:max-time|max-jobs)=[1-9][0-9]*', word) for word in words)
         return not bounded or '--force' in words
     return False
