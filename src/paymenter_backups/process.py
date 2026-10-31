@@ -14,6 +14,7 @@ import warnings
 
 from .common import BackupError
 
+ARTISAN_GLOBAL_FLAGS = ('--quiet', '-q', '--no-interaction', '-n')
 _DETACHED_CHILDREN = []
 
 
@@ -323,8 +324,11 @@ def waiting_launchers(held_locks):
 
 
 def _continuous_worker(words):
-    command = next((words[index + 1] for index, word in enumerate(words[:-1])
-                    if pathlib.Path(word).name == 'artisan'), None)
+    index = next((index + 1 for index, word in enumerate(words)
+                  if pathlib.Path(word).name == 'artisan'), len(words))
+    while index < len(words) and words[index] in ARTISAN_GLOBAL_FLAGS:
+        index += 1
+    command = words[index] if index < len(words) else None
     if command in ('queue:listen', 'horizon', 'schedule:work'):
         return True
     if command == 'queue:work':

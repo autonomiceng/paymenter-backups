@@ -192,6 +192,7 @@ payload={'status':503,'except':[],'secret':None,'redirect':None,'template':'fixt
                     self.assertFalse((self.app / MARKERS[0]).exists())
 
     def test_online_completes_with_coordinated_scheduler_and_continuous_systemd_queue(self):
+        from paymenter_backups.process import app_workers, continuous_workers
         from paymenter_backups.requests import path as request_path, worker
         self.settings.update(mode="database-online", lock_timeout=0)
         scheduler = pathlib.Path(self.settings["job_lock_paths"][0])
@@ -204,7 +205,7 @@ payload={'status':503,'except':[],'secret':None,'redirect':None,'template':'fixt
                 with self.subTest(version=version, locked=locked):
                     self.settings.update(settings_version=version,
                                          job_lock_paths=[str(scheduler)] + ([str(queue)] if locked else []))
-                    command = f"/usr/bin/php {self.app}/artisan queue:work"
+                    command = f"/usr/bin/php {self.app}/artisan --quiet -q --no-interaction -n queue:work"
                     if locked:
                         command = f"/usr/bin/flock {queue} " + command
                     show = (f"Id=paymenter-worker.service\nUser={os.getuid()}\nWorkingDirectory={self.app}\n"
@@ -215,7 +216,7 @@ if '--user' in sys.argv or 'list-timers' in sys.argv: print('[]')
 elif 'list-units' in sys.argv: print(json.dumps([{{'unit': 'paymenter-worker.service', 'active': 'active'}}]))
 elif 'list-unit-files' in sys.argv: print(json.dumps([{{'unit_file': 'paymenter-worker.service', 'state': 'enabled'}}]))
 else: print({show!r})"""))
-                    argv = [str(php), str(self.app / "artisan"), "queue:work"]
+                    argv = [str(php), str(self.app / "artisan"), "--quiet", "-q", "--no-interaction", "-n", "queue:work"]
                     if locked:
                         argv = ["/usr/bin/flock", str(queue), *argv]
                     proc = subprocess.Popen(argv, cwd=self.app, stdout=subprocess.PIPE, start_new_session=True)
@@ -232,6 +233,8 @@ else: print({show!r})"""))
                         with patch("paymenter_backups.maintenance.DATABASE_LOCK_WAIT", 0):
                             result = worker(self.state, self.envelope, request["request_id"])
                         self.assertEqual(result["status"], "complete", result)
+                        self.assertTrue(continuous_workers(self.app))
+                        self.assertTrue(app_workers(self.app), "full backups must still see the live writer")
                         self.assertTrue(self.state.journals()[-1]["local_complete"])
                         self.assertIsNone(proc.poll(), "database capture must leave the queue running")
                         self.assertFalse((self.app / MARKERS[0]).exists())

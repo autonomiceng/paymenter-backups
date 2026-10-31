@@ -15,7 +15,7 @@ import stat
 import time
 
 from .common import BackupError, atomic_json, private_file, read_json
-from .process import run, probe
+from .process import ARTISAN_GLOBAL_FLAGS, run, probe
 from .scheduler import cron_environment_assignment, guarded_scheduler_path, guarded_relevant
 
 PHP_NAME = re.compile(r'(?:php(?:[0-9]+(?:\.[0-9]+)?)?|php-cli|ea-php[0-9]+|lsphp[0-9]+)')
@@ -163,13 +163,13 @@ def parse(line, app, cron=True, working=None):
         if artisan != str(app / 'artisan') and not (artisan == 'artisan' and relative):
             raise ValueError()
         safe = []
-        while tokens and tokens[0] in ("--quiet", "-q", "--no-interaction", "-n"):
+        while tokens and tokens[0] in ARTISAN_GLOBAL_FLAGS:
             safe.append(tokens.pop(0))
         command = tokens.pop(0)
         if command not in KINDS:
             raise ValueError()
         for word in tokens:
-            if word in ('--quiet', '-q', '--no-interaction', '-n', '--stop-when-empty', '--once'):
+            if word in ARTISAN_GLOBAL_FLAGS + ('--stop-when-empty', '--once'):
                 safe.append(word)
             elif re.fullmatch(r'--(?:max-time|max-jobs|sleep|tries|timeout|backoff|memory)=[0-9]+', word):
                 safe.append(word)
