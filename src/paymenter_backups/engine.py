@@ -567,9 +567,16 @@ def capture(state, envelope, scheduled=False, request_id=None, envelope_loader=N
                             unstable = changed_storage_files(state.app, changes)
                             if not unstable or attempt:
                                 break
-                    finally:
+                    except Exception as error:
+                        if isinstance(error, BackupError) and error.code in (
+                                "capture-interrupted", "capture-timeout", "child-timeout"):
+                            raise
                         # A changing extension can also make tar fail. It still
                         # belongs to the next scheduled slot, not an immediate retry.
+                        if extension_snapshot(state.app, remaining) != extensions:
+                            raise BackupError("extension-files-changed")
+                        raise
+                    else:
                         if extension_snapshot(state.app, remaining) != extensions:
                             raise BackupError("extension-files-changed")
                     if {relative: identity(state.app / relative) for relative in MARKERS

@@ -287,6 +287,55 @@ payload={'status':503,'except':[],'secret':None,'redirect':None,'template':'fixt
         atomic_json(request_path(self.state, request["request_id"]), dict(request, status="launching"))
         self.assertEqual(worker(self.state, self.envelope, request["request_id"])["status"], "complete")
 
+    def test_copy_stop_preserves_interrupt_and_timeout_when_extensions_change(self):
+        extension = self.app / "extensions/Others/Fixture/code.php"
+        extension.parent.mkdir(parents=True)
+        live = self.app / "storage/app/live.bin"
+        live.parent.mkdir(parents=True)
+        live.write_text("live data")
+        passes = self.base / "stopped-copy-passes"
+        for signum, code, clock_module, attempt in (
+                (signal.SIGTERM, "capture-interrupted", "engine", 1),
+                (signal.SIGINT, "capture-interrupted", "engine", 2),
+                (None, "capture-timeout", "engine", 1),
+                (None, "child-timeout", "process", 2)):
+            with self.subTest(signal=signum, code=code, attempt=attempt):
+                extension.write_text("original")
+                passes.write_text("")
+                self.envelope["tools"]["tar"] = str(self.script("stopping-tar",
+                    "import os,pathlib,signal,subprocess,sys,time\n"
+                    "subprocess.run(['/usr/bin/tar',*sys.argv[1:]],check=True)\n"
+                    f"passes=pathlib.Path({str(passes)!r})\n"
+                    "with passes.open('a') as out: out.write('copy\\n')\n"
+                    f"if len(passes.read_text().splitlines()) < {attempt}:\n"
+                    "    print('tar: ./storage/app/live.bin: file changed as we read it',file=sys.stderr)\n"
+                    "    raise SystemExit(1)\n"
+                    f"pathlib.Path({str(extension)!r}).write_text('updated')\n"
+                    + (f"os.kill({os.getpid()},{int(signum)})\n" if signum is not None else "")
+                    + "time.sleep(30)"))
+                # Advance only the selected deadline clock after the real copy.
+                # Signals use the production handler; neither snapshot nor child is mocked.
+                with patch(f"paymenter_backups.{clock_module}.time", wraps=time) as clock:
+                    changed_clock_calls = 0
+                    def deadline_clock():
+                        nonlocal changed_clock_calls
+                        if signum is None and extension.read_text() == "updated":
+                            changed_clock_calls += 1
+                            # The first child clock read may initialize its timer.
+                            if clock_module == "engine" or changed_clock_calls > 1:
+                                return time.monotonic() + self.settings["capture_timeout"] + 1
+                        return time.monotonic()
+                    clock.monotonic.side_effect = deadline_clock
+                    with self.assertRaises(BackupError) as raised:
+                        capture(self.state, self.envelope)
+                self.assertEqual(raised.exception.code, code)
+                journal = max(self.state.journals(), key=lambda item: item["created_at"])
+                self.assertEqual(journal["error"], code)
+                self.assertFalse(journal["local_complete"])
+                self.assertEqual(passes.read_text().splitlines(), ["copy"] * attempt)
+                with open(self.settings["job_lock_paths"][0], "r+b") as contender:
+                    fcntl.flock(contender, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
     def test_extension_unreadable_or_special_file_is_a_capture_failure(self):
         extensions = self.app / "extensions"
         extensions.mkdir()
