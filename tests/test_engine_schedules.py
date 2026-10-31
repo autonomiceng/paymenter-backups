@@ -341,17 +341,20 @@ class SchedulerTests(PrivateFixture):
                     reader = threading.Thread(target=tick)
                     reader.start()
                     self.assertTrue(started.wait(1))
-                    blocked = not finished.wait(0.15)
+                    if lock_name == 'tick.lock':
+                        reader.join(3)
+                        self.assertFalse(reader.is_alive())
+                        self.assertEqual(len(results), 1)
+                        self.assertIsInstance(results[0], BackupError)
+                        self.assertEqual(results[0].code, 'busy')
+                    else:
+                        self.assertFalse(finished.wait(0.15))
                 reader.join(3)
                 self.assertFalse(reader.is_alive())
-                self.assertEqual(blocked, lock_name == 'config.lock')
                 self.assertEqual(len(results), 1)
                 if lock_name == 'config.lock':
                     self.assertIsInstance(results[0], dict, repr(results[0]))
                     self.assertEqual(len(results[0]['launched']), 1)
-                else:
-                    self.assertIsInstance(results[0], BackupError)
-                    self.assertEqual(results[0].code, 'busy')
 
     def test_same_minute_distinct_ids_modes_epochs_and_deduplication(self):
         self.enable()

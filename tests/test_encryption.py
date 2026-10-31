@@ -690,6 +690,9 @@ time.sleep(30)
 
     def test_overview_validates_current_test_key_once_for_many_historical_rows(self):
         from paymenter_backups.presentation import overview
+        self.envelope['settings']['upload_s3'] = True
+        from paymenter_backups.config import normalize
+        normalize(self.envelope['settings'])
         result = storage.destination_test(self.state, self.envelope)
         for index in range(50):
             request_id = 'badge-' + str(index)

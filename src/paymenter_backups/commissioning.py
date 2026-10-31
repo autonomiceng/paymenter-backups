@@ -81,7 +81,8 @@ def local_storage(state, envelope, prepare=False):
                 raise BackupError('local-storage-not-ready')
 
 
-def check(state, envelope, prepare=False, inventory=None, now=None, mode_readiness=None):
+def check(state, envelope, prepare=False, inventory=None, now=None, mode_readiness=None,
+          destination_binding=None, encryption_key_status=None):
     from . import discovery, tools
     from .engine import plan
     from .presentation import destination_test_binding, destination_test_current
@@ -123,10 +124,10 @@ def check(state, envelope, prepare=False, inventory=None, now=None, mode_readine
     offsite_code = None
     if settings.get('upload_s3', settings['destination'] == 's3'):
         from . import encryption
-        offsite_code = encryption.readiness(envelope)
+        offsite_code = encryption.readiness(envelope, key_status=encryption_key_status)
         if not offsite_code and not ((envelope.get('credentials') or {}).get('access_key') and (envelope.get('credentials') or {}).get('secret_key')):
             offsite_code = 's3-credentials-required'
-        binding = destination_test_binding(state, envelope)
+        binding = destination_binding if destination_binding is not None else destination_test_binding(state, envelope)
         if not offsite_code and not any(destination_test_current(state, envelope, request, request.get('result') or {}, binding)
                 for request in list_requests(state) if request.get('action') == 'destination-test'):
             offsite_code = 'storage-untested'

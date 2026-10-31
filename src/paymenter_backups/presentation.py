@@ -208,7 +208,7 @@ def origin(url):
     return None
 
 
-def configuration(state, envelope, error=None, encryption_key_status=None, writer_cause=None):
+def configuration(state, envelope, error=None, encryption_key_status=None, writer_cause=None, destination_binding=None):
     writer_cause = safe_writer_cause(writer_cause, fields=DEFAULTS)
     if envelope is None:
         result = {"available": False, "valid": False, "error": code(error) or "unknown"}
@@ -343,7 +343,8 @@ def configuration(state, envelope, error=None, encryption_key_status=None, write
         result['admission'][mode] = list(dict.fromkeys(admission))
         result['readiness'][mode] = {'state': state_for(items), 'items': items}
     from .commissioning import check as installation_check
-    result['installation'] = installation_check(state, envelope, inventory=jobs, mode_readiness=result['readiness'])
+    result['installation'] = installation_check(state, envelope, inventory=jobs, mode_readiness=result['readiness'],
+        destination_binding=destination_binding, encryption_key_status={'code': result['encryption']['readiness_code']})
     if state.root.exists():
         used = storage_usage(state, settings)
         result["space"]["used"] = used
@@ -433,7 +434,7 @@ def overview(state, envelope=None, error=None, writer_cause=None):
     requests = list_requests(state) if state.initialized else []
     active_runs = {(item.get("action"), (item.get("arguments") or {}).get("run_id")) for item in requests if item.get("status") in ACTIVE}
     runs = sorted((run_entry(state, item, active_runs, envelope) for item in journals), key=lambda item: item["created_at"] or 0, reverse=True)
-    destination_binding = destination_test_binding(state, envelope) if any(item.get("action") == "destination-test" for item in requests) else {}
+    destination_binding = destination_test_binding(state, envelope)
     ordered = sorted((request_entry(item, state, envelope, destination_binding) for item in requests), key=lambda item: item["created_at"] or 0, reverse=True)
     active = [item for item in ordered if item["status"] in ACTIVE]
     recent = [item for item in ordered if item["status"] not in ACTIVE][:REQUEST_HISTORY]
@@ -449,7 +450,7 @@ def overview(state, envelope=None, error=None, writer_cause=None):
             "installation_uuid": state.uuid, "maintenance": (state.app / "storage/framework/down").exists(),
             "scheduler": scheduler(state) if state.initialized else {"last_tick_at": None},
             "configuration": configuration(state, envelope, error, encryption_key_status=destination_binding.get("key_status"),
-                                            writer_cause=writer_cause), "runs": runs,
+                                            writer_cause=writer_cause, destination_binding=destination_binding), "runs": runs,
             "last_good": last_good,
             "job_wait_overdue": job_wait_overdue(requests, journals, time.time()),
             "database_job_coordination": database_job_coordination(state),
