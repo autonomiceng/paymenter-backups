@@ -4,7 +4,32 @@ namespace Paymenter\Extensions\Others\Backups;
 /** Every administrator-facing sentence for engine codes, statuses, tasks and setup items. */
 final class Messages
 {
+    public static function incidentMail(string $key, string $reason): array
+    {
+        if ($key === 'scheduler' && $reason === 'scheduler-stopped') {
+            return ['subject' => 'Backups: scheduler stopped',
+                'body' => 'The backup scheduler has not checked in for more than five minutes. Open Backups and restore the Paymenter scheduler cron job shown there. Check the server logs, then confirm a new backup finishes.'];
+        }
+        if ($key === 'observer' && $reason === 'observer-unavailable') {
+            return ['subject' => 'Backups: incident check needs attention',
+                'body' => 'Two host checks could not read backup state. Open Backups, fix the reported setup problem, and check private storage access. Run backups:observe again and confirm it completes.'];
+        }
+        $labels = ['full:local' => 'Full backups on this server', 'database:local' => 'Database backups on this server',
+            'full:offsite' => 'Full backups in offsite storage', 'database:offsite' => 'Database backups in offsite storage'];
+        if (!isset($labels[$key]) || !in_array($reason, ['backup-failed', 'backup-overdue'], true)) {
+            throw new \RuntimeException('observer-result-invalid');
+        }
+        $state = $reason === 'backup-failed' ? 'have failed' : 'are overdue';
+        $next = str_ends_with($key, ':offsite')
+            ? 'Open Backups, check task history and the S3 connection and keys, then let automatic delivery retry. Confirm a new offsite copy finishes.'
+            : 'Open Backups, check task history and free storage space, and fix the reported problem. Check scheduler and worker logs if a task is stuck, then confirm a new backup finishes.';
+        return ['subject' => 'Backups: ' . strtolower($labels[$key]) . ' need attention',
+            'body' => $labels[$key] . ' ' . $state . '. Automatic recovery has not produced a current usable copy. ' . $next];
+    }
+
     private const ERRORS = [
+        'observer-result-invalid' => 'The backup incident check returned an invalid result. Check the installed Backups files and run backups:observe again.',
+        'staff-mail-not-configured' => 'Backup incident mail could not be sent. Set Paymenter\'s system email address, enable system mail, and run backups:observe again.',
         // Scheduling and admission
         'busy' => 'Another backup task was running. This one will try again next minute.',
         'config-changed' => 'Settings changed while you were saving. Open Settings again and re-enter your changes.',

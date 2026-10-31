@@ -138,7 +138,7 @@ PYTHON;
     {
         $command = $arguments[0] ?? '';
         if ($command === 'config') { return in_array($arguments[1] ?? '', ['show', 'set', 'check', 'validate'], true); }
-        return in_array($command, ['init', 'tick', 'overview', 'plan', 'run', 'verify', 'export', 'delete', 'schedule',
+        return in_array($command, ['init', 'tick', 'observe', 'overview', 'plan', 'run', 'verify', 'export', 'delete', 'schedule',
             'deliver', 'retention', 'retrieve', 'destination-test', 'request-worker'], true);
     }
 

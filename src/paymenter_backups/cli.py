@@ -93,6 +93,7 @@ def parser():
     sub.add_argument("--mode", choices=("full-quiesced", "database-online"))
     commands.add_parser("list")
     commands.add_parser("status")
+    commands.add_parser("observe", help="Read independent scheduler and backup freshness checks")
     sub = commands.add_parser("overview", help="Whitelisted backup, task and readiness summary without paths or manifests")
     sub.add_argument("--offline", action="store_true", help="Skip configuration and readiness checks")
     commands.add_parser("init", help="Explicitly initialize owner-private installation state")
@@ -463,6 +464,9 @@ def dispatch(args):
             from .requests import _sync_schedule
             _sync_schedule(state, current["settings"], time.time())
         return {"initialized": True, "installation_uuid": state.uuid}
+    if command == "observe":
+        from .observation import check
+        return check(state, load(args, credential_free=True, check_tools=False))
     if command == "overview":
         envelope, error = None, None
         pending_save, pending_writer_cause = False, None

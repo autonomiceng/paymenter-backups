@@ -141,6 +141,39 @@ process identities, request results, stderr or credentials; credentials appear
 only as saved/not saved. Every engine run of `tick --execute` writes a private
 `scheduler.json` check-in. `status` and `list` keep their 0.1 output.
 
+`observe` reads native settings without credentials or capture-tool probes and
+returns scheduler and copy-freshness incident codes. It never ticks, launches
+work, takes writer locks or changes journals. Full and database checks are
+separate, each with local and offsite checks for the selected storage policy.
+A full copy counts for database only through the runtime's durable satisfied
+request/coverage proof. Local copies require current archive/manifest identity;
+offsite freshness uses successful delivery receipts for the current destination
+and excludes copies already observed missing, damaged or unknown. This is not
+a new remote integrity scan or restore proof.
+
+Freshness expires after the next scheduled slot following the last usable
+snapshot (or the saved schedule epoch for a first copy), plus a recovery window.
+The window is at least 15 minutes, otherwise three capture attempts with their
+capture/compression and lock timeouts plus retry delays. Offsite adds the
+configured transport timeout/retry window and five minutes. Schedule Off skips
+freshness; a stopped scheduler matters only while a schedule is enabled. Its
+every-minute check-in gets a five-minute grace. Terminal failed/expired backup
+requests alert without waiting for freshness; deferred retries stay quiet until
+freshness expires. Direct failed CLI captures have no request retry and alert
+from their terminal journal. No new settings are introduced.
+
+Host cron invokes `backups:observe` independently of `schedule:run` and queue
+workers. It sends synchronous mail to Paymenter's system email address and
+respects the system mail disable switch. A private `incidents.json` ledger and
+observer-only lock serialize checks. One incident key per type/location stays
+open through subsequent failed slots/retries and closes after a healthy check;
+the next failure gets a new key. Mail transport failure retains an unsent
+incident for the next host check. A failed engine read preserves existing
+incidents and alerts only after another host check five minutes later. The
+observer does not restart unknown host processes or override recovery guards:
+the request runtime remains the recovery owner. See [INSTALL.md](INSTALL.md)
+for the independent host job and its monitoring limits.
+
 Settings saved on the page pass plain Laravel field rules that match the engine
 (positive integers stay positive, weekdays are 0 to 6 and required for an
 enabled weekly schedule, path lists are absolute, the S3 prefix has no empty,
