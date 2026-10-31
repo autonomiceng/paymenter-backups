@@ -223,7 +223,7 @@ def bridge(args, verb="read", payload=None):
         raise BackupError("bridge-failed") from None
 
 
-def load(args, credential_free=False, coordinated=True):
+def load(args, credential_free=False, coordinated=True, check_tools=True):
     # The cold bridge reads native rows and the encrypted store separately.
     # Read both beneath the Save lock, including worker/storage reloads. Callers
     # already owning config.lock explicitly suppress this nested acquisition.
@@ -232,7 +232,7 @@ def load(args, credential_free=False, coordinated=True):
         state = State(args.app, args.private_root, initialize=False)
         if state.initialized:
             with state.lock("config.lock", timeout=10):
-                return load(args, credential_free, coordinated=False)
+                return load(args, credential_free, coordinated=False, check_tools=check_tools)
     if not credential_free and (pathlib.Path(args.private_root) / "config-save.json").exists():
         raise BackupError("config-save-outcome-unknown")
     envelope = bridge(args, "read-settings" if credential_free else "read")
@@ -243,7 +243,7 @@ def load(args, credential_free=False, coordinated=True):
         raise BackupError("bridge-identity-mismatch")
     envelope["settings"] = dict(DEFAULTS, **envelope.get("settings", {}))
     normalize(envelope["settings"])
-    validate(envelope)
+    validate(envelope, check_tools=check_tools)
     return envelope
 
 
@@ -357,7 +357,7 @@ def schedule_settings(settings, kind):
                 schedule_time=settings[kind + "_time"], schedule_weekdays=settings[kind + "_weekdays"])
 
 
-def validate(envelope):
+def validate(envelope, check_tools=True):
     settings = envelope["settings"]
     if settings["settings_version"] not in (1, 2):
         raise BackupError("config-invalid", "settings_version")
@@ -434,6 +434,8 @@ def validate(envelope):
             endpoint = urlsplit(settings["s3_endpoint"])
             if not endpoint.hostname or endpoint.username or endpoint.password or endpoint.query or endpoint.fragment:
                 raise BackupError("s3-endpoint-invalid")
+    if not check_tools:
+        return envelope
     from .tools import checks
     tools = envelope.setdefault("tools", {})
     reports = checks(envelope, capabilities=settings["settings_version"] == 2)

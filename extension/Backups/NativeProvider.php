@@ -8,7 +8,7 @@ final class NativeProvider extends \Illuminate\Support\ServiceProvider
 {
     public function boot(): void
     {
-        $this->commands([ConfigSetCommand::class, GuardCommand::class]);
+        $this->commands([ConfigSetCommand::class, GuardCommand::class, ObserveCommand::class]);
         $this->callAfterResolving(Schedule::class, function (Schedule $schedule) {
             $schedule->call(function () use ($schedule) {
                 try {

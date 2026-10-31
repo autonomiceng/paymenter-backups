@@ -112,6 +112,39 @@ launches durable work. Paymenter's server setup owns the systemd timer or cron
 job invoking `schedule:run` each minute. This standard Artisan launcher needs no
 guarded-script setting.
 
+After private-state setup, add a separate host cron job as the site user:
+
+```cron
+*/5 * * * * /path/to/php /path/to/app/artisan backups:observe >> /path/to/private/observer.log 2>&1
+```
+
+Replace the paths with the installed app, its CLI PHP and existing private
+directory. PHP needs POSIX support, as do the existing private-state checks.
+Keep this job outside `schedule:run`, queue workers, and their coordination
+locks. It can then notice either stopped service and send mail synchronously.
+It never starts backup work itself. The runtime first retries/reconciles safe
+backup work; staff mail starts when a failure is terminal or a copy misses its
+schedule and recovery window. It cannot safely restart a host job whose service
+manager and ownership it does not control. Restore the job named in the mail
+and confirm a new backup finishes.
+
+Set Paymenter's system email address to the staff mailbox and enable system
+mail. Run `backups:observe` once as the site user and check its exit status.
+The private incident ledger suppresses repeated mail across command restarts;
+a transport failure stays pending and retries on the next host check. Do not
+delete that ledger to acknowledge an incident; a healthy check clears it.
+Use the host's existing log rotation for `observer.log`. This job and its paths,
+mail transport and system email address are installation responsibilities.
+
+The observer survives a stopped Paymenter scheduler or worker, not a stopped
+host, host cron service, database, PHP bootstrap, or inaccessible private state.
+Monitor this host job's nonzero exit/output and host availability through the
+host's existing monitoring. Do not discard its stderr. Offsite freshness tracks
+completed deliveries and recorded remote observations; use verified recovery
+checks for remote integrity. SMTP acceptance and the local sent receipt cannot
+commit together: a crash between those two can repeat a message with the same
+incident ID. Normal repeated checks send one message per incident.
+
 For an app at `/app` using a guarded scheduler instead, set the process environment
 variable `PAYMENTER_BACKUPS_GUARDED_SCHEDULER` to its exact absolute script path,
 for example `/opt/paymenter/scheduler.php`. The default is empty: no guarded

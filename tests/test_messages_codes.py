@@ -16,6 +16,8 @@ CODE = re.compile(r'[a-z][a-z0-9]+(?:-[a-z0-9]+)+\Z')
 # Scanning all code-shaped literals also catches readiness, journal and fallback
 # codes that are emitted without a direct BackupError constructor.
 NON_ERRORS = {
+    # Incident states have their own staff mail copy in Messages::incidentMail.
+    'backup-failed', 'backup-overdue', 'scheduler-stopped',
     'archive-key-export', 'artifact-stream', 'credentials-check', 'credentials-merge', 'credentials-rewrap',
     'credentials-write', 'database-and-full-app-checkpoint', 'database-online',
     'delete-interrupted', 'destination-test', 'discard-pending', 'document-roots',
