@@ -1,4 +1,5 @@
 import contextlib
+import errno
 import fcntl
 import hashlib
 import io
@@ -147,6 +148,20 @@ payload={'status':503,'except':[],'secret':None,'redirect':None,'template':'fixt
         manifest = verify(self.state, journal["run_id"], True)
         self.assertEqual(set(manifest["payloads"]), {"database.sql"})
         self.assertFalse((self.app / MARKERS[0]).exists())
+
+    def test_online_capture_io_failure_is_not_reported_as_missing_job_locks(self):
+        self.settings["mode"] = "database-online"
+        save = self.state.save
+
+        def disk_full(journal):
+            if journal["phase"] == "capturing":
+                raise OSError(errno.ENOSPC, "No space left on device")
+            return save(journal)
+
+        with patch.object(self.state, "save", side_effect=disk_full):
+            with self.assertRaisesRegex(BackupError, "^capture-failed$"):
+                capture(self.state, self.envelope)
+        self.assertEqual(self.state.journals()[0]["error"], "capture-failed")
 
     def test_online_waits_for_job_lock_and_defers_without_failed_run(self):
         from paymenter_backups.requests import path as request_path, worker

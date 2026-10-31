@@ -118,6 +118,9 @@ trait BuildsPageContent
         return [
             Text::make('No job locks are set up. Database backups can overlap Paymenter jobs.')
                 ->visible(fn () => ($this->overview()['database_job_coordination']['state'] ?? null) === 'absent'),
+            Callout::make(Messages::JOB_COORDINATION_UNVERIFIED)->warning()
+                ->description(fn () => Messages::error($this->overview()['database_job_coordination']['error'] ?? null))
+                ->visible(fn () => ($this->overview()['database_job_coordination']['state'] ?? null) === 'unverified'),
             Callout::make('Database backups have waited a day for Paymenter jobs')->warning()
                 ->description('Check scheduler and queue jobs and their lock setup on this tab. Waiting backups retry automatically. If none is waiting, queue a database backup. Backups cannot safely stop a job that may be changing data or guess which locks protect it.')
                 ->visible(fn () => (bool) ($this->overview()['job_wait_overdue'] ?? false)),

@@ -386,6 +386,8 @@ final class Messages
         'database-online' => 'Database backup',
     ];
 
+    public const JOB_COORDINATION_UNVERIFIED = 'Paymenter job locks need attention';
+
     /** Short type names for the history table. */
     public const TYPES = [
         'full-quiesced' => 'Full',

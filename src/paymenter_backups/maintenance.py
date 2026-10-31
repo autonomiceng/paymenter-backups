@@ -315,7 +315,7 @@ def coordination(state, envelope, *, required=True):
             cause = error.code if isinstance(error, BackupError) else "job-locks-unverified"
             atomic_json(state.root / "job-coordination.json", {"state": "unverified", "checked_at": time.time(), "error": cause})
             raise BackupError("job-coordination-unverified") from None
-        if isinstance(error, OSError):
+        if isinstance(error, OSError) and not entered:
             raise BackupError("job-locks-unverified") from None
         raise
     finally:
