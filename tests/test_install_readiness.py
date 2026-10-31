@@ -140,6 +140,41 @@ class InstallReadinessTests(PrivateFixture):
         self.assertFalse(result['ready'])
         self.assertIn('job-locks-unverified', result['blockers'])
 
+    def legacy_full_launcher(self):
+        lock = self.base / 'custom-launcher.lock'
+        self.settings.update(settings_version=1, enabled=False, mode='full-quiesced',
+            job_lock_paths=[str(lock)], cooperative_writers_acknowledged=True, external_state_acknowledged=True)
+        self.envelope['framework'].update(cache_driver='file', session_driver='file',
+            queue_driver='database', filesystem_driver='local')
+        line = f'* * * * * /usr/bin/flock {lock} {self.envelope["tools"]["php"]} {self.app}/artisan schedule:run'
+        self.envelope['tools']['crontab'] = self.script('crontab', 'print(' + repr(line) + ')')
+        return lock
+
+    def test_legacy_full_readiness_refuses_absent_custom_lock_without_taking_locks(self):
+        lock = self.legacy_full_launcher()
+        with patch('fcntl.flock', side_effect=AssertionError('readiness took a lock')):
+            result = self.check()['schedules']['full']
+            self.assertFalse(result['ready'])
+            self.assertEqual(result['blockers'], ['job-locks-unverified'])
+            lock.write_bytes(b'')
+            lock.chmod(0o600)
+            self.assertTrue(self.check()['schedules']['full']['ready'])
+
+    def test_legacy_full_activation_refuses_absent_custom_lock_before_native_publication(self):
+        from types import SimpleNamespace
+        self.legacy_full_launcher()
+        original = copy.deepcopy(self.envelope)
+        with patch.object(cli, 'bridge', return_value=original), \
+                patch.object(cli, 'native_settings', side_effect=AssertionError('activation reached native publication')) as native:
+            with self.assertRaises(BackupError) as raised:
+                cli.set_config(SimpleNamespace(php=self.envelope['tools']['php']), self.state,
+                    {'settings': {'enabled': True}})
+            self.assertEqual(raised.exception.code, 'job-locks-unverified')
+            native.assert_not_called()
+        self.assertFalse(original['settings']['enabled'])
+        self.assertFalse((self.state.root / 'config-save.json').exists())
+        self.assertFalse((self.state.root / 'schedule.json').exists())
+
     def test_real_cli_prepares_private_state_and_refuses_unready_schedule_without_native_write(self):
         envelope = copy.deepcopy(self.envelope)
         envelope.pop('tool_checks')

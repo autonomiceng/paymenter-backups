@@ -138,9 +138,10 @@ def check(state, envelope, prepare=False, inventory=None, now=None, mode_readine
     for kind, mode in (('full', 'full-quiesced'), ('database', 'database-online')):
         try:
             proposed = dict(envelope, settings=dict(settings, mode=mode))
-            if kind == 'database' and state.initialized:
-                from .maintenance import database_coordination_paths
-                database_coordination_paths(state, proposed, inventory)
+            if state.initialized:
+                from .maintenance import coordination_paths, database_coordination_paths
+                verify_paths = coordination_paths if kind == 'full' else database_coordination_paths
+                verify_paths(state, proposed, inventory)
             items = (mode_readiness[mode]['items'] if mode_readiness is not None else
                      plan(state, proposed, inventory, probe_locks=False)['readiness_items'])
             codes = [entry['code'] for entry in items if entry['code'] not in TRANSIENT_ERRORS]
