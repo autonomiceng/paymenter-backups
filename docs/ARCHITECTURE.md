@@ -585,11 +585,20 @@ file cache/session stores, compiled views and debugbar write there during HTTP
 requests. The manifest lists these paths. The archive supplies empty writable
 directories, including `storage/framework/cache/data`, so Laravel can boot after
 extraction without the omitted runtime data. Restored users must sign in again.
-Application code/config, keys, extensions and durable `storage/app` uploads,
-invoices and attachments stay included and strict. Tar errors still reject
-incomplete copies and use the bounded capture retry; exit 1 is never accepted
-generally and `--ignore-failed-read` is not used. Do not update code or schema
-during capture.
+Application code/config, keys and extensions stay strict. Native `storage/app`
+uploads, invoices and attachments remain included while HTTP requests write
+them. Only the app tar may accept exit 1, and only when every stderr line is
+exactly GNU tar's `file changed as we read it` or `File removed before we read it`
+warning for a path inside `storage/app`. Escaped/ambiguous paths, key/code files,
+symlinks, hard-linked files, mixed diagnostics, read errors and other exit codes
+fail. Directory-only changes keep the copy. A changed or removed regular file
+causes one extra app-tar pass under the original locks and deadline; SQL is not
+dumped again. Files still changing or missing in that last pass are listed in
+manifest `unstable_paths`; the last copy is kept. New uploads may be absent,
+and a changing attachment or PDF may be incomplete. Invoice PDFs can be
+regenerated from the restored database. This remains a live-files backup, not
+an atomic database/files snapshot. `--ignore-failed-read` is not used. Do not
+update code or schema during capture.
 Pre-existing safe maintenance files are preserved for foreground capture;
 scheduled capture skips pre-existing maintenance. Historical maintenance ownership
 and recovery handling remain supported without creating any new owned markers.

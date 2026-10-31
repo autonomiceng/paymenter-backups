@@ -100,7 +100,7 @@ class DiskReserve:
         self.last_at, self.last_bytes = now, total
 
 
-def run_output_tool(state, settings, name, command, timeout, target, *, stdout=False, register=None, deadline_check=None, output_root=None):
+def run_output_tool(state, settings, name, command, timeout, target, *, stdout=False, register=None, deadline_check=None, output_root=None, native_storage_changes=None):
     """Bound one child output without scanning private history on every poll."""
     available = output_limit(state, settings, output_root or target.parent)
     reserve = DiskReserve(state, settings, target.parent)
@@ -117,7 +117,8 @@ def run_output_tool(state, settings, name, command, timeout, target, *, stdout=F
     # Resolve the remaining duration after admission accounting, never before it.
     seconds = timeout() if callable(timeout) else timeout
     result = run_tool(name, command, seconds, output=target if stdout else None,
-                      register=register, budget_check=check, file_limit=available)
+                      register=register, budget_check=check, file_limit=available,
+                      native_storage_changes=native_storage_changes)
     check(force=True)
     space(state, settings)
     if deadline_check:
@@ -374,6 +375,26 @@ def extension_snapshot(app, check):
     return result
 
 
+def changed_storage_files(app, paths):
+    """Directory-only changes need no re-copy; files get one more app pass."""
+    files = []
+    for relative in paths:
+        path = app / relative
+        if path.resolve() != path:
+            raise BackupError('child-failed', 'tar', {'tool': 'tar'})
+        try:
+            info = path.lstat()
+        except FileNotFoundError:
+            files.append(relative)
+            continue
+        if stat.S_ISDIR(info.st_mode):
+            continue
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+            raise BackupError('child-failed', 'tar', {'tool': 'tar'})
+        files.append(relative)
+    return files
+
+
 def cleanup_failed_work(state):
     """Reclaim recorded capture work after service recovery and worker death."""
     for item in state.journals():
@@ -530,12 +551,22 @@ def capture(state, envelope, scheduled=False, request_id=None, envelope_loader=N
                     raise BackupError("dump-empty")
                 if full:
                     excludes = [*RUNTIME_PATHS, *journal["owned_markers"]]
-                    tar_command = [envelope["tools"]["tar"], "--acls", "--xattrs", "--numeric-owner", "-cf", str(payload / "app.tar")]
+                    tar_command = [envelope["tools"]["tar"], "--quoting-style=escape", "--acls", "--xattrs", "--numeric-owner", "-cf", str(payload / "app.tar")]
                     tar_command += ["--exclude=./" + relative for relative in excludes]
                     tar_command += ["-C", str(state.app), "."]
                     try:
-                        run_output_tool(state, settings, "tar", tar_command, remaining, payload / "app.tar",
-                                        register=register, deadline_check=remaining, output_root=output)
+                        for attempt in range(2):
+                            if attempt:
+                                # Replacing this private work file frees its
+                                # bytes before calculating the second pass cap.
+                                (payload / "app.tar").unlink()
+                            changes = []
+                            run_output_tool(state, settings, "tar", tar_command, remaining, payload / "app.tar",
+                                            register=register, deadline_check=remaining, output_root=output,
+                                            native_storage_changes=changes)
+                            unstable = changed_storage_files(state.app, changes)
+                            if not unstable or attempt:
+                                break
                     finally:
                         # A changing extension can also make tar fail. It still
                         # belongs to the next scheduled slot, not an immediate retry.
@@ -566,6 +597,7 @@ def capture(state, envelope, scheduled=False, request_id=None, envelope_loader=N
                         "mode": settings["mode"], "created_at": journal["created_at"],
                         "guarantee": proposed["guarantee"], "database_inventory": database_inventory,
                         "excluded_paths": excludes if full else [],
+                        "unstable_paths": unstable if full else [],
                         "external_state": "Host configuration, cron, Redis, external storage and provider actions excluded",
                         "payloads": {path.name: {"sha256": digest(path), "size": path.stat().st_size} for path in payload.iterdir()}}
             atomic_json(payload / "manifest.json", manifest)

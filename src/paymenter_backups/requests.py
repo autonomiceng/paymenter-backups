@@ -97,8 +97,19 @@ def list_requests(state):
 
 def cancel(state, request_id):
     # Match the run -> requests lock order used by coverage reconciliation.
-    with state.lock(), state.lock("requests.lock"):
+    needs_run_lock = read_json(path(state, request_id))["action"] == "deliver"
+    with contextlib.ExitStack() as locks:
+        if needs_run_lock:
+            locks.enter_context(state.lock())
+        locks.enter_context(state.lock("requests.lock"))
         item = read_json(path(state, request_id))
+        if item["action"] == "deliver" and not needs_run_lock:
+            # A worker/tick converted the request. Release requests.lock before
+            # taking the journal lock, then re-read status and action below.
+            locks.close()
+            locks.enter_context(state.lock())
+            locks.enter_context(state.lock("requests.lock"))
+            item = read_json(path(state, request_id))
         if item["status"] not in ("pending", "deferred"):
             raise BackupError("request-not-cancellable")
         item["status"] = "cancelled"

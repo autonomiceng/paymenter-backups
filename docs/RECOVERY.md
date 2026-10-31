@@ -248,6 +248,15 @@ Full restore into an isolated new host/path:
    Empty writable directories (also `storage/framework/cache/data`) are already
    in app.tar. Laravel rebuilds runtime data; users sign in again. Durable files
    under `storage/app`, keys, configuration and extension code remain included.
+   Included uploads and invoice PDFs are copied live. Directory changes from
+   new uploads do not discard the backup. A file change or removal gets one
+   extra app-copy pass without another SQL dump. Check manifest `unstable_paths`:
+   these files were still changing or disappearing in the last pass, so their
+   copies may be incomplete or absent. New uploads may also be absent. Regenerate
+   invoice PDFs from the restored database and recover needed attachments from
+   another copy. Code, configuration, keys, extensions and tar read errors remain
+   strict; this allowance only covers exact change/removal warnings under
+   `storage/app`.
 4. Create an isolated database and import database.sql using a matching MariaDB
    client. Recent MariaDB sandbox-mode comment lines can fail with older MariaDB
    or MySQL clients. This engine refuses visible routines, events, views,

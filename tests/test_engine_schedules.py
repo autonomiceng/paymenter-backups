@@ -278,6 +278,41 @@ class ConfigurationTests(PrivateFixture):
 
 
 class SchedulerTests(PrivateFixture):
+    def test_cancel_waiting_non_delivery_while_run_lock_is_held(self):
+        for status in ('pending', 'deferred'):
+            item = requests.create(self.state)
+            atomic_json(requests.path(self.state, item['request_id']), dict(item, status=status))
+            with self.state.lock():
+                self.assertEqual(requests.cancel(self.state, item['request_id'])['status'], 'cancelled')
+        # Deliver cancellation still needs the journal lock, then releases its hold.
+        self.backup('captured')
+        journal = self.item('captured')
+        journal['delivery_required'] = True
+        self.state.save(journal)
+        item = requests.create(self.state, 'deliver', {'run_id': 'captured'})
+        with self.state.lock(), self.assertRaisesRegex(BackupError, '^busy$'):
+            requests.cancel(self.state, item['request_id'])
+        self.assertEqual(read_json(requests.path(self.state, item['request_id']))['status'], 'pending')
+        requests.cancel(self.state, item['request_id'])
+        self.assertFalse(self.item('captured')['delivery_required'])
+        # Re-check the action after a tick converts run -> deliver between reads.
+        journal['delivery_required'] = True
+        self.state.save(journal)
+        item = requests.create(self.state)
+        target = requests.path(self.state, item['request_id'])
+        first = True
+        def convert_before_lock(path):
+            nonlocal first
+            value = read_json(path)
+            if path == target and first:
+                first = False
+                atomic_json(target, dict(value, action='deliver', arguments={'run_id': 'captured'}))
+            return value
+        with patch.object(requests, 'read_json', side_effect=convert_before_lock):
+            requests.cancel(self.state, item['request_id'])
+        self.assertEqual(read_json(target)['status'], 'cancelled')
+        self.assertFalse(self.item('captured')['delivery_required'])
+
     def enable(self):
         self.settings.update(full_schedule='daily', full_time='03:00', database_schedule='daily', database_time='03:00')
         config.normalize(self.settings)

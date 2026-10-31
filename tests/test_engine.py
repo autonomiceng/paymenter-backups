@@ -182,6 +182,76 @@ payload={'status':503,'except':[],'secret':None,'redirect':None,'template':'fixt
         with self.assertRaisesRegex(BackupError, "child-failed"):
             capture(self.state, self.envelope)
 
+    def native_storage_writer(self, writer_body):
+        passes = self.base / "app-copy-passes"
+        dumps = self.base / "sql-dumps"
+        dump = pathlib.Path(self.envelope["tools"]["dump"])
+        if not hasattr(self, "native_dump_body"):
+            self.native_dump_body = dump.read_text()
+        dump.write_text(self.native_dump_body + f"\nwith open({str(dumps)!r},'a') as out: out.write('dump\\n')\n")
+        writer = self.script("native-writer", f"import pathlib,os\npasses=pathlib.Path({str(passes)!r})\n" + writer_body)
+        self.envelope["tools"]["tar"] = str(self.script("native-tar", f"import os,sys,pathlib\nargs=sys.argv[1:]\n"
+            f"if {str(self.app)!r} in args:\n"
+            f"    with open({str(passes)!r},'a') as out: out.write('copy\\n')\n"
+            f"    args=['--sort=name','--checkpoint=16','--checkpoint-action=exec={writer}',*args]\n"
+            "os.execv('/usr/bin/tar',['tar',*args])"))
+        return passes, dumps
+
+    def test_live_ticket_attachment_directory_change_keeps_verifying_archive(self):
+        uploads = self.app / "storage/app/tickets/uploads"
+        uploads.mkdir(parents=True)
+        attachment = uploads / "existing.bin"
+        attachment.write_bytes(b"a" * 2 * 1024**2)
+        passes, dumps = self.native_storage_writer(f"directory=pathlib.Path({str(uploads)!r})\n"
+            "(directory/('new-'+str(len(list(directory.iterdir()))))).write_text('attachment')\n")
+        journal = capture(self.state, self.envelope)
+        manifest = verify(self.state, journal["run_id"], show=True)
+        self.assertGreater(len(list(uploads.iterdir())), 1)
+        self.assertEqual(passes.read_text().splitlines(), ["copy"])
+        self.assertEqual(dumps.read_text().splitlines(), ["dump"])
+        self.assertEqual(manifest["unstable_paths"], [])
+        with tarfile.open(journal["archive_path"], "r:gz") as outer:
+            with tarfile.open(fileobj=io.BytesIO(outer.extractfile("./app.tar").read())) as inner:
+                self.assertEqual(inner.extractfile("./storage/app/tickets/uploads/existing.bin").read(), attachment.read_bytes())
+
+    def test_live_invoice_rewrites_retry_app_copy_once_and_record_persistent_changes(self):
+        invoice = self.app / "storage/app/invoices/42.pdf"
+        invoice.parent.mkdir(parents=True)
+        invoice.write_bytes(b"p" * 2 * 1024**2)
+        for persistent in (False, True):
+            with self.subTest(persistent=persistent):
+                passes, dumps = self.native_storage_writer(
+                    f"path=pathlib.Path({str(invoice)!r})\n"
+                    f"if {persistent!r} or len(passes.read_text().splitlines()) == 1:\n"
+                    "    info=path.stat()\n"
+                    "    with path.open('r+b') as out: out.write(b'%PDF-rewritten')\n"
+                    "    os.utime(path,ns=(info.st_atime_ns,info.st_mtime_ns+1000000000))\n")
+                # Reset counters shared by the wrapper between independent captures.
+                passes.write_text("")
+                dumps.write_text("")
+                journal = capture(self.state, self.envelope)
+                manifest = verify(self.state, journal["run_id"], show=True)
+                self.assertEqual(passes.read_text().splitlines(), ["copy", "copy"])
+                self.assertEqual(dumps.read_text().splitlines(), ["dump"])
+                self.assertEqual(manifest["unstable_paths"], ["storage/app/invoices/42.pdf"] if persistent else [])
+        # GNU tar also exits one when an enumerated file vanishes before read.
+        removed = invoice.parent / "zzremoved.pdf"
+        removed.write_text("transient PDF")
+        passes, dumps = self.native_storage_writer(f"pathlib.Path({str(removed)!r}).unlink(missing_ok=True)\n")
+        passes.write_text("")
+        dumps.write_text("")
+        journal = capture(self.state, self.envelope)
+        self.assertEqual(verify(self.state, journal["run_id"], show=True)["unstable_paths"], [])
+        self.assertEqual(passes.read_text().splitlines(), ["copy", "copy"])
+        self.assertEqual(dumps.read_text().splitlines(), ["dump"])
+        # Real GNU tar must still fail on the same warning outside storage/app.
+        key = self.app / "storage/oauth-private.key"
+        key.write_bytes(b"k" * 2 * 1024**2)
+        self.native_storage_writer(f"path=pathlib.Path({str(key)!r})\ninfo=path.stat()\n"
+            "os.utime(path,ns=(info.st_atime_ns,info.st_mtime_ns+1000000000))\n")
+        with self.assertRaisesRegex(BackupError, "child-failed"):
+            capture(self.state, self.envelope)
+
     def test_extension_change_during_copy_skips_scheduled_capture_then_next_slot_succeeds(self):
         from paymenter_backups.requests import path as request_path, worker
         extension = self.app / "extensions/Others/Fixture/code.php"
