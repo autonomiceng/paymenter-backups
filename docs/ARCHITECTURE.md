@@ -169,7 +169,8 @@ observer-only lock serialize checks. One incident key per type/location stays
 open through subsequent failed slots/retries and closes after a healthy check;
 the next failure gets a new key. Mail transport failure retains an unsent
 incident for the next host check. A failed engine read preserves existing
-incidents and alerts only after another host check five minutes later. The
+incidents and alerts on a later host check after a four-minute hold-off. This
+allows for command runtime so the next five-minute check can send mail. The
 observer does not restart unknown host processes or override recovery guards:
 the request runtime remains the recovery owner. See [INSTALL.md](INSTALL.md)
 for the independent host job and its monitoring limits.

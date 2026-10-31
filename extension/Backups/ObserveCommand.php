@@ -68,7 +68,7 @@ final class ObserveCommand extends Command
             // failure remains pending for the next invocation, never forgotten.
             PrivateStore::atomic($path, $ledger);
             foreach ($active as $key => $incident) {
-                if ($incident['sent_at'] !== null || ($key === 'observer' && time() - $incident['opened_at'] < 300)) { continue; }
+                if ($incident['sent_at'] !== null || ($key === 'observer' && time() - $incident['opened_at'] < 240)) { continue; }
                 $email = config('settings.system_email_address');
                 if (config('settings.mail_disable') || !is_string($email) || !filter_var($email, FILTER_VALIDATE_EMAIL)) {
                     throw new \RuntimeException('staff-mail-not-configured');

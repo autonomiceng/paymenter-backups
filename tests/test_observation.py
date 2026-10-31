@@ -165,7 +165,10 @@ class IncidentMailTests(PrivateFixture):
         self.assertEqual(self.invoke(None)['sent'], 1)
         ledger = read_json(self.state.root / 'incidents.json')
         self.assertIn('full:local', ledger['active'])
-        ledger['active']['observer']['opened_at'] -= 301
+        ledger['active']['observer']['opened_at'] -= 60
+        atomic_json(self.state.root / 'incidents.json', ledger)
+        self.assertEqual(self.invoke(None)['sent'], 1)
+        ledger['active']['observer']['opened_at'] -= 210
         atomic_json(self.state.root / 'incidents.json', ledger)
         self.assertEqual(self.invoke(None)['sent'], 2)
         self.assertEqual(self.invoke(None)['sent'], 2)
