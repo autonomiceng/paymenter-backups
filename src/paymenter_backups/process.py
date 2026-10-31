@@ -322,7 +322,16 @@ def waiting_launchers(held_locks):
     return waiting
 
 
-def app_workers(app, *, held_locks=()):
+def _continuous_worker(words):
+    if any(word in words for word in ('queue:listen', 'horizon', 'schedule:work')):
+        return True
+    if 'queue:work' in words:
+        bounded = any(word in words for word in ('--stop-when-empty', '--once')) or any(re.fullmatch(r'--(?:max-time|max-jobs)=[1-9][0-9]*', word) for word in words)
+        return not bounded or '--force' in words
+    return False
+
+
+def app_workers(app, *, held_locks=(), allow_continuous=False):
     from .scheduler import guarded_relevant
     found = []
     waiters = waiting_launchers(held_locks)
@@ -342,6 +351,8 @@ def app_workers(app, *, held_locks=()):
                 continue
             cwd = (path / "cwd").resolve()
             if guarded or cwd == app or str(app / "artisan") in arguments:
+                if allow_continuous and not guarded and _continuous_worker(words):
+                    continue
                 found.append(int(path.name))
         except (OSError, RuntimeError):
             continue
@@ -356,12 +367,8 @@ def continuous_workers(app):
             # flock waiting to spawn a child is not itself an application writer.
             if pathlib.Path(words[0]).name in ('flock', 'env'):
                 continue
-            if any(word in words for word in ('queue:listen', 'horizon', 'schedule:work')):
+            if _continuous_worker(words):
                 return True
-            if 'queue:work' in words:
-                bounded = any(word in words for word in ('--stop-when-empty', '--once')) or any(re.fullmatch(r'--(?:max-time|max-jobs)=[1-9][0-9]*', word) for word in words)
-                if not bounded or '--force' in words:
-                    return True
         except (OSError, UnicodeError):
             continue
     return False

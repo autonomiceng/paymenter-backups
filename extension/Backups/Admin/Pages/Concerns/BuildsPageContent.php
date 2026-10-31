@@ -116,7 +116,7 @@ trait BuildsPageContent
     {
         $pending = fn () => (int) ($this->overview()['s3_pending']['count'] ?? 0);
         return [
-            Text::make('No job locks are set up. Database backups can overlap Paymenter jobs.')
+            Text::make('Database backups are running without job locks and can overlap Paymenter jobs.')
                 ->visible(fn () => ($this->overview()['database_job_coordination']['state'] ?? null) === 'absent'),
             Callout::make(Messages::JOB_COORDINATION_UNVERIFIED)->warning()
                 ->description(fn () => Messages::error($this->overview()['database_job_coordination']['error'] ?? null))

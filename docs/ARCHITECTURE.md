@@ -441,15 +441,23 @@ Locks open without creation, in stable order, and identity/remaining workers
 are rechecked after acquisition. init creates only the suggested scheduler.lock
 and queue.lock as 0600 owner-private regular files and validates existing
 descriptors without acquiring these launcher locks. Full capture requires these
-locks. Database-only capture also takes the verified locks, waits up to
-max(lock_timeout, 60 seconds), and defers when a job is still running. This spans
+locks. Database-only capture takes the verified locks for finite jobs, waits up to
+max(lock_timeout, 60 seconds), and defers when a finite job is still running. This spans
 the suggested queue worker's 50-second run; billing admission reserves that wait. It uses
 no maintenance mode or drain. Locks keep a multi-step job out of the dump; a
 transactional snapshot alone cannot make its separate writes atomic.
-Only a complete fresh launcher inventory with no configured or discovered
-coordination permits database-only capture without locks. The page shows that
-these snapshots may overlap jobs, preserving availability when setup was skipped.
-Discovery or verification failures defer and retry; none authorize an unlocked dump.
+Continuous workers, including stock systemd `queue:work`, may keep running during
+a database-only snapshot. Their lifetime lock cannot provide a boundary between
+jobs, so database admission excludes it and the continuous process from its writer
+check. Bounded workers with a cooperative lock still wait, even when systemd
+restarts them. Full admission continues to refuse continuous workers.
+A database snapshot may therefore contain a continuous job's intermediate commits;
+it guarantees transactional InnoDB consistency, not atomic multi-step jobs.
+Fresh discovery still verifies all finite coordination and any explicit lock list;
+discovery failures, unknown locks and unsafe finite locks defer and retry.
+Only a complete fresh inventory with no finite coordination to acquire, or with no
+configured/discovered coordination at all, permits capture without locks. The page
+shows that these snapshots can overlap jobs. Backups never stops a continuous worker.
 Blocked flock launchers proven by kernel wait records for our held inodes are
 excluded from the writer scan; actual children and uncoordinated writers remain checked. Settings saves, schedule changes and
 initialization do not acquire launcher locks.
@@ -519,7 +527,7 @@ other connections, panel/Supervisor launchers and undeclared writers. Both kinds
 retain the no-concurrent-DDL confirmation; absence of visible migrations proves
 nothing. Busy/billing/job-lock states are waiting, recovery is needs-recovery,
 other refusals are needs-setup. Bounded running jobs retain coordination's wait;
-continuous workers are setup blockers.
+continuous workers are full-backup setup blockers.
 
 ## Capture modes
 

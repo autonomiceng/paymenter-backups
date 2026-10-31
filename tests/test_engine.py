@@ -191,6 +191,56 @@ payload={'status':503,'except':[],'secret':None,'redirect':None,'template':'fixt
                     self.assertTrue(journal["local_complete"])
                     self.assertFalse((self.app / MARKERS[0]).exists())
 
+    def test_online_completes_with_coordinated_scheduler_and_continuous_systemd_queue(self):
+        from paymenter_backups.requests import path as request_path, worker
+        self.settings.update(mode="database-online", lock_timeout=0)
+        scheduler = pathlib.Path(self.settings["job_lock_paths"][0])
+        scheduler.chmod(0o600)
+        queue = self.base / "continuous-queue.lock"
+        queue.touch(mode=0o600)
+        php = self.script("continuous-php", "import time; print('ready', flush=True); time.sleep(120)")
+        for version in (1, 2):
+            for locked in (False, True):
+                with self.subTest(version=version, locked=locked):
+                    self.settings.update(settings_version=version,
+                                         job_lock_paths=[str(scheduler)] + ([str(queue)] if locked else []))
+                    command = f"/usr/bin/php {self.app}/artisan queue:work"
+                    if locked:
+                        command = f"/usr/bin/flock {queue} " + command
+                    show = (f"Id=paymenter-worker.service\nUser={os.getuid()}\nWorkingDirectory={self.app}\n"
+                            f"DynamicUser=no\nLoadState=loaded\nRestart=always\n"
+                            f"ExecStart={{ path=/usr/bin/php ; argv[]={command} ; ignore_errors=no ; }}\n")
+                    self.envelope["tools"]["systemctl"] = str(self.script("continuous-systemctl", f"""import json,sys
+if '--user' in sys.argv or 'list-timers' in sys.argv: print('[]')
+elif 'list-units' in sys.argv: print(json.dumps([{{'unit': 'paymenter-worker.service', 'active': 'active'}}]))
+elif 'list-unit-files' in sys.argv: print(json.dumps([{{'unit_file': 'paymenter-worker.service', 'state': 'enabled'}}]))
+else: print({show!r})"""))
+                    argv = [str(php), str(self.app / "artisan"), "queue:work"]
+                    if locked:
+                        argv = ["/usr/bin/flock", str(queue), *argv]
+                    proc = subprocess.Popen(argv, cwd=self.app, stdout=subprocess.PIPE, start_new_session=True)
+                    try:
+                        self.assertTrue(select.select([proc.stdout], [], [], 5)[0])
+                        self.assertEqual(proc.stdout.readline(), b"ready\n")
+                        request = create(self.state, arguments={"mode": "database-online"})
+                        atomic_json(request_path(self.state, request["request_id"]), dict(request, status="launching"))
+                        with scheduler.open("r+b") as held, patch("paymenter_backups.maintenance.DATABASE_LOCK_WAIT", 0):
+                            fcntl.flock(held, fcntl.LOCK_EX)
+                            waiting = worker(self.state, self.envelope, request["request_id"])
+                        self.assertEqual((waiting["status"], waiting["error"]), ("deferred", "job-lock-busy"))
+                        atomic_json(request_path(self.state, request["request_id"]), dict(request, status="launching"))
+                        with patch("paymenter_backups.maintenance.DATABASE_LOCK_WAIT", 0):
+                            result = worker(self.state, self.envelope, request["request_id"])
+                        self.assertEqual(result["status"], "complete", result)
+                        self.assertTrue(self.state.journals()[-1]["local_complete"])
+                        self.assertIsNone(proc.poll(), "database capture must leave the queue running")
+                        self.assertFalse((self.app / MARKERS[0]).exists())
+                    finally:
+                        if proc.poll() is None:
+                            os.killpg(proc.pid, signal.SIGTERM)
+                        proc.wait(timeout=5)
+                        proc.stdout.close()
+
     def test_online_billing_window_defers_and_proven_unconfigured_hosts_still_capture(self):
         self.settings["mode"] = "database-online"
         lock = pathlib.Path(self.settings["job_lock_paths"][0])

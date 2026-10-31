@@ -255,8 +255,8 @@ def coordination_paths(state, envelope, inventory=None):
 
 
 def database_coordination_paths(state, envelope):
-    """Only a complete inventory with no configured/discovered locks proves no setup."""
-    from .discovery import discover
+    """Coordinate finite jobs; continuous writers may overlap an online snapshot."""
+    from .discovery import admission, discover
     inventory = discover(state, envelope)
     if inventory["state"] != "ok":
         raise BackupError(inventory["error"] or "job-discovery-incomplete")
@@ -264,7 +264,11 @@ def database_coordination_paths(state, envelope):
             item["coordination"] in ("uncoordinated", "continuous") and item["lock"] is None
             for item in inventory["items"]):
         return []
-    return coordination_paths(state, envelope, inventory)
+    errors, paths = admission(envelope, inventory, database_only=True)
+    if errors:
+        first = errors[0]
+        raise BackupError(first["code"], first["field"], first["detail"])
+    return paths
 
 
 @contextlib.contextmanager
@@ -274,7 +278,7 @@ def coordination(state, envelope, *, required=True):
     try:
         paths = coordination_paths(state, envelope) if required else database_coordination_paths(state, envelope)
         if not paths:
-            # This explicit, successful discovery result is the only unlocked path.
+            # Fresh discovery proved no finite coordination to acquire.
             atomic_json(state.root / "job-coordination.json", {"state": "absent", "checked_at": time.time()})
             entered = True
             yield False
@@ -305,7 +309,7 @@ def coordination(state, envelope, *, required=True):
             held = os.fstat(descriptor)
             if (current.st_dev, current.st_ino) != (held.st_dev, held.st_ino):
                 raise BackupError("job-lock-unsafe" if v2 else "job-locks-unverified")
-        if app_workers(state.app, held_locks=descriptors):
+        if app_workers(state.app, held_locks=descriptors, allow_continuous=not required):
             raise BackupError("job-workers-running" if v2 else "job-locks-unverified")
         entered = True
         yield True
