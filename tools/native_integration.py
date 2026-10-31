@@ -549,16 +549,38 @@ def main():
             if not advisory.get('valid'):
                 raise RuntimeError('direct Artisan config-set no longer initializes and validates')
             results['direct_artisan_config_set_initializes'] = True
+            lock = work / 'scheduler.lock'
+            lock.touch(mode=0o600)
+            fakebin = work / 'fixture-bin'
+            fakebin.mkdir(mode=0o700)
+            cron = fakebin / 'crontab'
+            cron.write_text('#!/bin/sh\ncat <<\'CRON\'\n* * * * * flock -n ' + str(lock) + ' ' + args.php + ' ' + str(app / 'artisan') + ' schedule:run\nCRON\n')
+            cron.chmod(0o700)
+            systemctl = fakebin / 'systemctl'
+            systemctl.write_text('#!/bin/sh\nprintf \'[]\\n\'\n')
+            systemctl.chmod(0o700)
+            execute([args.php, 'artisan', 'backups:guard'], cwd=app)
+            execute([args.php, 'artisan', 'backups:config-set'], cwd=app, input=json.dumps({'job_lock_paths': json.dumps([str(lock)])}).encode())
+            # Adapter envelope instrumentation is confined to this fixture. The
+            # production bridge has no configurable crontab override.
+            fixture_bridge = work / 'fixture-bridge.php'
+            fixture_bridge.write_text('<?php ob_start(); require ' + json.dumps(str(bridge)) + '; $value=json_decode(ob_get_clean(),true); $value["tools"]["crontab"]=' + json.dumps(str(cron)) + '; $value["tools"]["systemctl"]=' + json.dumps(str(systemctl)) + '; echo json_encode($value)."\\n";')
+            capture_cli = cli[:]
+            capture_cli[capture_cli.index('--bridge') + 1] = fixture_bridge
+            execution_env = child_environment({'PATH': str(fakebin) + ':' + child_environment()['PATH']})
             if args.slow_step_delay:
                 print('Fixture slow step: delaying schedule writes for ' + str(args.slow_step_delay) + ' seconds', file=sys.stderr, flush=True)
                 time.sleep(args.slow_step_delay)
                 earlier_guard = json.loads((private / 'billing-guard.json').read_text())
                 print('Fixture slow step: earlier billing guard age is ' + str(round(time.time() - earlier_guard['generated_at'], 1)) +
                       ' seconds (maximum ' + str(persisted_config['billing_guard_max_age']) + ')', file=sys.stderr, flush=True)
+            # Commission only the disposable fixture: real tick/observer receipts, fake host inventory.
+            execute(capture_cli + ['tick', '--execute'])
+            execute([args.php, 'artisan', 'backups:observe'], cwd=app)
             for kind in ('full', 'database'):
-                guarded_write(cli, ['schedule', 'set', '--kind', kind], input=json.dumps({'frequency': 'weekly', 'time': '02:30', 'weekdays': [0, 2], 'timezone': 'UTC'}).encode())
-                guarded_write(cli, ['schedule', 'enable', '--kind', kind])
-                guarded_write(cli, ['schedule', 'disable', '--kind', kind])
+                guarded_write(capture_cli, ['schedule', 'set', '--kind', kind], input=json.dumps({'frequency': 'weekly', 'time': '02:30', 'weekdays': [0, 2], 'timezone': 'UTC'}).encode())
+                guarded_write(capture_cli, ['schedule', 'enable', '--kind', kind])
+                guarded_write(capture_cli, ['schedule', 'disable', '--kind', kind])
                 written = json.loads(execute(cli + ['schedule', 'show', '--kind', kind]))['schedules'][kind]
                 if written['schedule'] != 'off' or written['weekdays'] != [0, 2] or written['time'] != '02:30':
                     raise RuntimeError('native v2 CLI schedule write did not persist for ' + kind)
@@ -594,25 +616,6 @@ def main():
             if args.skip_restore:
                 print(json.dumps({'database_visibility': visibility, 'adapter_checks': results, 'restore': 'explicitly skipped', 'fixture': str(work)}))
                 return
-            lock = work / 'scheduler.lock'
-            lock.touch(mode=0o600)
-            fakebin = work / 'fixture-bin'
-            fakebin.mkdir(mode=0o700)
-            cron = fakebin / 'crontab'
-            cron.write_text('#!/bin/sh\ncat <<\'CRON\'\n* * * * * flock -n ' + str(lock) + ' ' + args.php + ' ' + str(app / 'artisan') + ' schedule:run\nCRON\n')
-            cron.chmod(0o700)
-            systemctl = fakebin / 'systemctl'
-            systemctl.write_text('#!/bin/sh\nprintf \'[]\\n\'\n')
-            systemctl.chmod(0o700)
-            execute([args.php, 'artisan', 'backups:guard'], cwd=app)
-            execute([args.php, 'artisan', 'backups:config-set'], cwd=app, input=json.dumps({'job_lock_paths': json.dumps([str(lock)])}).encode())
-            # Adapter envelope instrumentation is confined to this fixture. The
-            # production bridge has no configurable crontab override.
-            fixture_bridge = work / 'fixture-bridge.php'
-            fixture_bridge.write_text('<?php ob_start(); require ' + json.dumps(str(bridge)) + '; $value=json_decode(ob_get_clean(),true); $value["tools"]["crontab"]=' + json.dumps(str(cron)) + '; $value["tools"]["systemctl"]=' + json.dumps(str(systemctl)) + '; echo json_encode($value)."\\n";')
-            capture_cli = cli[:]
-            capture_cli[capture_cli.index('--bridge') + 1] = fixture_bridge
-            execution_env = child_environment({'PATH': str(fakebin) + ':' + child_environment()['PATH']})
             with http_server(app, args.php, http_port, work):
                 request = urllib.request.Request(native_url + '/paymenter/update', data=b'{}', headers={'Content-Type': 'application/json'})
                 try:

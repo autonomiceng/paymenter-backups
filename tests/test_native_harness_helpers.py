@@ -20,6 +20,10 @@ class GuardedWriteChecks(fixtures.PrivateFixture):
         self.now = fixtures.instant('2026-10-15T12:00:00+00:00')
         self.envelope.update(schema_version=1, owner_uid=self.app.stat().st_uid,
                              private_root=str(self.state.root))
+        lock = self.state.root / 'scheduler.lock'
+        lock.touch(mode=0o600)
+        scheduler = '* * * * * flock -n ' + str(lock) + ' ' + self.envelope['tools']['php'] + ' ' + str(self.app / 'artisan') + ' schedule:run'
+        self.envelope['tools']['crontab'] = self.script('crontab', 'print(' + repr(scheduler) + ')')
         self.commands = []
         self.guard_failure = False
         self.cli = [sys.executable, '--app', str(self.app), '--private-root', str(self.state.root),
@@ -43,6 +47,9 @@ class GuardedWriteChecks(fixtures.PrivateFixture):
                 raise RuntimeError('fixture guard refresh failed')
             self.refresh_guard()
             return b'{}'
+        atomic_json(self.state.root / 'scheduler.json', {'last_tick_at': self.now})
+        atomic_json(self.state.root / 'incidents.json', {'schema_version': 1,
+            'installation_uuid': self.state.uuid, 'checked_at': self.now, 'active': {}})
         args = cli.parser().parse_args([str(value) for value in command[command.index('--app'):]])
 
         def native_write(command, input_bytes, descriptors):
