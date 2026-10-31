@@ -450,7 +450,9 @@ Continuous workers, including stock systemd `queue:work`, may keep running durin
 a database-only snapshot. Their lifetime lock cannot provide a boundary between
 jobs, so database admission excludes it and the continuous process from its writer
 check. Bounded workers with a cooperative lock still wait, even when systemd
-restarts them. Full admission continues to refuse continuous workers.
+restarts them. V1 with explicit locks retains the legacy finite launcher syntax,
+including queue selection options; v2 retains its strict parser. Full admission
+continues to refuse continuous workers.
 A database snapshot may therefore contain a continuous job's intermediate commits;
 it guarantees transactional InnoDB consistency, not atomic multi-step jobs.
 Fresh discovery still verifies all finite coordination and any explicit lock list;

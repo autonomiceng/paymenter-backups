@@ -241,6 +241,20 @@ else: print({show!r})"""))
                         proc.wait(timeout=5)
                         proc.stdout.close()
 
+    def test_online_preserves_v1_finite_queue_options_but_v2_refuses_them(self):
+        self.settings.update(mode="database-online", settings_version=1)
+        lock = pathlib.Path(self.settings["job_lock_paths"][0])
+        lock.chmod(0o600)
+        cron = (f"* * * * * /usr/bin/flock {lock} /usr/bin/php {self.app}/artisan schedule:run\n"
+                f"* * * * * /usr/bin/flock {lock} /usr/bin/php {self.app}/artisan queue:work --stop-when-empty --queue=high")
+        self.envelope["tools"]["crontab"] = str(self.script("legacy-options-crontab", "print(" + repr(cron) + ")"))
+        self.assertTrue(capture(self.state, self.envelope)["local_complete"])
+        self.settings["settings_version"] = 2
+        with self.assertRaisesRegex(BackupError, "^job-coordination-unverified$"):
+            capture(self.state, self.envelope)
+        diagnostic = json.loads((self.state.root / "job-coordination.json").read_text())
+        self.assertEqual(diagnostic["error"], "job-command-unsupported")
+
     def test_online_billing_window_defers_and_proven_unconfigured_hosts_still_capture(self):
         self.settings["mode"] = "database-online"
         lock = pathlib.Path(self.settings["job_lock_paths"][0])
