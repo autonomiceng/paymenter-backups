@@ -147,7 +147,7 @@ final class Messages
         'maintenance-probe-failed' => 'Full backup stopped: App URL didn\'t show Paymenter\'s maintenance page (HTTP 503). Check App URL and any redirect, proxy or CDN. If the site asks for a password, add it under Site password.',
         'maintenance-unsafe' => 'Full backups need Paymenter\'s standard maintenance mode, with no secret bypass URL or redirect. Run php artisan up, then try again.',
         'maintenance-driver-unsupported' => 'Full backups need file-based maintenance mode. Set APP_MAINTENANCE_DRIVER=file in .env.',
-        'extension-files-changed' => 'Extension files changed during the copy. Backups will try again at the next backup time.',
+        'extension-files-changed' => 'Extension files changed during the copy. Keep extension files unchanged during backup. Scheduled backups try again at the next full backup time.',
         'maintenance-changed' => 'Someone turned maintenance mode on or off during the backup. Try again.',
         'maintenance-ownership-uncertain' => 'The site may still be in maintenance mode. Run paymenter_backups recover (Help, Recovery).',
         'process-state-uncertain' => 'A backup process may still be running. Run paymenter_backups recover (Help, Recovery).',

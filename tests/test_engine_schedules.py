@@ -349,6 +349,11 @@ class SchedulerTests(PrivateFixture):
         self.backup('newer', 'full-quiesced', created_at=later)
         self.settings.update(destination='local', upload_s3=False, retention_keep_full=1)
         self.assertNotIn('captured', storage.retention(self.state, self.envelope)['local_delete'])
+        resumed.update(status='deferred')
+        atomic_json(requests.path(self.state, request_id), resumed)
+        requests.cancel(self.state, request_id)
+        self.assertFalse(self.item('captured')['delivery_required'])
+        self.assertIn('captured', storage.retention(self.state, self.envelope)['local_delete'])
 
     def test_every_supported_hour_interval_is_wall_clock_anchored(self):
         at = instant('2026-10-02T23:59:00+00:00')

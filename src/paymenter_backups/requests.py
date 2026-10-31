@@ -28,8 +28,7 @@ def captured_run(state, item):
 
 def resume_delivery(item, journal):
     item["result"] = {"run_id": journal["run_id"], "local_complete": journal.get("local_complete", False)}
-    item.update(action="deliver", arguments={"run_id": journal["run_id"]},
-                capture_finished_at=journal.get("created_at"), delivery_attempts=0)
+    item.update(action="deliver", arguments={"run_id": journal["run_id"]}, delivery_attempts=0)
     if journal.get("delivery_scope"):
         item["delivery_scope"] = journal["delivery_scope"]
 
@@ -97,13 +96,24 @@ def list_requests(state):
 
 
 def cancel(state, request_id):
-    with state.lock("requests.lock"):
+    # Match the run -> requests lock order used by coverage reconciliation.
+    with state.lock(), state.lock("requests.lock"):
         item = read_json(path(state, request_id))
         if item["status"] not in ("pending", "deferred"):
             raise BackupError("request-not-cancellable")
         item["status"] = "cancelled"
         item["updated_at"] = time.time()
         atomic_json(path(state, request_id), item)
+        if item["action"] == "deliver":
+            from . import artifacts
+            try:
+                journal = artifacts.journal(state, item["arguments"]["run_id"])
+            except BackupError as error:
+                if error.code != "run-not-found":
+                    raise
+            else:
+                journal["delivery_required"] = False
+                state.save(journal)
     return {"request_id": request_id, "status": "cancelled"}
 
 

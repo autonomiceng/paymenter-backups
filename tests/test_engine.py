@@ -144,7 +144,8 @@ payload={'status':503,'except':[],'secret':None,'redirect':None,'template':'fixt
         # The real tar copies the app, then an installer changes extension code.
         changing_tar = self.script("changing-tar", f"import subprocess,sys,pathlib\n"
                                    "subprocess.run(['/usr/bin/tar',*sys.argv[1:]],check=True)\n"
-                                   f"pathlib.Path({str(extension)!r}).write_text('updated')")
+                                   f"pathlib.Path({str(extension)!r}).write_text('updated')\n"
+                                   "raise SystemExit(1)")
         self.envelope["tools"]["tar"] = str(changing_tar)
         request = create(self.state, arguments={"mode": "full-quiesced"}, slot="first-full-slot")
         atomic_json(request_path(self.state, request["request_id"]), dict(request, status="launching"))
@@ -156,6 +157,23 @@ payload={'status':503,'except':[],'secret':None,'redirect':None,'template':'fixt
         request = create(self.state, arguments={"mode": "full-quiesced"}, slot="next-full-slot")
         atomic_json(request_path(self.state, request["request_id"]), dict(request, status="launching"))
         self.assertEqual(worker(self.state, self.envelope, request["request_id"])["status"], "complete")
+
+    def test_extension_unreadable_or_special_file_is_a_capture_failure(self):
+        extensions = self.app / "extensions"
+        extensions.mkdir()
+        fifo = extensions / "installer-pipe"
+        os.mkfifo(fifo)
+        with self.assertRaisesRegex(BackupError, "capture-failed"):
+            capture(self.state, self.envelope)
+        fifo.unlink()
+        iterdir = pathlib.Path.iterdir
+        def unreadable(path):
+            if path == extensions:
+                raise PermissionError
+            return iterdir(path)
+        with patch("pathlib.Path.iterdir", unreadable):
+            with self.assertRaisesRegex(BackupError, "capture-failed"):
+                capture(self.state, self.envelope)
 
     def test_failed_capture_retries_are_bounded(self):
         from paymenter_backups.requests import path as request_path, worker

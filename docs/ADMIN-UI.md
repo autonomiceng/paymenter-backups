@@ -90,7 +90,6 @@ Settings tab, one form, one "Save settings" button at the bottom (mod+s):
    Detected cron jobs and queue workers, each with status and fix line
    Detected cache, session, queue and file storage drivers
    [ ] No other program writes to Paymenter's database or files.
-   Site password (HTTP Basic), collapsed unless saved or needed
   Before backups run
    [ ] I won't update Paymenter, install extensions or run migrations while a backup runs.
   Advanced (collapsed)

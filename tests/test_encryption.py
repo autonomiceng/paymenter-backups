@@ -182,6 +182,7 @@ class Encryption(unittest.TestCase):
         self.assertEqual(work()['status'], 'complete')
         current = artifacts.journal(self.state, item['run_id'])
         self.assertEqual(current['remote']['key_fingerprint'], self.fp)
+        self.assertFalse(current['delivery_required'])
         self.assertEqual(self.s3.objects[prepared['archive_key']], frozen[prepared['archive_key']])
         self.assertEqual(len(self.state.journals()), 1)
         self.assertNotIn('error', read_json(requests.path(self.state, request['request_id'])))

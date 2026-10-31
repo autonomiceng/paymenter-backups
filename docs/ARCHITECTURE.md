@@ -358,7 +358,7 @@ Enabling or editing the schedule starts with the next future slot. After an
 outage, the tick chooses only the latest due slot and queues one fresh snapshot,
 without creating a backlog for earlier slots. A weekly lookup is bounded to
 eight days; queued task expiry starts at creation, not at the old slot's time.
-Unstarted requests from a disabled, edited or superseded schedule are cancelled.
+Unstarted capture requests from a disabled, edited or superseded schedule are cancelled.
 Request files are atomic/fsynced, identified by installation, kind, schedule
 epoch and wall slot, with explicit mode/schedule_kind. Each kind catches up its
 latest slot within eight days; supersession never crosses kinds. Hourly slots
@@ -401,6 +401,10 @@ refuses before provider calls. Missing/changed spools never authorize regenerati
 No upload failure calls capture again. Undelivered generations remain protected
 from automatic retention even after storage settings change, and their archive
 and spools continue to count toward disk admission budgets.
+Successful delivery or explicit cancellation clears that delivery obligation.
+Cancelling stops retries; it does not delete a backup or abandon prepared
+provider work. A frozen delivery intent still protects its files until delivery
+finishes or the existing explicit Delete action safely removes the run.
 
 Capture tool failures retry at most three attempts within the existing request
 age; admission contention does not consume that budget. Interrupted workers also
@@ -576,6 +580,8 @@ and file hashes, including in-app symlink targets. A change discards the capture
 Scheduled full work skips that slot and tries at the next configured full time;
 manual capture retries are bounded. Ordinary live uploads, sessions and cache
 files may change during copying. Do not update code or schema during capture.
+Tar errors still reject incomplete copies and use the bounded capture retry;
+live-file warnings do not authorize silently ignoring unreadable files.
 Pre-existing safe maintenance files are preserved for foreground capture;
 scheduled capture skips pre-existing maintenance. Historical maintenance ownership
 and recovery handling remain supported without creating any new owned markers.

@@ -438,12 +438,16 @@ def deliver(state, envelope, run_id, envelope_loader=None, expected_scope=None):
                     raise
             else:
                 staging_removal(state, envelope, item, remote_proven=True)
+                item['delivery_required'] = False
+                state.save(item)
                 return {'run_id': run_id, 'remote_delivered': True, 'already_delivered': True,
                         'local_complete': item.get('local_complete', False)}
         result = deliver_payload(state, envelope, run_id)
         item = artifacts.journal(state, run_id)
         if result.get('remote_delivered'):
             staging_removal(state, envelope, item)
+            item['delivery_required'] = False
+            state.save(item)
             result['local_complete'] = item.get('local_complete', False)
         return result
 

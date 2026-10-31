@@ -358,14 +358,16 @@ def extension_snapshot(app, check):
                     raise BackupError("external-symlink-target")
                 pending.append(target)
             else:
-                raise BackupError("extension-files-changed")
+                raise BackupError("capture-failed")
             after = path.lstat()
             if value[:8] != [after.st_dev, after.st_ino, after.st_mode, after.st_uid,
                              after.st_gid, after.st_size, after.st_mtime_ns, after.st_ctime_ns]:
                 raise BackupError("extension-files-changed")
             result[str(path.relative_to(app))] = value
-    except OSError:
+    except FileNotFoundError:
         raise BackupError("extension-files-changed") from None
+    except OSError:
+        raise BackupError("capture-failed") from None
     return result
 
 
@@ -528,10 +530,14 @@ def capture(state, envelope, scheduled=False, request_id=None, envelope_loader=N
                     tar_command = [envelope["tools"]["tar"], "--acls", "--xattrs", "--numeric-owner", "-cf", str(payload / "app.tar")]
                     tar_command += ["--exclude=./" + relative for relative in excludes]
                     tar_command += ["-C", str(state.app), "."]
-                    run_output_tool(state, settings, "tar", tar_command, remaining, payload / "app.tar",
-                                    register=register, deadline_check=remaining, output_root=output)
-                    if extension_snapshot(state.app, remaining) != extensions:
-                        raise BackupError("extension-files-changed")
+                    try:
+                        run_output_tool(state, settings, "tar", tar_command, remaining, payload / "app.tar",
+                                        register=register, deadline_check=remaining, output_root=output)
+                    finally:
+                        # A changing extension can also make tar fail. It still
+                        # belongs to the next scheduled slot, not an immediate retry.
+                        if extension_snapshot(state.app, remaining) != extensions:
+                            raise BackupError("extension-files-changed")
                     if {relative: identity(state.app / relative) for relative in MARKERS
                             if (state.app / relative).exists()} != initial:
                         raise BackupError("maintenance-changed")
