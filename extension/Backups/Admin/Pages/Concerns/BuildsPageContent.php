@@ -76,6 +76,7 @@ trait BuildsPageContent
                 ->persistTabInQueryString('tab')
                 ->tabs([
                     Tab::make('Backups')->id('backups')->schema([
+                        $this->installationSection(),
                         $this->setupSection(),
                         ...$this->alertCallouts(),
                         $this->overviewSection(),
@@ -109,6 +110,23 @@ trait BuildsPageContent
                 return $blocks;
             })
             ->visible(fn () => $this->setupOpen());
+    }
+
+    private function installationSection(): Section
+    {
+        return Section::make('Installation')->schema(function () {
+            $checks = $this->configuration()['installation']['checks'] ?? [];
+            $rows = [];
+            foreach (['tools' => 'Tools', 'scheduler' => 'Scheduler', 'observer' => 'Independent observer',
+                'private_state' => 'Private state', 'local_storage' => 'Local storage', 'offsite' => 'Offsite storage'] as $key => $label) {
+                $check = $checks[$key] ?? ['state' => 'missing', 'code' => 'engine-unavailable'];
+                $status = match ($check['state']) { 'ready' => 'Ready', 'pending' => 'Pending', default => 'Missing' };
+                $next = $check['code'] ? Messages::error($check['code']) : ($key === 'offsite' && $status === 'Pending'
+                    ? 'Local backups can be scheduled. Set up S3 and test storage when you want an offsite copy.' : null);
+                $rows[] = Text::make($label . ': ' . $status . ($next ? '. ' . $next : ''));
+            }
+            return $rows;
+        })->visible(fn () => isset($this->configuration()['installation']));
     }
 
     /** Transient conditions, one callout each. */

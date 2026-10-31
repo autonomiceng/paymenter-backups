@@ -28,6 +28,10 @@ final class Messages
     }
 
     private const ERRORS = [
+        'scheduler-not-running' => 'Paymenter\'s scheduler has not checked in within five minutes. Check its host cron job or timer, then wait for the next minute.',
+        'observer-not-run' => 'The independent backup observer has not run. Add the separate host cron line in INSTALL.md and run artisan backups:observe once as the site user. Backups cannot manage the host\'s cron service.',
+        'observer-stale' => 'The independent backup observer has not completed a healthy check within 15 minutes. Check its separate host cron job and logs, then run artisan backups:observe again.',
+        'local-storage-not-ready' => 'Local backup storage is not ready. Save Settings to create its private directory, or run artisan backups:readiness --prepare. If it still fails, check the site user\'s storage permissions and quota.',
         'observer-result-invalid' => 'The backup incident check returned an invalid result. Check the installed Backups files and run backups:observe again.',
         'staff-mail-not-configured' => 'Backup incident mail could not be sent. Set Paymenter\'s system email address, enable system mail, and run backups:observe again.',
         // Scheduling and admission

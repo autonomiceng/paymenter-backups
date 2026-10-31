@@ -325,6 +325,8 @@ def configuration(state, envelope, error=None, encryption_key_status=None, write
             admission = [code(error), *admission]
         result['admission'][mode] = list(dict.fromkeys(admission))
         result['readiness'][mode] = {'state': state_for(items), 'items': items}
+    from .commissioning import check as installation_check
+    result['installation'] = installation_check(state, envelope, inventory=jobs, mode_readiness=result['readiness'])
     if state.root.exists():
         used = storage_usage(state, settings)
         result["space"]["used"] = used

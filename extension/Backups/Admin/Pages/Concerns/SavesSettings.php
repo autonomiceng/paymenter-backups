@@ -194,6 +194,9 @@ trait SavesSettings
             return;
         }
         $problems = [];
+        if (is_string($saved['local_storage_error'] ?? null)) {
+            $problems[] = Messages::error($saved['local_storage_error']);
+        }
         if ($saved['partial'] ?? false) {
             $problems[] = 'Settings and keys were saved, but setup didn\'t finish: ' . Messages::error($saved['error'] ?? 'config-save-failed') . ' Check setup on the Backups tab.';
         }

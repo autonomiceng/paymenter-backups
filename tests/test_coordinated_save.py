@@ -244,6 +244,14 @@ class CoordinatedSaveTests(PrivateFixture):
         self.credentials_file = self.state.root / 'native-credentials.json'
         self.credentials = {'access_key': 'fake-old', 'secret_key': 'fake-old'}
         self.args = types.SimpleNamespace(app=str(self.app), private_root=str(self.state.root), php=self.php)
+        # Publication tests start commissioned; separate install tests cover refusal.
+        self.envelope['tool_checks'] = {name: {'ok': True, 'resolved': path, 'configured': '', 'code': None}
+            for name, path in self.envelope['tools'].items()}
+        cron = f'* * * * * /usr/bin/flock {self.state.root}/scheduler.lock {self.php} {self.app}/artisan schedule:run'
+        self.envelope['tools']['crontab'] = self.script('crontab', 'print(' + repr(cron) + ')')
+        atomic_json(self.state.root / 'scheduler.json', {'last_tick_at': time.time()})
+        atomic_json(self.state.root / 'incidents.json', {'schema_version': 1,
+            'installation_uuid': self.state.uuid, 'checked_at': time.time(), 'active': {}})
         for target in (cli, config):
             mocked = patch.object(target, 'bridge', side_effect=self.bridge)
             mocked.start(); self.addCleanup(mocked.stop)
@@ -348,7 +356,7 @@ class CoordinatedSaveTests(PrivateFixture):
             'full_schedule': 'daily', 'full_time': '03:00', 'full_weekdays': [6],
             'database_schedule': 'daily', 'database_time': '02:00',
             'database_weekdays': [0, 1, 2, 3, 4, 5, 6], 'schedule_timezone': 'UTC',
-            'local_path': '/data/archives', 'local_byte_budget': 5 * 1024 ** 3,
+            'local_path': str(self.base / 'archives'), 'local_byte_budget': 5 * 1024 ** 3,
             'minimum_free_bytes': 2 * 1024 ** 3, 'keep_local': True, 'upload_s3': False,
             'automatic_retention': True, 'retention_keep_full': 7,
             'retention_keep_database': 7, 'full_host_assumptions_acknowledged': True,
@@ -390,7 +398,7 @@ class CoordinatedSaveTests(PrivateFixture):
         rows = self.rows()['rows']
         self.assertEqual(rows['full_schedule']['value'], 'daily')
         self.assertEqual(rows['database_schedule']['value'], 'daily')
-        self.assertEqual(rows['local_path']['value'], '/data/archives')
+        self.assertEqual(rows['local_path']['value'], str(self.base / 'archives'))
         self.assertEqual(rows['local_byte_budget']['value'], str(5 * 1024 ** 3))
         self.assertEqual(rows['minimum_free_bytes']['value'], str(2 * 1024 ** 3))
         self.assertEqual(rows['retention_keep_database']['value'], '7')
@@ -763,6 +771,9 @@ class CoordinatedSaveTests(PrivateFixture):
             real_atomic(path, value)
             if pathlib.Path(path).name == 'configuration-advisory.json':
                 raise OSError('one-off advisory directory fsync failure')
+        atomic_json(self.state.root / 'scheduler.json', {'last_tick_at': now})
+        atomic_json(self.state.root / 'incidents.json', {'schema_version': 1,
+            'installation_uuid': self.state.uuid, 'checked_at': now, 'active': {}})
         with patch.object(cli.time, 'time', return_value=now), patch.object(cli, 'atomic_json', side_effect=fail_advisory):
             with self.assertRaisesRegex(BackupError, 'config-save-failed'):
                 cli.set_config(self.args, self.state, {'settings': {'database_time': '09:30'}})

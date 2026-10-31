@@ -181,8 +181,13 @@ enabled weekly schedule, path lists are absolute, the S3 prefix has no empty,
 `.` or `..` parts or backslashes), then `config check`, which
 uses engine normalization and validation plus the backup-directory location
 rule without writing. `config validate` checks saved values against the same
-schema. Billing guards, billing windows and job locks are checked when queued
-work runs; they never block saving settings. The page passes changes and entered credential groups to
+schema. Setup repairs and schedule Off remain saveable. Enabling or editing an
+enabled schedule requires installation readiness before any native publication:
+tools, private/local storage, discovered and recently running scheduler,
+recent independent observer check, per-type static capture prerequisites, and
+current destination/key test when uploads are selected. Safe local preparation
+precedes a refusal. Transient billing/lock waits remain runtime admission checks;
+this gate neither captures nor takes writer locks. The page passes changes and entered credential groups to
 `Runtime::saveConfiguration`, backed by CLI `config set`. The engine acquires
 `config.lock` then `tick.lock` with one ten-second acquisition deadline, or
 refuses `busy` before publication. It rereads and validates the authoritative
@@ -204,8 +209,8 @@ the command can read stdin. Other inherited environment values stay scrubbed;
 database credentials are not written to files or command arguments. Historical maintenance captures used the same allowlist for Artisan. The billing
 guard runs inside Paymenter's ordinary scheduler process, not a scrubbed child.
 The browser cannot supply the baseline or actor. The writer returns persisted
-row receipts and a full native snapshot. Initialization and privacy-policy
-publication remain beneath the same locks, including a first save with no edits.
+row receipts and a full native snapshot. Initialization, local storage preparation
+and privacy-policy publication remain beneath the same locks, including a first save with no edits.
 
 Before publishing entered secrets, a second native transaction locks every
 extension settings row, verifies the full snapshot, then invokes the cold

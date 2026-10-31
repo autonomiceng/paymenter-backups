@@ -127,6 +127,10 @@ final class ConfigSetCommand extends Command
             $this->line(json_encode(['ok' => true, ...$result], JSON_THROW_ON_ERROR));
             return self::SUCCESS;
         } catch (\Throwable $error) {
+            if (!$this->option('defer-init') && $error instanceof \RuntimeException && Messages::known($error->getMessage())) {
+                $this->error(Messages::error($error->getMessage()));
+                return self::FAILURE;
+            }
             $code = in_array($error->getMessage(), ['busy', 'config-coordination-required', 'config-save-incomplete', 'config-changed',
                 'config-save-outcome-unknown', 'credentials-unreadable', 'credentials-invalid', 'maintenance-probe-credentials-invalid',
                 'maintenance-probe-origin-invalid', 'maintenance-probe-origin-mismatch', 'installation-missing', 'installation-mismatch',

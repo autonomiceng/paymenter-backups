@@ -26,6 +26,7 @@ field/detail diagnostics to stderr and exit 1.
 | `config check` | JSON stdin `{"settings":{…}}`; validates proposed settings, writes nothing |
 | `config set` | JSON stdin; native nonsecret writes through audited Eloquent |
 | `init` | Explicitly provision private installation identity and policy |
+| `readiness [--prepare]` | Installation checks and per-type schedule blockers; prepare private/local storage without enabling schedules |
 | `schedule show [--kind full\|database]` | Versioned schedule configuration and next slots |
 | `schedule set --kind full\|database` | JSON stdin; frequency/time/weekdays/timezone, database every_hours/minute |
 | `schedule enable`, `schedule disable` | Optional --kind; v2 unqualified disable disables both; ambiguous set/enable refuse |
@@ -68,8 +69,11 @@ supported. The engine never silently downgrades a configured TLS connection.
 Ordinary configuration and backup-status reads never create private directories,
 locks or installation identity. Key operations require initialized state and take
 the shared credential lock; reveal/export also write secret-free audit evidence.
-Before first capture, `init`, `config set` or `run --execute` provisions
+Before first capture, `init`, `config set`, `readiness --prepare` or `run --execute` provisions
 state explicitly. Native config saves also perform explicit initialization.
+The native installer interface `artisan backups:readiness [--prepare] [--kind=full|database]`
+adds plain next steps and exits 1 until the selected schedule is ready. See
+[installation readiness](INSTALL.md#installation-readiness-and-installer-handoff).
 
 `config set`, native page Save and direct Artisan saves share configuration/tick
 locks with a ten-second acquisition deadline (`busy` refuses before writes).

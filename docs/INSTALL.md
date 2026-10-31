@@ -262,3 +262,56 @@ than bypassing locks.
 When locks are verified, database-only mode waits for scheduled/queue jobs and
 avoids the daily billing window. It releases the locks after the dump and uses
 no maintenance mode or drain.
+
+## Installation readiness and installer handoff
+
+**System > Backups > Installation** reports Tools, Scheduler, Independent
+observer, Private state, Local storage and Offsite storage separately. Both
+schedules stay Off on a new install. Offsite is Pending until configured and a
+storage test passes for the current destination and recovery key. Pending
+unselected offsite storage does not block local-only schedules.
+
+The small interface for an external installer is:
+
+```sh
+/path/to/php /path/to/app/artisan backups:readiness --prepare --kind=database
+```
+
+Use `--kind=full` for the full schedule. Omit `--prepare` for a read-only check;
+omit `--kind` to require both types. This command emits JSON on stdout, exits
+0 when the selected type is ready and 1 otherwise. `schema_version: 1` contains
+`ready`, `checks` (each has `state`, `code`, `next_step`) and `schedules`
+(`full`/`database`, each with `ready`, `blockers`, `next_steps`). Bootstrap/engine
+failure instead returns `ready:false`, `error`, `next_step`. Do not parse prose.
+Readiness does not install anything or choose/enable a schedule.
+
+`--prepare` safely creates the private installation identity and suggested lock
+files, creates owner-private local storage, and writes, fsyncs, reads and removes
+only its own small storage probe. Saving Settings also prepares local storage.
+Existing unsafe storage permissions are never changed automatically. The local
+check includes the configured byte budget and free-space reserve; it does not
+prove future archive capacity, hosting quota, capture or restoration.
+
+The scheduler check requires readable cron/systemd discovery and an actual tick
+within five minutes. Full readiness retains the existing cooperative-job and
+host-assumption requirements. The independent observer must have checked backup
+state within 15 minutes with this installation's incident ledger; Missing means
+it has never run, while stale or blind checks need attention. A recent manual
+invocation proves it ran, not that a recurring host job is installed: verify the
+separate five-minute cron line above and monitor it through the host. No host
+service is edited because Backups does not know its ownership or service manager.
+The observer's intentional at-least-once mail behavior is unchanged.
+
+Commission in this order: prepare with schedules Off; repair any tools/storage
+items; install/verify Paymenter's scheduler and the separate observer host job;
+run `backups:observe` once; configure/test S3 and save its recovery key if using
+it; check readiness for the chosen type; then enable that schedule in Settings.
+An installer can use the existing audited `artisan backups:config-set` with
+JSON stdin (for example `{"database_schedule":"hourly"}`); it goes through the
+same readiness gate as the staff Save and Python `schedule enable/set` commands.
+A refusal leaves the previous schedule unchanged and gives a plain next step.
+Off and ordinary setup repairs remain available. S3 keys must be saved and the
+current destination tested before a separate schedule-enabling save.
+
+This is commissioning, not the full-backup/download or restore proof. No landing
+installer or host deployment is included in this extension interface.
