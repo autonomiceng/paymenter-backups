@@ -311,7 +311,10 @@ if ($mode === 'upload') {
     check($after['full_schedule'] === 'off' && $after['retention_keep_database'] === '4' && json_decode($after['full_weekdays'], true) === [0, 6]
         && json_decode($after['job_lock_paths'], true) === ['/fixture/a.lock', '/fixture/b.lock'] && $after['settings_version'] === '2', 'page settings not persisted in engine form: ' . json_encode(array_intersect_key($after, array_flip($changedKeys))));
     check(array_diff_key($after, array_flip($changedKeys)) === array_diff_key($before, array_flip($changedKeys)), 'page save changed unrelated rows');
-    check(str_contains(html_entity_decode(Livewire\Livewire::test($page)->html()), 'Next full backup Off'), 'Off schedule not summarized');
+    $installation = $text(Livewire\Livewire::test($page));
+    foreach (Paymenter\Extensions\Others\Backups\Messages::INSTALLATION_CHECKS as $label) {
+        check(str_contains($installation, $label . ': '), 'Installation row not rendered: ' . $label);
+    }
     check($after['local_byte_budget'] === $before['local_byte_budget'], 'unchanged byte limit rewritten');
     // Space settings are entered in GiB and stored in bytes.
     $save(['settings.local_byte_budget' => '1.5']);
