@@ -637,7 +637,7 @@ groups during independent recovery.
 Remove only owned unchanged down first, then bootstrap, and preserve original
 maintenance or operator replacements. Uncertain ownership/process state stays
 visible and closed.
-Normal release uses exactly the same identity-checked cleanup as recovery;
+Historical maintenance captures used the same identity-checked cleanup at normal release;
 document the small remaining check/unlink race. Recovery acknowledgement records
 an operator resolution without touching application files and unblocks later
 runs only through that explicit resolution.
@@ -948,7 +948,7 @@ actually breaks something.
 - **Exceptions are architecture decisions.** A change that cannot follow these rules states why in its pull request and
   adds a tripwire before merge.
 
-Known dependency on internals: maintenance handling reads and writes Laravel's maintenance-mode file. Keep it covered
+Known dependency on internals: historical recovery reads and removes Laravel's maintenance-mode files. Keep it covered
 by the upgrade tripwire and the release-qualification run.
 
 ## Test requirements
@@ -1024,7 +1024,7 @@ runs[]: existing fields plus remote_format:plaintext-v1|
 schedule/retention fields and total pending counts alongside the per-kind
 pending counts, and additionally shows the
 adapted proposed schedules/storage and per-kind retention settings. The clock
-window brackets the daily billing minute using lock/drain/capture/cleanup and
+window brackets the daily billing minute using lock wait, capture and cleanup
 safety bounds, wrapping midnight; actual admission uses observed UTC instants.
 The encryption summary uses the real delivery tool/key readiness and retains
 the nonsecret pending fingerprint for acknowledgement. Encryption delivery
