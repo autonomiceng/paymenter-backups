@@ -117,15 +117,39 @@ def terminate_child(proc, group):
         pass
 
 
+def native_storage_warnings(stderr):
+    """Only GNU tar's live-file warnings in native mutable storage are allowed."""
+    if not stderr.endswith(b'\n'):
+        raise BackupError('child-failed')
+    paths = set()
+    for line in stderr.decode('utf-8', errors='strict').split('\n')[:-1]:
+        match = re.fullmatch(r'[^:\r\n]+: (\./storage/app(?:/[^\r\n]+)?): '
+                             r'(file changed as we read it|File removed before we read it)', line)
+        if not match:
+            raise BackupError('child-failed')
+        path = match[1][2:]
+        parts = path.split('/')
+        if (any(part in ('', '.', '..') for part in parts) or '\\' in path or not path.isprintable()
+                or pathlib.PurePosixPath(path).suffix.lower() in ('.key', '.pem', '.php')
+                or pathlib.PurePosixPath(path).name == '.env'):
+            raise BackupError('child-failed')
+        paths.add(path)
+    if not paths:
+        raise BackupError('child-failed')
+    return sorted(paths)
+
+
 def run(command, timeout, output=None, input_bytes=None, register=None, budget_check=None, file_limit=None,
-        database_context=None):
+        database_context=None, native_storage_changes=None):
+    if native_storage_changes is not None and output:
+        raise BackupError('child-failed')
     parent = os.getpid()
     stream = open(output, "wb") if output else subprocess.PIPE
     proc = None
     group = None
     try:
         proc = subprocess.Popen(command, stdin=subprocess.PIPE if input_bytes is not None else subprocess.DEVNULL,
-                                stdout=stream, stderr=subprocess.DEVNULL, close_fds=True,
+                                stdout=stream, stderr=subprocess.PIPE if native_storage_changes is not None else subprocess.DEVNULL, close_fds=True,
                                 start_new_session=True, preexec_fn=lambda: child_setup(parent, file_limit),
                                 env=safe_environment(database_context))
         group = process_identity(proc.pid)
@@ -153,10 +177,13 @@ def run(command, timeout, output=None, input_bytes=None, register=None, budget_c
                 proc.stdin.write(input_bytes)
                 proc.stdin.close()
             chunks = []
+            stderr = bytearray()
             size = 0
             deadline = time.monotonic() + timeout
             with selectors.DefaultSelector() as selector:
                 selector.register(proc.stdout, selectors.EVENT_READ)
+                if native_storage_changes is not None:
+                    selector.register(proc.stderr, selectors.EVENT_READ)
                 while selector.get_map():
                     if budget_check:
                         budget_check()
@@ -165,6 +192,11 @@ def run(command, timeout, output=None, input_bytes=None, register=None, budget_c
                     for key, _ in selector.select(0.05):
                         chunk = os.read(key.fd, 65536)
                         if chunk:
+                            if key.fileobj is proc.stderr:
+                                stderr.extend(chunk)
+                                if len(stderr) > 65536:
+                                    raise BackupError('child-output-limit')
+                                continue
                             size += len(chunk)
                             if size > 16 * 1024 * 1024:
                                 raise BackupError("child-output-limit")
@@ -175,10 +207,17 @@ def run(command, timeout, output=None, input_bytes=None, register=None, budget_c
             result = b"".join(chunks)
         if budget_check:
             budget_check()
-        if proc.returncode:
+        if proc.returncode or (native_storage_changes is not None and stderr):
             if file_limit is not None and output and pathlib.Path(output).stat().st_size >= file_limit:
                 raise BackupError("child-output-limit")
-            raise BackupError("child-failed")
+            # This exception is only for the app tar, never a generic accepted
+            # return code. Read errors, mixed diagnostics and every other code fail.
+            if native_storage_changes is None or output or proc.returncode != 1:
+                raise BackupError("child-failed")
+            try:
+                native_storage_changes.extend(native_storage_warnings(bytes(stderr)))
+            except UnicodeError:
+                raise BackupError('child-failed') from None
         if group_members(group):
             raise BackupError("process-state-uncertain")
         return result
@@ -195,6 +234,8 @@ def run(command, timeout, output=None, input_bytes=None, register=None, budget_c
             stream.close()
         elif proc is not None and proc.stdout:
             proc.stdout.close()
+        if proc is not None and proc.stderr:
+            proc.stderr.close()
         if proc is not None and proc.stdin and not proc.stdin.closed:
             proc.stdin.close()
 

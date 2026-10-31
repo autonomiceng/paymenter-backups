@@ -167,8 +167,7 @@ CLI calls without a parent snapshot keep using cold configuration.
 The Python runtime passes only Laravel's fixed `DB_*` connection fields to
 Artisan during bootstrap, when extension discovery needs the database before
 the command can read stdin. Other inherited environment values stay scrubbed;
-database credentials are not written to files or command arguments. Full
-capture passes the same allowlist to Artisan's maintenance command. The billing
+database credentials are not written to files or command arguments. Historical maintenance captures used the same allowlist for Artisan. The billing
 guard runs inside Paymenter's ordinary scheduler process, not a scrubbed child.
 The browser cannot supply the baseline or actor. The writer returns persisted
 row receipts and a full native snapshot. Initialization and privacy-policy
@@ -359,7 +358,7 @@ Enabling or editing the schedule starts with the next future slot. After an
 outage, the tick chooses only the latest due slot and queues one fresh snapshot,
 without creating a backlog for earlier slots. A weekly lookup is bounded to
 eight days; queued task expiry starts at creation, not at the old slot's time.
-Unstarted requests from a disabled, edited or superseded schedule are cancelled.
+Unstarted capture requests from a disabled, edited or superseded schedule are cancelled.
 Request files are atomic/fsynced, identified by installation, kind, schedule
 epoch and wall slot, with explicit mode/schedule_kind. Each kind catches up its
 latest slot within eight days; supersession never crosses kinds. Hourly slots
@@ -392,6 +391,27 @@ after acquiring that lock so an earlier read cannot restore an older schedule.
 Initial maintenance causes scheduled capture to skip, not reopen the site.
 Tick performs only guarded auto-recovery while maintenance is active.
 
+A successful capture is journaled with its request ID and original delivery
+scope before any upload. The request becomes `deliver` for that exact run; a
+restart recovers this transition from the completed journal. Delivery obligations
+survive schedule edits/supersession and request expiry. Failed delivery retries
+with 60-second exponential backoff capped at one hour, using storage's frozen
+ciphertext, provider scope and recovery-key generation. A changed destination
+refuses before provider calls. Missing/changed spools never authorize regeneration.
+No upload failure calls capture again. Undelivered generations remain protected
+from automatic retention even after storage settings change, and their archive
+and spools continue to count toward disk admission budgets.
+Successful delivery or explicit cancellation clears that delivery obligation.
+Cancelling stops retries; it does not delete a backup or abandon prepared
+provider work. A frozen delivery intent still protects its files until delivery
+finishes or the existing explicit Delete action safely removes the run.
+
+Capture tool failures retry at most three attempts within the existing request
+age; admission contention does not consume that budget. Interrupted workers also
+respect it. Scheduled extension changes skip to the next full slot instead.
+Repeated capture failure needs inspection because another automatic copy cannot
+repair a failing database/export tool; existing failure details identify the cause.
+
 The tick has no cache mutex (`withoutOverlapping`/`onOneServer`); private flock
 is authoritative. It invokes the short launcher with Python `-I`. Each tick
 observes the actual native CronJob event's expression/effective timezone and
@@ -409,13 +429,13 @@ caller job lock or through the ordinary queue. FPM never launches capture.
 
 Protect the native daily billing minute: schedule validation and runtime
 admission reject/defer holds overlapping `cronjob_time` in its actual timezone,
-including drain/capture bounds, lock waits, safety margin and deferral. Record
+including capture bounds, lock waits, safety margin and deferral. Record
 the protected minute and actual hold interval. Coordinated database-only capture
 checks billing before taking any lock and again after waiting. Its inventory and
 dump share capture_timeout; compression, hashing and upload follow lock release.
 The database billing admission bound is max(lock_timeout, 60) + capture_timeout + 30 seconds,
 plus billing_margin_seconds around the native minute. Full mode retains
-lock_timeout + drain_seconds + capture_timeout + 30.
+lock_timeout + capture_timeout + 30.
 The extra 30 seconds covers process termination and release overhead. Native
 Laravel daily schedules do not catch up automatically after a skipped minute. UTC is recommended;
 document and test DST gaps and repeated local slots.
@@ -540,40 +560,48 @@ continuous workers are full-backup setup blockers.
 maintenance, under a no-concurrent-DDL condition. Its manifest clearly excludes
 an atomic application/files snapshot and external provider state.
 
-`full-quiesced` acquires a private backup lock and verified job coordination
-locks, enters native prerendered maintenance, drains existing requests/jobs and
-captures SQL plus the full app while controlled writers remain excluded. Idle
-observations choose a quiet time; they never substitute for admission control.
-Refuse unsupported engines, unaccounted durable external state, external
-symlink targets and uncontrolled writers. Document the no-DDL, bounded-request
-and cooperative-writer assumptions. Never kill provider work to achieve idle.
+`full-quiesced` retains its historical mode identifier and archive format. New
+captures keep Paymenter online, take the private backup lock and verified job
+coordination locks, then capture one transactional SQL dump plus the full app.
+They never run `artisan down`, drain HTTP requests, or probe HTTP 503. The
+manifest guarantee is `transactional-database-and-live-app-files`: this is not an
+atomic application/database checkpoint while HTTP writers remain active.
 
-After native down, require file driver, empty exceptions, no secret/redirect,
-nonempty rendered template and status 503; verify an actual early-bootstrap HTTP
-503. Plain down allows settings/extension bootstrap before middleware rejects.
-Probe a nonce path without redirects and require body equality with the exact
-native template, not status alone. Optional HTTP Basic credentials live in an independent encrypted
-namespace, bound to the explicit configured HTTPS origin (scheme/host/effective
-port). Changes to app origin refuse credential use until credentials are rebound.
-Anonymous HTTP remains supported. The nonce GET sends no cookies and follows no
-redirect; credentials never bypass native maintenance. Transport uses explicit
-system CA trust, verified hostname/TLS, no proxy and no TLS key logging, independent
-of inherited environment overrides. Python independently validates stored and
-current origins immediately before transport and is authoritative for credential
-use; PHP uses the same strict grammar for early save feedback. Parser differences
-therefore refuse at use rather than authorizing a different target. Tests cover
-canonical/parity cases; IPv4-mapped IPv6 and non-ASCII hostnames refuse. A 10-second
-wall-clock deadline covers response headers and exact bounded body proof, including
-slow-drip peers. Native templates above 64 KiB refuse before any request. An existing
-caller SIGALRM timer is preserved and causes proof refusal. Only exact 503/template bytes prove success;
-401, ordinary pages and redirects refuse. Credential writes serialize the entire
-read/merge/encrypt/atomic-write under one owner-private flock, preserving S3 and
-probe namespaces independently; explicit probe clear preserves S3. Open configured job locks without creation,
-verify owner/type and actual account crontab or systemd timer service use, then verify app scheduler/worker
-processes are drained after acquisition. Full mode refuses unverified job locks
-or forced/uncoordinated workers; document prerequisite setup for other hosts.
-Foreground capture starting in strict pre-existing maintenance preserves it;
-unsafe pre-existing maintenance refuses full mode. Scheduled capture skips it.
+Full mode still refuses missing or unverified job locks, unsupported engines,
+unaccounted durable external stores, external symlink targets and uncontrolled
+scheduler/queue writers. A host that cannot provide verified locks cannot take a
+full backup; it may use the explicitly qualified database-only fallback. Empty
+v2 overrides derive verified locks, never an unlocked full capture. Both modes
+keep the no-concurrent-DDL condition and all tool capability checks.
+
+Before the dump and after the app tar, compare the complete extension tree's
+paths, types, ownership/mode, inode, size, nanosecond modification/change times
+and file hashes, including in-app symlink targets. A change discards the capture.
+Scheduled full work skips that slot and tries at the next configured full time;
+manual capture retries are bounded. Live runtime contents are excluded:
+`storage/logs`, `storage/framework/cache`, `storage/framework/sessions`,
+`storage/framework/views` and `storage/debugbar`. Paymenter's standard logging,
+file cache/session stores, compiled views and debugbar write there during HTTP
+requests. The manifest lists these paths. The archive supplies empty writable
+directories, including `storage/framework/cache/data`, so Laravel can boot after
+extraction without the omitted runtime data. Restored users must sign in again.
+Application code/config, keys and extensions stay strict. Native `storage/app`
+uploads, invoices and attachments remain included while HTTP requests write
+them. Only the app tar may accept exit 1, and only when every stderr line is
+exactly GNU tar's `file changed as we read it` or `File removed before we read it`
+warning for a path inside `storage/app`. Escaped/ambiguous paths, key/code files,
+symlinks, hard-linked files, mixed diagnostics, read errors and other exit codes
+fail. Directory-only changes keep the copy. A changed or removed regular file
+causes one extra app-tar pass under the original locks and deadline; SQL is not
+dumped again. Files still changing or missing in that last pass are listed in
+manifest `unstable_paths`; the last copy is kept. New uploads may be absent,
+and a changing attachment or PDF may be incomplete. Invoice PDFs can be
+regenerated from the restored database. This remains a live-files backup, not
+an atomic database/files snapshot. `--ignore-failed-read` is not used. Do not
+update code or schema during capture.
+Pre-existing safe maintenance files are preserved for foreground capture;
+scheduled capture skips pre-existing maintenance. Historical maintenance ownership
+and recovery handling remain supported without creating any new owned markers.
 
 Use transient private client defaults; `--defaults-file` is the first option.
 Known-native capture uses established transactional/quick/hex-blob flags. Refuse
@@ -581,13 +609,13 @@ visible-nonzero routines/events/views/triggers or non-InnoDB tables; inventory
 query failures refuse. Visible-zero is accepted with explicit visibility limits
 and recorded current-user grants, without claiming hidden objects do not exist.
 Do not add export flags requiring unavailable mysql.proc privileges. Verify trigger support and
-dump completion against real supported clients. A second stability dump streams
-to a hasher, never another secret file.
+dump completion against real supported clients. There is one SQL dump; live
+database changes do not trigger a second export.
 
 Preserve `.env`/APP_KEY, Passport keys, native storage, release/extension files,
-ACLs/xattrs and symlinks. Work/output stays outside app and every docroot. Exclude
-only this run's new maintenance files and declare exclusions in the manifest;
-preserve pre-existing marker files. This is an app/database backup, not a backup
+ACLs/xattrs and symlinks. Work/output stays outside app and every docroot. New
+captures exclude no maintenance files; preserve pre-existing marker files. This
+is an app/database backup, not a backup
 of host/Plesk/cron/Redis/object storage or remote provider actions.
 
 ## Durability and recovery
@@ -602,7 +630,7 @@ size and, during full capture, the absolute deadline. Filesystem reserve checks
 run at most once per second or per 64 MiB; polling never rescans private history.
 Every successful child forces a reserve check and full private-history
 accounting before advancing or publishing. Full capture checks
-its same absolute maintenance deadline after admission accounting, while polling,
+its same absolute capture deadline after admission accounting, while polling,
 and after completion accounting. Accounting grants no new capture deadline;
 expiry refuses advancement or completion under the original bound. Synchronous
 filesystem or accounting work can delay the start of cleanup after expiry.
@@ -626,7 +654,7 @@ groups during independent recovery.
 Remove only owned unchanged down first, then bootstrap, and preserve original
 maintenance or operator replacements. Uncertain ownership/process state stays
 visible and closed.
-Normal release uses exactly the same identity-checked cleanup as recovery;
+Historical maintenance captures used the same identity-checked cleanup at normal release;
 document the small remaining check/unlink race. Recovery acknowledgement records
 an operator resolution without touching application files and unblocks later
 runs only through that explicit resolution.
@@ -775,7 +803,7 @@ before opening the output, enforce that ceiling while writing, and account the
 complete private history again before publication. In-stream reserve checks
 inspect filesystem free space at most once per second or per 64 MiB, plus
 completion; they never reread journals per chunk. Encrypted transforms/proofs
-run outside the maintenance and billing hold with a separate deadline: five
+run outside the job-lock and billing hold with a separate deadline: five
 minutes plus one second per 256 KiB of the recorded input, capped at 24 hours.
 The capture deadline remains unchanged. Per-request S3 network timeouts still
 apply, and output publication requires the unchanged complete checksum/archive/MDC proof.
@@ -937,7 +965,7 @@ actually breaks something.
 - **Exceptions are architecture decisions.** A change that cannot follow these rules states why in its pull request and
   adds a tripwire before merge.
 
-Known dependency on internals: maintenance handling reads and writes Laravel's maintenance-mode file. Keep it covered
+Known dependency on internals: historical recovery reads and removes Laravel's maintenance-mode files. Keep it covered
 by the upgrade tripwire and the release-qualification run.
 
 ## Test requirements
@@ -1013,7 +1041,7 @@ runs[]: existing fields plus remote_format:plaintext-v1|
 schedule/retention fields and total pending counts alongside the per-kind
 pending counts, and additionally shows the
 adapted proposed schedules/storage and per-kind retention settings. The clock
-window brackets the daily billing minute using lock/drain/capture/cleanup and
+window brackets the daily billing minute using lock wait, capture and cleanup
 safety bounds, wrapping midnight; actual admission uses observed UTC instants.
 The encryption summary uses the real delivery tool/key readiness and retains
 the nonsecret pending fingerprint for acknowledgement. Encryption delivery

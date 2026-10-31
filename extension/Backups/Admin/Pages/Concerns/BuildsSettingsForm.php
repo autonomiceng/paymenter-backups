@@ -87,7 +87,7 @@ trait BuildsSettingsForm
                 Section::make('Schedule')->id('schedule')->description('Backups run from Paymenter\'s cron job at these times.')->schema([
                     Grid::make(['default' => 1, 'md' => 2])->schema([
                         Fieldset::make('Full backups')->columns(1)->schema([
-                            Text::make('Database and all files. The site shows its maintenance page while the copy runs.'),
+                            Text::make('Database and application files. Runtime logs, cache and sessions are omitted. The site stays online.'),
                             Select::make('full_schedule')->label('Frequency')->options(Settings::SELECTS['full_schedule'])->required()->selectablePlaceholder(false),
                             $days('full_weekdays', 'full_schedule'),
                             $time('full_time')->helperText(fn () => $this->billingSentence())->visibleJs("\$get('full_schedule') !== 'off'"),
@@ -171,13 +171,12 @@ trait BuildsSettingsForm
                 ]),
 
                 Section::make('Full backup requirements')->id('full-backup-requirements')
-                    ->description('A full backup pauses Paymenter\'s cron jobs and shows the maintenance page while it copies.')
+                    ->description('A full backup pauses Paymenter\'s cron jobs while it copies. The site stays online.')
                     ->collapsible()->collapsed(fn () => ($this->formValues()['full_schedule'] ?? 'off') === 'off' && $this->blockers('full-quiesced') === [])
                     ->schema(fn () => [
                         ...$this->detectedChecks(),
                         Checkbox::make('full_host_assumptions_acknowledged')->label('No other program writes to Paymenter\'s database or files.')
                             ->helperText('Only Paymenter\'s cron jobs are paused. Writes from other programs can leave a broken backup.'),
-                        $this->sitePasswordSection(),
                     ]),
 
                 Section::make('Before backups run')->id('before-backups-run')->schema([
@@ -193,8 +192,7 @@ trait BuildsSettingsForm
                             $tool('mysql', 'mysql or mariadb client'), $tool('tar', 'tar'), $tool('gzip', 'gzip'), $tool('gpg', 'GnuPG (gpg)'),
                         ]),
                         Fieldset::make('Time limits')->columns(['default' => 1, 'md' => 2])->schema([
-                            $integer('capture_timeout', 'Backup time limit', 'seconds', 'Limits the database export and file copy. The site also stays in maintenance mode while it waits for open requests and cleans up.'),
-                            $integer('drain_seconds', 'Wait for open requests', 'seconds', 'After maintenance mode starts, wait this long for page loads already in progress to finish.'),
+                            $integer('capture_timeout', 'Backup time limit', 'seconds', 'Limits the database export, extension checks and file copy while cron jobs are paused.'),
                             $integer('lock_timeout', 'Wait for running cron jobs', 'seconds', 'If a Paymenter cron job is running, wait this long before trying again next minute.'),
                             $integer('billing_margin_seconds', 'Billing safety margin', 'seconds', 'Extra time kept clear before and after Paymenter\'s daily billing run.'),
                             $integer('request_max_age', 'Queued task expiry', 'seconds', 'Tasks that haven\'t started after this long are dropped.'),
@@ -233,7 +231,7 @@ trait BuildsSettingsForm
         return $stored === '' ? 'Earlier backups stay in ' . $legacy . '.' : null;
     }
 
-    /** Detected jobs, stores and maintenance driver, each with its fix. */
+    /** Detected jobs and stores, each with its fix. */
     private function detectedChecks(): array
     {
         $jobs = $this->checks()['jobs'] ?? null;
@@ -277,7 +275,7 @@ trait BuildsSettingsForm
             }
         }
         foreach ($this->checks()['stores'] ?? [] as $store) {
-            if (!is_array($store)) { continue; }
+            if (!is_array($store) || ($store['kind'] ?? null) === 'maintenance') { continue; }
             $name = Messages::STORES[$store['kind'] ?? ''] ?? 'Storage';
             $driver = (string) ($store['driver'] ?? 'not detected');
             $rows[] = match ($store['supported'] ?? null) {

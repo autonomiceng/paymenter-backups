@@ -93,9 +93,11 @@ matching cold settings fingerprint, rather than synthesizing its timezone.
 Configuration writes require a bootable app and native audited Eloquent. Offline
 service recovery never requires configuration writes or Laravel startup.
 
+Full captures keep HTTP online and require verified locks; they refuse hosts
+without them. They use one SQL export and discard copies if extension files change.
 Check scheduler and worker cooperative locks and
 flags, cron service KillMode, bounded request/job duration, effective PHP binary,
-FPM UID/open_basedir, cached configuration, maintenance template correctness,
+FPM UID/open_basedir, cached configuration, extension-file stability,
 quota and MariaDB client/object visibility. UTC avoids backup schedule DST gaps
 and repeats. Native billing instants are observed for the next eight days, including
 DST; a fresh guard is mandatory whenever capture takes job locks, including

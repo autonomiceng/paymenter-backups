@@ -105,12 +105,21 @@ class RecoveryVerifierTests(unittest.TestCase):
     def test_database_and_full_synthetic_archives_verify(self):
         self.assertEqual(verifier.verify(self.args)["verification"], "plaintext-content-verified")
         self.payloads["app.tar"] = b"synthetic application payload (not a capture)"
-        self.manifest.update(mode="full-quiesced", guarantee="database-and-full-app-checkpoint",
-                             payloads={name: hashed(data) for name, data in self.payloads.items()})
-        self.publish()
-        self.assertEqual(verifier.verify(self.args)["mode"], "full-quiesced")
+        for guarantee in ("database-and-full-app-checkpoint", "transactional-database-and-live-app-files"):
+            self.manifest.update(mode="full-quiesced", guarantee=guarantee,
+                                 payloads={name: hashed(data) for name, data in self.payloads.items()})
+            self.publish()
+            self.assertEqual(verifier.verify(self.args)["mode"], "full-quiesced")
 
     def test_copied_script_runs_without_original_repository_or_sdk(self):
+        # Match new full captures, including runtime exclusions and live files.
+        self.payloads["app.tar"] = b"synthetic application payload (not a capture)"
+        self.manifest.update(mode="full-quiesced", guarantee="transactional-database-and-live-app-files",
+                             excluded_paths=["storage/logs", "storage/framework/cache", "storage/framework/sessions",
+                                             "storage/framework/views", "storage/debugbar"],
+                             unstable_paths=["storage/app/invoices/42.pdf"],
+                             payloads={name: hashed(data) for name, data in self.payloads.items()})
+        self.publish()
         copied = self.base / "verify_recovery.py"
         shutil.copyfile(SCRIPT, copied)
         command = [sys.executable, "-I", str(copied)]
@@ -118,7 +127,7 @@ class RecoveryVerifierTests(unittest.TestCase):
             command += ["--" + flag, str(getattr(self.args, flag.replace("-", "_")))]
         result = subprocess.run(command, cwd=self.base, capture_output=True, text=True, timeout=10,
                                 env={"PATH": "/usr/bin:/bin"})
-        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(json.loads(result.stdout)["verification"], "plaintext-content-verified")
         self.assertTrue(json.loads(result.stdout)["gpg_completion_required"])
 
@@ -127,6 +136,19 @@ class RecoveryVerifierTests(unittest.TestCase):
         result = verifier.verify(self.args)
         self.assertEqual(result["verification"], "untrusted-transport-only")
         self.assertNotIn("verified", result)
+
+    def test_optional_unstable_paths_are_validated_without_allowing_other_fields(self):
+        for paths in ([], ["storage/app/invoices/42.pdf"]):
+            self.manifest["unstable_paths"] = paths
+            self.publish()
+            self.assertEqual(verifier.verify(self.args)["verification"], "plaintext-content-verified")
+        for paths in (None, "storage/app/invoices/42.pdf", [False], ["x" * 4097]):
+            self.manifest["unstable_paths"] = paths
+            self.publish()
+            self.assert_refused("remote-descriptor-invalid")
+        self.manifest.update(unstable_paths=[], unknown_field="forbidden")
+        self.publish()
+        self.assert_refused("remote-descriptor-invalid")
 
     def test_recovery_document_can_be_bound_before_archive_decryption(self):
         self.args.archive = None

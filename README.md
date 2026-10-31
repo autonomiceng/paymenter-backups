@@ -5,10 +5,15 @@ application and database backups in private local storage, upload encrypted copi
 to an S3-compatible destination, and verify or download them from **System >
 Backups** or the command line.
 
-Full backups briefly put Paymenter into native maintenance mode while capturing
-the application and database. Compression and upload happen after service
-reopens. Online database backups avoid maintenance, wait for verified scheduler
-and queue jobs outside the billing window, and have a narrower recovery scope. Read [recovery](docs/RECOVERY.md) before relying on either kind.
+Full backups keep Paymenter online while verified scheduler and queue locks
+protect one transactional database dump and the application file copy outside
+the billing window. Extension changes during a scheduled copy discard the attempt
+and retry at the next full slot. Page requests can still change live data; this
+is not an atomic database/files snapshot. Compression and upload follow lock
+release. Runtime logs, cache, sessions, compiled views and debugbar contents are
+omitted; the archive includes empty storage directories for restore. Failed
+uploads retry the same artifact. Database-only backups have a
+narrower recovery scope. Read [recovery](docs/RECOVERY.md) before relying on either kind.
 
 ## Requirements
 

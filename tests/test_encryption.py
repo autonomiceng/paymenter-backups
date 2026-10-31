@@ -147,6 +147,45 @@ class Encryption(unittest.TestCase):
         current = artifacts.journal(self.state, item['run_id'])
         self.assertGreater(current['local_download_until'], time.time() + 86000)
         self.assertEqual(current['remote_verification']['level'], 'restore')
+
+    def test_worker_resumes_captured_artifact_and_retries_frozen_delivery(self):
+        from paymenter_backups import requests
+        from paymenter_backups.common import read_json
+        request = requests.create(self.state, arguments={'mode': 'database-online'})
+        item = self.archive('captured-before-worker-exit')
+        item.update(request_id=request['request_id'], capture_complete=True, delivery_required=True,
+                    delivery_scope=storage.remote_scope(self.state, self.envelope))
+        self.state.save(item)
+        self.envelope['settings']['automatic_retention'] = False
+        self.s3.fail = '.recovery.json.gpg'
+        def work():
+            current = read_json(requests.path(self.state, request['request_id']))
+            atomic_json(requests.path(self.state, request['request_id']), dict(current, status='launching'))
+            return requests.worker(self.state, self.envelope, request['request_id'])
+        # No mock capture: an accidental new capture has no configured tools/DB.
+        self.assertEqual(work()['status'], 'deferred')
+        waiting = read_json(requests.path(self.state, request['request_id']))
+        self.assertEqual((waiting['action'], waiting['arguments']), ('deliver', {'run_id': item['run_id']}))
+        prepared = artifacts.journal(self.state, item['run_id'])['delivery_intent']
+        frozen = dict(self.s3.objects)
+        next_key = key_record('b' * 64)
+        fp = next_key['fingerprint']['value']
+        keys = self.envelope['archive_encryption_credentials']
+        keys['keys'][fp] = next_key
+        keys['active_fingerprint'] = fp
+        self.envelope['settings']['s3_bucket'] = 'changed-destination'
+        trace = list(self.s3.trace)
+        self.assertEqual(work()['error'], 'delivery-destination-changed')
+        self.assertEqual(self.s3.trace, trace)
+        self.envelope['settings']['s3_bucket'] = 'synthetic'
+        self.s3.fail = None
+        self.assertEqual(work()['status'], 'complete')
+        current = artifacts.journal(self.state, item['run_id'])
+        self.assertEqual(current['remote']['key_fingerprint'], self.fp)
+        self.assertFalse(current['delivery_required'])
+        self.assertEqual(self.s3.objects[prepared['archive_key']], frozen[prepared['archive_key']])
+        self.assertEqual(len(self.state.journals()), 1)
+        self.assertNotIn('error', read_json(requests.path(self.state, request['request_id'])))
     def test_missing_frozen_spool_refuses_and_remote_survivor_needs_key(self):
         item = self.archive()
         self.s3.fail = '.recovery.json.gpg'

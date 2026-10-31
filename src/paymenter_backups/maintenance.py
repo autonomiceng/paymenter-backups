@@ -208,8 +208,7 @@ def billing_admission(state, envelope, now=None):
         protected = [float(item) for item in guard["instants"]]
     except (KeyError, TypeError, ValueError, BackupError):
         raise BackupError("billing-guard-stale") from None
-    drain = settings["drain_seconds"] if settings["mode"] == "full-quiesced" else 0
-    bound = job_lock_wait(settings) + drain + settings["capture_timeout"] + 30
+    bound = job_lock_wait(settings) + settings["capture_timeout"] + 30
     margin = settings["billing_margin_seconds"]
     for instant in protected:
         if now <= instant + 60 + margin and now + bound >= instant - margin:
@@ -624,7 +623,7 @@ def schedule_admission(state, envelope):
             if instant < now or slot in seen:
                 continue
             seen.add(slot)
-            bound = settings["lock_timeout"] + settings["drain_seconds"] + settings["capture_timeout"] + 30
+            bound = settings["lock_timeout"] + settings["capture_timeout"] + 30
             margin = settings["billing_margin_seconds"]
             if any(instant <= billing + 60 + margin and instant + bound >= billing - margin for billing in guard["instants"]):
                 raise BackupError("schedule-overlaps-billing")

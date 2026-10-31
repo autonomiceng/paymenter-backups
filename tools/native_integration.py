@@ -665,6 +665,13 @@ def main():
                 if len(candidates) != 1:
                     raise RuntimeError('unexpected full app archive layout')
                 restored = candidates[0].parent
+            # Runtime contents are deliberately excluded from online captures.
+            # The archive must supply empty directories before Laravel can boot.
+            for relative in ('storage/logs', 'storage/framework/cache', 'storage/framework/cache/data',
+                             'storage/framework/sessions', 'storage/framework/views', 'storage/debugbar'):
+                directory = restored / relative
+                if not directory.is_dir() or any(path.is_file() for path in directory.rglob('*')):
+                    raise RuntimeError('restored runtime directory is missing or not empty: ' + relative)
             if hashlib.sha256((restored / 'isolated-restore-payload.bin').read_bytes()).hexdigest() != large_payload_sha256:
                 raise RuntimeError('large encrypted restore payload differs')
             execute(['mariadb', '--no-defaults', '--socket=' + require_maria_socket_path(sock), '-uroot', 'paymenter_restore'], input=(payload / 'database.sql').read_bytes())

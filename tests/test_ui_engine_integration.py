@@ -1,17 +1,19 @@
 """Exercise actual page policy consumers without booting Laravel or capturing."""
 import json
+import os
 import pathlib
 import shutil
 import subprocess
 
 from test_engine_schedules import PrivateFixture
 
-from paymenter_backups import engine, presentation
+from paymenter_backups import artifacts, engine, presentation, requests, storage
+from paymenter_backups.common import atomic_json
 from paymenter_backups.readiness import state_for
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-PHP = shutil.which('php')
+PHP = os.environ.get('PAYMENTER_BACKUPS_TEST_PHP') or shutil.which('php')
 PROGRAM = r'''
 namespace Filament\Pages {
     class Page {
@@ -87,7 +89,7 @@ require $argv[1] . '/extension/Backups/Admin/Pages/Backups.php';
 $input = json_decode(file_get_contents('php://stdin'), true, 64, JSON_THROW_ON_ERROR);
 $class = new ReflectionClass(Paymenter\Extensions\Others\Backups\Admin\Pages\Backups::class);
 $page = $class->newInstanceWithoutConstructor();
-$overview = ['initialized' => true, 'configuration' => $input['configuration']];
+$overview = $input['overview'] ?? ['initialized' => true, 'configuration' => $input['configuration']];
 foreach (['overviewCache' => $overview, 'setupCacheFor' => $overview,
           'setupCache' => $input['groups'] ?? ['all' => [], 'database-online' => [], 'full-quiesced' => []],
           'storedForm' => Paymenter\Extensions\Others\Backups\Settings::DEFAULTS] as $name => $value) {
@@ -128,7 +130,11 @@ if ($input['method'] === 'reveal-flow') {
     $result = ['halted' => $halted, 'frozen' => $page->acknowledgementFingerprint,
                'calls' => \Paymenter\Extensions\Others\Backups\Runtime::$calls];
 } else {
-    $arguments = $input['method'] === 'blockers' ? [$input['mode'] ?? 'database-online'] : [];
+    $arguments = match ($input['method']) {
+        'blockers' => [$input['mode'] ?? 'database-online'],
+        'historyRows' => [false],
+        default => [],
+    };
     try { $result = $class->getMethod($input['method'])->invokeArgs($page, $arguments); }
     catch (\Illuminate\Validation\ValidationException $error) {
         $result = ['validation_errors' => $error->errors(), 'calls' => \Paymenter\Extensions\Others\Backups\Runtime::$calls];
@@ -147,6 +153,26 @@ class PageEngineContracts(PrivateFixture):
                                 capture_output=True, timeout=10)
         self.assertEqual(result.returncode, 0, result.stderr)
         return json.loads(result.stdout)
+
+    def test_deferred_delivery_history_shows_current_destination_error(self):
+        self.remote(automatic_retention=False)
+        request = requests.create(self.state, arguments={'mode': 'database-online'})
+        self.backup('captured')
+        journal = artifacts.journal(self.state, 'captured')
+        journal.update(request_id=request['request_id'], delivery_required=True,
+                       delivery_scope=storage.remote_scope(self.state, self.envelope),
+                       delivery_error='s3-readback-mismatch')
+        self.state.save(journal)
+        atomic_json(requests.path(self.state, request['request_id']), dict(request, status='launching'))
+        self.settings['s3_bucket'] = 'changed-bucket'
+        result = requests.worker(self.state, self.envelope, request['request_id'])
+        self.assertEqual((result['status'], result['error']), ('deferred', 'delivery-destination-changed'))
+        overview = presentation.overview(self.state, self.envelope)
+        row = self.page(overview['configuration'], method='historyRows', overview=overview)[0]
+        self.assertIn('Switch back to the old settings', row['detail'])
+        self.assertNotIn("didn't match after upload", row['detail'])
+        self.assertEqual(row['cancel_request'], request['request_id'])
+        self.assertEqual(len(self.state.journals()), 1)
 
     def configuration(self, **changes):
         self.settings.update(upload_s3=True, destination='s3', s3_encryption=True)

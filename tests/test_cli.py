@@ -64,14 +64,14 @@ class CLITests(unittest.TestCase):
         journal = None
         while time.time() < deadline:
             journals = fixture.state.journals()
-            if journals and journals[0].get("owned_markers") and journals[0]["phase"] == "capturing" and any("slowdump" in process_cmdline(group["pid"]) for group in journals[0]["groups"]):
+            if journals and journals[0]["phase"] == "capturing" and any("slowdump" in process_cmdline(group["pid"]) for group in journals[0]["groups"]):
                 journal = journals[0]
                 break
             time.sleep(.02)
         self.assertIsNotNone(journal)
         return capturer, journal
 
-    def test_capturer_sigterm_restores_service_and_records_interruption(self):
+    def test_capturer_sigterm_keeps_service_online_and_records_interruption(self):
         capturer, journal = self.start_slow_capture()
         capturer.send_signal(signal.SIGTERM)
         capturer.wait(timeout=6)
@@ -81,7 +81,7 @@ class CLITests(unittest.TestCase):
         self.assertFalse((self.fixture.app / "storage/framework/down").exists())
         self.assertFalse(any(group_members(group) for group in journal["groups"]))
 
-    def test_actual_capturer_sigkill_then_independent_cli_auto_recovery(self):
+    def test_actual_capturer_sigkill_needs_no_service_recovery(self):
         fixture = self.fixture
         capturer, journal = self.start_slow_capture()
         capturer.kill()
@@ -89,12 +89,9 @@ class CLITests(unittest.TestCase):
         deadline = time.time() + 3
         while any(group_members(group) for group in journal["groups"]) and time.time() < deadline:
             time.sleep(.02)
-        self.assertTrue((fixture.app / "storage/framework/down").exists())
-        planned = self.cli("recover")
-        self.assertEqual(planned[0]["action"], "inspect")
-        self.assertTrue((fixture.app / "storage/framework/down").exists())
-        result = self.cli("recover", "--auto")
-        self.assertEqual(result[0]["action"], "recovered")
+        self.assertFalse((fixture.app / "storage/framework/down").exists())
+        self.assertEqual(self.cli("recover"), [])
+        self.assertEqual(self.cli("recover", "--auto"), [])
         self.assertFalse((fixture.app / "storage/framework/down").exists())
         self.assertFalse(self.cli("status")["unresolved"])
 

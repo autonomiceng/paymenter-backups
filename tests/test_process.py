@@ -16,6 +16,30 @@ from paymenter_backups.process import detach, group_members, hash_stream, proces
 
 
 class ProcessTests(unittest.TestCase):
+    def test_app_tar_accepts_only_native_change_or_removal_warnings_at_exit_one(self):
+        changed = b'/usr/bin/tar: ./storage/app/invoices/42.pdf: file changed as we read it\n'
+        removed = b'/usr/bin/tar: ./storage/app/tickets/uploads/gone: File removed before we read it\n'
+        cases = [(1, changed, True), (1, removed, True), (0, b'', True),
+                 (0, changed, False), (2, changed, False), (1, b'', False),
+                 (1, changed + b'/usr/bin/tar: ./storage/app/x: Cannot open: Permission denied\n', False),
+                 (1, changed + b'/usr/bin/tar: Exiting with failure status due to previous errors\n', False),
+                 (1, changed + b'\n', False), (1, changed[:-1], False),
+                 (1, changed.replace(b'storage/app/invoices/42.pdf', b'.env'), False),
+                 (1, changed.replace(b'invoices/42.pdf', b'../oauth-private.key'), False),
+                 (1, changed.replace(b'invoices/42.pdf', b'private.key'), False),
+                 (1, changed.replace(b'invoices/42.pdf', b'escaped\\nname'), False)]
+        for code, stderr, allowed in cases:
+            with self.subTest(code=code, stderr=stderr):
+                changes = []
+                command = [sys.executable, '-c', f'import sys;sys.stderr.buffer.write({stderr!r});sys.exit({code})']
+                if allowed:
+                    run(command, 3, native_storage_changes=changes)
+                    self.assertEqual(changes, ['storage/app/tickets/uploads/gone'] if stderr == removed else
+                                     ['storage/app/invoices/42.pdf'] if stderr else [])
+                else:
+                    with self.assertRaisesRegex(BackupError, '^child-failed$'):
+                        run(command, 3, native_storage_changes=changes)
+
     def test_hash_stream_registers_and_terminates_fallback_group(self):
         self.check_fallback_cleanup(hash_stream)
 

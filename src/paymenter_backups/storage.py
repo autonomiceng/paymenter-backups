@@ -415,7 +415,7 @@ def recover_legacy_delivery_source(state, item):
     state.save(item)
 
 
-def deliver(state, envelope, run_id, envelope_loader=None):
+def deliver(state, envelope, run_id, envelope_loader=None, expected_scope=None):
     """Delivery and optional staging removal share one run-lock attempt.
 
     Refresh key selection under the lock. Staging cleanup always requires a
@@ -424,6 +424,9 @@ def deliver(state, envelope, run_id, envelope_loader=None):
     with state.lock():
         if envelope_loader is not None:
             envelope = envelope_loader()
+        if expected_scope is not None and (envelope['settings']['destination'] != 's3'
+                or expected_scope != remote_scope(state, envelope)):
+            raise BackupError('delivery-destination-changed')
         item = artifacts.journal(state, run_id)
         if envelope['settings']['destination'] == 's3' and item.get('remote_delivered') and scope_matches(state, envelope, item):
             # Remote-only retries cannot require a local source.
@@ -435,12 +438,16 @@ def deliver(state, envelope, run_id, envelope_loader=None):
                     raise
             else:
                 staging_removal(state, envelope, item, remote_proven=True)
+                item['delivery_required'] = False
+                state.save(item)
                 return {'run_id': run_id, 'remote_delivered': True, 'already_delivered': True,
                         'local_complete': item.get('local_complete', False)}
         result = deliver_payload(state, envelope, run_id)
         item = artifacts.journal(state, run_id)
         if result.get('remote_delivered'):
             staging_removal(state, envelope, item)
+            item['delivery_required'] = False
+            state.save(item)
             result['local_complete'] = item.get('local_complete', False)
         return result
 
@@ -963,7 +970,8 @@ def _retention(state, envelope, execute=False, locked=False, local_only=False, m
         local_candidates = [item for item in local if (item in local[keep:] or item.get("local_delete_intent"))
                             and item.get("local_download_until", 0) <= time.time()
                             and not item.get("delivery_intent")
-                            and not (settings["destination"] == "s3" and not item.get("remote_delivered"))]
+                            and not ((settings["destination"] == "s3" or item.get("delivery_required"))
+                                     and not item.get("remote_delivered"))]
         remote_candidates = [item for item in remote if (item in remote_old or item.get("remote_delete_intent"))
                              and item is not remote[0] and scope_matches(state, envelope, item)] if remote else []
         if local_only:

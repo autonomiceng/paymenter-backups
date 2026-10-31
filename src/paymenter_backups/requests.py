@@ -15,6 +15,22 @@ from .config import configured_timezone, schedule_settings
 ACTIONS = ("run", "verify", "deliver", "retrieve", "retention", "destination-test", "delete")
 ACTIVE = ("pending", "deferred", "launching", "running")
 MODES = ("full-quiesced", "database-online")
+CAPTURE_RETRY_ERRORS = frozenset({"child-failed", "child-timeout", "capture-timeout",
+                                 "capture-interrupted", "capture-failed", "dump-empty", "extension-files-changed"})
+CAPTURE_ATTEMPTS = 3
+
+
+def captured_run(state, item):
+    """The journal closes the crash gap between capture and request publication."""
+    return next((run for run in state.journals() if run.get("request_id") == item["request_id"]
+                 and run.get("capture_complete") and run.get("service_recovered")), None)
+
+
+def resume_delivery(item, journal):
+    item["result"] = {"run_id": journal["run_id"], "local_complete": journal.get("local_complete", False)}
+    item.update(action="deliver", arguments={"run_id": journal["run_id"]}, delivery_attempts=0)
+    if journal.get("delivery_scope"):
+        item["delivery_scope"] = journal["delivery_scope"]
 
 
 def path(state, request_id):
@@ -80,13 +96,35 @@ def list_requests(state):
 
 
 def cancel(state, request_id):
-    with state.lock("requests.lock"):
+    # Match the run -> requests lock order used by coverage reconciliation.
+    needs_run_lock = read_json(path(state, request_id))["action"] == "deliver"
+    with contextlib.ExitStack() as locks:
+        if needs_run_lock:
+            locks.enter_context(state.lock())
+        locks.enter_context(state.lock("requests.lock"))
         item = read_json(path(state, request_id))
+        if item["action"] == "deliver" and not needs_run_lock:
+            # A worker/tick converted the request. Release requests.lock before
+            # taking the journal lock, then re-read status and action below.
+            locks.close()
+            locks.enter_context(state.lock())
+            locks.enter_context(state.lock("requests.lock"))
+            item = read_json(path(state, request_id))
         if item["status"] not in ("pending", "deferred"):
             raise BackupError("request-not-cancellable")
         item["status"] = "cancelled"
         item["updated_at"] = time.time()
         atomic_json(path(state, request_id), item)
+        if item["action"] == "deliver":
+            from . import artifacts
+            try:
+                journal = artifacts.journal(state, item["arguments"]["run_id"])
+            except BackupError as error:
+                if error.code != "run-not-found":
+                    raise
+            else:
+                journal["delivery_required"] = False
+                state.save(journal)
     return {"request_id": request_id, "status": "cancelled"}
 
 
@@ -241,11 +279,24 @@ def tick(state, envelope, command_prefix, envelope_loader=None, database_context
                     item["error"] = "worker-interrupted"
                 if item["status"] not in ("pending", "deferred"):
                     continue
+                if item["action"] == "run":
+                    journal = captured_run(state, item)
+                    if journal is not None:
+                        if journal.get("delivery_required", settings["destination"] == "s3"):
+                            resume_delivery(item, journal)
+                        else:
+                            item.update(status="complete", result={"run_id": journal["run_id"], "local_complete": journal.get("local_complete", False)})
+                            atomic_json(path(state, item["request_id"]), item)
+                            continue
+                    elif item.get("capture_attempts", 0) >= CAPTURE_ATTEMPTS:
+                        item.update(status="failed", error="worker-interrupted")
+                        atomic_json(path(state, item["request_id"]), item)
+                        continue
                 kind = item.get("schedule_kind") if v2 else None
                 current = epoch["kinds"].get(kind) if v2 else epoch
                 view = schedule_settings(settings, kind) if v2 and kind in kinds else settings
                 due = dues.get(kind, [])
-                if item.get("slot") and (current is None or not view["enabled"]
+                if item["action"] == "run" and item.get("slot") and (current is None or not view["enabled"]
                         or item.get("schedule_fingerprint") != current["fingerprint"]
                         or item.get("schedule_since") != current["since"]
                         or (due and item.get("slot_at", 0) < due[-1][1])):
@@ -254,7 +305,7 @@ def tick(state, envelope, command_prefix, envelope_loader=None, database_context
                     continue
                 waiting_for_jobs = (item["action"] == "run" and item["arguments"].get("mode") == "database-online"
                                     and "job_wait_since" in item)
-                if now - item["created_at"] > settings["request_max_age"] and not waiting_for_jobs:
+                if item["action"] != "deliver" and now - item["created_at"] > settings["request_max_age"] and not waiting_for_jobs:
                     item["status"] = "expired"
                     atomic_json(path(state, item["request_id"]), item)
                     continue
@@ -403,14 +454,25 @@ def worker(state, envelope, request_id, envelope_loader=None, database_context=N
         if action == "run":
             if arguments.get("mode"):
                 envelope["settings"]["mode"] = arguments["mode"]
-            journal = capture(state, envelope, scheduled=bool(item.get("slot")), request_id=request_id,
-                              envelope_loader=envelope_loader, database_context=database_context)
-            reconcile_coverage(state, envelope)
+            journal = captured_run(state, item)
+            if journal is None:
+                item["capture_attempts"] = item.get("capture_attempts", 0) + 1
+                with state.lock("requests.lock"):
+                    atomic_json(path(state, request_id), item)
+                journal = capture(state, envelope, scheduled=bool(item.get("slot")), request_id=request_id,
+                                  envelope_loader=envelope_loader, database_context=database_context)
             result = {"run_id": journal["run_id"], "local_complete": journal["local_complete"]}
-            if envelope_loader is not None:
-                envelope = envelope_loader()
-            if envelope["settings"]["destination"] == "s3":
-                result.update(deliver(state, envelope, journal["run_id"], envelope_loader=envelope_loader))
+            if journal.get("delivery_required", envelope["settings"]["destination"] == "s3"):
+                resume_delivery(item, journal)
+                # Persist the artifact identity before any provider work.
+                with state.lock("requests.lock"):
+                    atomic_json(path(state, request_id), item)
+                action, arguments = item["action"], item["arguments"]
+            reconcile_coverage(state, envelope)
+        if action == "deliver":
+            item["delivery_attempts"] = item.get("delivery_attempts", 0) + 1
+            result = deliver(state, envelope, arguments["run_id"], envelope_loader=envelope_loader,
+                             expected_scope=item.get("delivery_scope"))
         elif action == "verify":
             # Recording a verification needs the run lock; busy work defers.
             with state.lock():
@@ -419,25 +481,36 @@ def worker(state, envelope, request_id, envelope_loader=None, database_context=N
             result = retrieve(state, envelope, arguments["run_id"], envelope_loader=envelope_loader)
         elif action == "delete":
             result = delete_run(state, envelope, arguments["run_id"], request_id, location=arguments.get("location", "all"), envelope_loader=envelope_loader)
-        elif action == "deliver":
-            result = deliver(state, envelope, arguments["run_id"], envelope_loader=envelope_loader)
         elif action == "retention":
             result = retention(state, envelope, bool(arguments.get("execute")), envelope_loader=envelope_loader)
-        else:
+        elif action != "run":
             result = destination_test(state, envelope, envelope_loader=envelope_loader)
         if action in ("run", "deliver"):
             from .cli import apply_automatic_retention
             apply_automatic_retention(state, envelope, result, envelope_loader=envelope_loader)
         item.update({"status": "complete", "result": result})
+        item.pop("error", None)
+        item.pop("retry_at", None)
     except BackupError as error:
         item["status"] = "deferred" if error.code in TRANSIENT_ERRORS else "failed"
+        if item["action"] == "deliver":
+            item["status"] = "deferred"
+        elif item["action"] == "run" and error.code in CAPTURE_RETRY_ERRORS and item.get("capture_attempts", 0) < CAPTURE_ATTEMPTS:
+            item["status"] = "deferred"
+        if item["action"] == "run" and item.get("slot") and error.code == "extension-files-changed":
+            item["status"] = "skipped"
         if error.code == "initial-maintenance-scheduled-skip":
             item["status"] = "skipped"
         item["error"] = error.code
+        if item["action"] == "run" and error.code in TRANSIENT_ERRORS:
+            # Waiting for admission did not consume a capture attempt.
+            item["capture_attempts"] = max(0, item.get("capture_attempts", 0) - 1)
         if error.code in ("job-lock-busy", "job-coordination-unverified"):
             item.setdefault("job_wait_since", time.time())
         if item["status"] == "deferred":
-            item["retry_at"] = time.time() + 60
+            attempt = item.get("delivery_attempts", 0) if item["action"] == "deliver" else item.get("capture_attempts", 0)
+            delay = 60 if error.code in TRANSIENT_ERRORS else min(3600, 60 * 2 ** min(max(0, attempt - 1), 6))
+            item["retry_at"] = time.time() + delay
     item["finished_at"] = time.time()
     with state.lock("requests.lock"):
         atomic_json(path(state, request_id), item)

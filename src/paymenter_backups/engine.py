@@ -16,8 +16,11 @@ import uuid
 
 from . import artifacts
 from .common import BackupError, TRANSIENT_ERRORS, atomic_json, digest, identity, read_json
-from .maintenance import MARKERS, billing_admission, cleanup, coordination, probe, strict_payload, schedule_admission
-from .process import boot_id, hash_stream, process_identity, run
+from .maintenance import MARKERS, billing_admission, coordination, strict_payload, schedule_admission
+from .process import boot_id, process_identity, run
+
+RUNTIME_PATHS = ("storage/logs", "storage/framework/cache", "storage/framework/sessions",
+                 "storage/framework/views", "storage/debugbar")
 
 
 def usage(path):
@@ -97,7 +100,7 @@ class DiskReserve:
         self.last_at, self.last_bytes = now, total
 
 
-def run_output_tool(state, settings, name, command, timeout, target, *, stdout=False, register=None, deadline_check=None, output_root=None):
+def run_output_tool(state, settings, name, command, timeout, target, *, stdout=False, register=None, deadline_check=None, output_root=None, native_storage_changes=None):
     """Bound one child output without scanning private history on every poll."""
     available = output_limit(state, settings, output_root or target.parent)
     reserve = DiskReserve(state, settings, target.parent)
@@ -114,7 +117,8 @@ def run_output_tool(state, settings, name, command, timeout, target, *, stdout=F
     # Resolve the remaining duration after admission accounting, never before it.
     seconds = timeout() if callable(timeout) else timeout
     result = run_tool(name, command, seconds, output=target if stdout else None,
-                      register=register, budget_check=check, file_limit=available)
+                      register=register, budget_check=check, file_limit=available,
+                      native_storage_changes=native_storage_changes)
     check(force=True)
     space(state, settings)
     if deadline_check:
@@ -158,13 +162,6 @@ def plan(state, envelope, discovery_inventory=None, probe_locks=True, encryption
         add("installation-not-initialized")
     if settings["mode"] == "full-quiesced":
         try:
-            from .maintenance import probe_authorization, web_origin
-            web_origin(envelope.get("framework", {}).get("app_url", ""), allow_http=True)
-            if envelope.get("maintenance_probe_credentials"):
-                probe_authorization(envelope["maintenance_probe_credentials"], envelope.get("framework", {}).get("app_url", ""))
-        except BackupError as error:
-            add(error.code)
-        try:
             billing_admission(state, envelope)
             schedule_admission(state, envelope)
         except BackupError as error:
@@ -175,8 +172,6 @@ def plan(state, envelope, discovery_inventory=None, probe_locks=True, encryption
             add(error.code)
         from .readiness import stores
         detected = stores(envelope, legacy_policy=settings.get("settings_version", 1) == 1)
-        if detected[0]['supported'] is not True:
-            add('maintenance-driver-unsupported', detail={'driver': detected[0]['driver']})
         unsupported = [item for item in detected[1:] if item['supported'] is not True]
         if unsupported:
             add('external-durable-state-unsupported', detail={'stores': unsupported})
@@ -237,7 +232,7 @@ def plan(state, envelope, discovery_inventory=None, probe_locks=True, encryption
     return {"mode": settings["mode"], "destination": settings["destination"],
             "installation_uuid": state.uuid, "app": str(state.app), "private_root": str(state.root),
             "capture_timeout": settings["capture_timeout"], "admission_errors": errors, "readiness_items": items,
-            "guarantee": "database-and-full-app-checkpoint" if settings["mode"] == "full-quiesced" else "transactional-database-only",
+            "guarantee": "transactional-database-and-live-app-files" if settings["mode"] == "full-quiesced" else "transactional-database-only",
             "external_provider_state": "excluded", "execute_required": True}
 
 
@@ -333,6 +328,71 @@ def external_symlinks(app):
 
 def interrupted(signum, _):
     raise BackupError("capture-interrupted")
+
+
+def extension_snapshot(app, check):
+    """Detect installs/updates across the copy, checking in-app link targets too."""
+    result = {}
+    pending = [app / "extensions"]
+    seen = set()
+    try:
+        while pending:
+            check()
+            path = pending.pop()
+            if path in seen:
+                continue
+            seen.add(path)
+            try:
+                before = path.lstat()
+            except FileNotFoundError:
+                if path == app / "extensions":
+                    continue
+                raise
+            value = [before.st_dev, before.st_ino, before.st_mode, before.st_uid,
+                     before.st_gid, before.st_size, before.st_mtime_ns, before.st_ctime_ns]
+            if stat.S_ISDIR(before.st_mode):
+                pending.extend(path.iterdir())
+            elif stat.S_ISREG(before.st_mode):
+                value.append(digest(path, check))
+            elif stat.S_ISLNK(before.st_mode):
+                value.append(os.readlink(path))
+                # Include an in-app target's bytes as well as the link itself.
+                target = path.resolve(strict=True)
+                if target != app and app not in target.parents:
+                    raise BackupError("external-symlink-target")
+                pending.append(target)
+            else:
+                raise BackupError("capture-failed")
+            after = path.lstat()
+            if value[:8] != [after.st_dev, after.st_ino, after.st_mode, after.st_uid,
+                             after.st_gid, after.st_size, after.st_mtime_ns, after.st_ctime_ns]:
+                raise BackupError("extension-files-changed")
+            result[str(path.relative_to(app))] = value
+    except FileNotFoundError:
+        raise BackupError("extension-files-changed") from None
+    except OSError:
+        raise BackupError("capture-failed") from None
+    return result
+
+
+def changed_storage_files(app, paths):
+    """Directory-only changes need no re-copy; files get one more app pass."""
+    files = []
+    for relative in paths:
+        path = app / relative
+        if path.resolve() != path:
+            raise BackupError('child-failed', 'tar', {'tool': 'tar'})
+        try:
+            info = path.lstat()
+        except FileNotFoundError:
+            files.append(relative)
+            continue
+        if stat.S_ISDIR(info.st_mode):
+            continue
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+            raise BackupError('child-failed', 'tar', {'tool': 'tar'})
+        files.append(relative)
+    return files
 
 
 def cleanup_failed_work(state):
@@ -447,9 +507,13 @@ def capture(state, envelope, scheduled=False, request_id=None, envelope_loader=N
                    "created_at": time.time(), "phase": "admitted", "mode": settings["mode"],
                    "initial_markers": initial, "owned_markers": {}, "groups": [],
                    "process": process_identity(os.getpid()), "boot_id": boot_id(),
-                   "service_recovered": not full, "local_complete": False,
+                   "service_recovered": True, "local_complete": False,
                    "remote_delivered": False, "request_id": request_id}
         journal["output_directory"] = str(output)
+        journal["delivery_required"] = settings["destination"] == "s3"
+        if journal["delivery_required"]:
+            from .storage import remote_scope
+            journal["delivery_scope"] = remote_scope(state, envelope)
         state.save(journal)
         def register(group):
             journal["groups"].append(group)
@@ -468,30 +532,10 @@ def capture(state, envelope, scheduled=False, request_id=None, envelope_loader=N
             with coordination(state, envelope, required=full) as coordinated:
                 if coordinated:
                     journal["billing"] = billing_admission(state, envelope)
-                    if not full:
-                        deadline = time.monotonic() + settings["capture_timeout"]
-                        journal["deadline"] = time.time() + settings["capture_timeout"]
-                        journal["hold_started_at"] = time.time()
-                if full:
-                    deadline = time.monotonic() + settings["capture_timeout"] + settings["drain_seconds"] + 15
-                    journal["deadline"] = time.time() + settings["capture_timeout"] + settings["drain_seconds"] + 15
-                    journal["phase"] = "entering-maintenance"
+                    deadline = time.monotonic() + settings["capture_timeout"]
+                    journal["deadline"] = time.time() + settings["capture_timeout"]
                     journal["hold_started_at"] = time.time()
-                    state.save(journal)
-                    if not initial:
-                        # Journal the intent first. Crash before ownership recording stays closed.
-                        run_tool("php", [envelope["tools"]["php"], str(state.app / "artisan"), "down", "--render=errors::503", "--status=503"],
-                            min(15, remaining()), register=register, database_context=database_context)
-                        journal["owned_markers"] = {relative: identity(state.app / relative) for relative in MARKERS}
-                        state.save(journal)
-                    strict_payload(state.app)
-                    probe(envelope)
-                    journal["phase"] = "draining"
-                    state.save(journal)
-                    time.sleep(settings["drain_seconds"])
-                    remaining()
-                    # The full hold has one shared capture deadline, not one per child.
-                    deadline = min(deadline, time.monotonic() + settings["capture_timeout"])
+                extensions = extension_snapshot(state.app, remaining) if full else None
                 journal["phase"] = "capturing"
                 state.save(journal)
                 database_inventory = inventory(envelope, defaults, remaining(), register)
@@ -506,26 +550,45 @@ def capture(state, envelope, scheduled=False, request_id=None, envelope_loader=N
                 if not sql.stat().st_size:
                     raise BackupError("dump-empty")
                 if full:
-                    sql_hash = digest(sql, remaining)
-                    # Data stability is required across the filesystem capture.
-                    excludes = list(journal["owned_markers"])
-                    tar_command = [envelope["tools"]["tar"], "--acls", "--xattrs", "--numeric-owner", "-cf", str(payload / "app.tar")]
+                    excludes = [*RUNTIME_PATHS, *journal["owned_markers"]]
+                    tar_command = [envelope["tools"]["tar"], "--quoting-style=escape", "--acls", "--xattrs", "--numeric-owner", "-cf", str(payload / "app.tar")]
                     tar_command += ["--exclude=./" + relative for relative in excludes]
                     tar_command += ["-C", str(state.app), "."]
-                    run_output_tool(state, settings, "tar", tar_command, remaining, payload / "app.tar",
-                                    register=register, deadline_check=remaining, output_root=output)
                     try:
-                        stability_hash = hash_stream(command, remaining(), register)
-                    except BackupError as error:
-                        if error.code.startswith("child-"):
-                            raise BackupError(error.code, "dump", {"tool": "dump"}) from None
-                        raise
-                    if stability_hash != sql_hash:
-                        raise BackupError("database-changed-during-capture")
-                    journal["phase"] = "releasing"
-                    state.save(journal)
-                    cleanup(state, journal)
-                if coordinated and not full:
+                        for attempt in range(2):
+                            if attempt:
+                                # Replacing this private work file frees its
+                                # bytes before calculating the second pass cap.
+                                (payload / "app.tar").unlink()
+                            changes = []
+                            run_output_tool(state, settings, "tar", tar_command, remaining, payload / "app.tar",
+                                            register=register, deadline_check=remaining, output_root=output,
+                                            native_storage_changes=changes)
+                            unstable = changed_storage_files(state.app, changes)
+                            if not unstable or attempt:
+                                break
+                    finally:
+                        # A changing extension can also make tar fail. It still
+                        # belongs to the next scheduled slot, not an immediate retry.
+                        if extension_snapshot(state.app, remaining) != extensions:
+                            raise BackupError("extension-files-changed")
+                    if {relative: identity(state.app / relative) for relative in MARKERS
+                            if (state.app / relative).exists()} != initial:
+                        raise BackupError("maintenance-changed")
+                    # Omit mutable runtime data, but restore must have writable
+                    # Laravel storage directories without bootstrapping first.
+                    with tarfile.open(payload / "app.tar", "a") as app_tar:
+                        for relative in (*RUNTIME_PATHS, "storage/framework/cache/data"):
+                            remaining()
+                            entry = tarfile.TarInfo("./" + relative)
+                            entry.type = tarfile.DIRTYPE
+                            entry.mode = 0o775
+                            entry.uid, entry.gid = os.geteuid(), os.getegid()
+                            entry.mtime = int(journal["created_at"])
+                            app_tar.addfile(entry)
+                    space(state, settings)
+                    remaining()
+                if coordinated:
                     journal["hold_ended_at"] = time.time()
                 journal["phase"] = "captured"
                 state.save(journal)
@@ -533,7 +596,8 @@ def capture(state, envelope, scheduled=False, request_id=None, envelope_loader=N
             manifest = {"schema_version": 1, "run_id": run_id, "installation_uuid": state.uuid,
                         "mode": settings["mode"], "created_at": journal["created_at"],
                         "guarantee": proposed["guarantee"], "database_inventory": database_inventory,
-                        "excluded_paths": list(journal["owned_markers"]),
+                        "excluded_paths": excludes if full else [],
+                        "unstable_paths": unstable if full else [],
                         "external_state": "Host configuration, cron, Redis, external storage and provider actions excluded",
                         "payloads": {path.name: {"sha256": digest(path), "size": path.stat().st_size} for path in payload.iterdir()}}
             atomic_json(payload / "manifest.json", manifest)
@@ -573,11 +637,6 @@ def capture(state, envelope, scheduled=False, request_id=None, envelope_loader=N
                 raise
             journal["error"] = error.code if isinstance(error, BackupError) else "capture-failed"
             journal["phase"] = "failed"
-            if full:
-                try:
-                    cleanup(state, journal)
-                except (BackupError, OSError) as recovery_error:
-                    journal["recovery_error"] = recovery_error.code if isinstance(recovery_error, BackupError) else "recovery-failed"
             try:
                 if payload.exists() and not payload.is_symlink():
                     shutil.rmtree(payload)

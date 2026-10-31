@@ -66,6 +66,9 @@ trait BuildsHistoryTable
             $active = array_values(array_filter($tasks, static fn ($task) => in_array($task['status'], self::ACTIVE, true)));
             if ($active) {
                 $task = $active[0];
+                if ($task['action'] === 'deliver' && $task['status'] === 'deferred' && $task['error']) {
+                    $detail = Messages::error($task['error']);
+                }
                 $detail = Messages::taskProgress($task['action'], $task['status']) . ($detail ? ' ' . $detail : '');
                 if (in_array($task['status'], ['pending', 'deferred'], true)) { $cancel = $task['request_id']; }
             } elseif ($run['status'] === 'ready') {

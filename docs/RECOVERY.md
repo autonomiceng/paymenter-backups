@@ -194,8 +194,8 @@ python3 -I /path/to/Backups/runtime/cli.py --app /srv/paymenter \
 Recovery takes the same private run lock as capture and never relies on PID
 alone. It checks recorded boot ID, process group emptiness and every maintenance
 file's exact device, inode, size, mtime, ctime and SHA256. It removes only this
-run's unchanged markers, down first and early-bootstrap stub second. Normal
-completion uses this identical path. Pre-existing markers remain. Matching
+run's unchanged markers, down first and early-bootstrap stub second. Historical maintenance captures used this path at normal completion. New full
+captures keep the site online and require no marker cleanup. Pre-existing markers remain. Matching
 bytes on a new inode, an operator rewrite, uncertain process state or a missing
 ownership record refuses reopening. There remains a small check/unlink race;
 owner-private cooperative administration is a required assumption.
@@ -242,6 +242,21 @@ Full restore into an isolated new host/path:
    support. Preserve symlinks, `.env`, APP_KEY, Passport keys, native storage,
    extensions and the complete upstream release. Set ownership to the new
    application UID; never serve raw outer extraction directories over HTTP.
+   New online full backups omit the contents of `storage/logs`,
+   `storage/framework/cache`, `storage/framework/sessions`,
+   `storage/framework/views` and `storage/debugbar`, as listed in the manifest.
+   Empty writable directories (also `storage/framework/cache/data`) are already
+   in app.tar. Laravel rebuilds runtime data; users sign in again. Durable files
+   under `storage/app`, keys, configuration and extension code remain included.
+   Included uploads and invoice PDFs are copied live. Directory changes from
+   new uploads do not discard the backup. A file change or removal gets one
+   extra app-copy pass without another SQL dump. Check manifest `unstable_paths`:
+   these files were still changing or disappearing in the last pass, so their
+   copies may be incomplete or absent. New uploads may also be absent. Regenerate
+   invoice PDFs from the restored database and recover needed attachments from
+   another copy. Code, configuration, keys, extensions and tar read errors remain
+   strict; this allowance only covers exact change/removal warnings under
+   `storage/app`.
 4. Create an isolated database and import database.sql using a matching MariaDB
    client. Recent MariaDB sandbox-mode comment lines can fail with older MariaDB
    or MySQL clients. This engine refuses visible routines, events, views,
@@ -276,8 +291,8 @@ Full restore into an isolated new host/path:
    verified backup. Open service only after this isolated validation.
 
 Full mode preserves safe pre-existing maintenance files in the archive; restore
-may therefore remain in maintenance intentionally. A normal full run excludes
-only its newly created markers and declares those paths. No automatic restore
+may therefore remain in maintenance intentionally. New full captures keep the site online and create no maintenance markers.
+Historical full runs excluded only their newly created markers and declared those paths. No automatic restore
 command mutates a destination app or database. The documented restore drill
 and CI fixture use disposable applications; real hosts and S3 providers
 remain deployment work.
