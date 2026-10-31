@@ -21,7 +21,7 @@ from unittest.mock import patch
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "src"))
 from paymenter_backups.common import BackupError, State, atomic_json, digest, identity
 from paymenter_backups.config import DEFAULTS, billing_fingerprint, normalize, redact, validate
-from paymenter_backups.engine import capture, check_archive, external_symlinks, inventory, verify
+from paymenter_backups.engine import capture, changed_storage_files, check_archive, external_symlinks, inventory, verify
 from paymenter_backups.maintenance import MARKERS, billing_admission, cleanup, cron_lock, recover, systemd_locks
 from paymenter_backups.process import group_members, process_identity, run
 from paymenter_backups.requests import cancel, create, due_slots
@@ -251,6 +251,19 @@ payload={'status':503,'except':[],'secret':None,'redirect':None,'template':'fixt
             "os.utime(path,ns=(info.st_atime_ns,info.st_mtime_ns+1000000000))\n")
         with self.assertRaisesRegex(BackupError, "child-failed"):
             capture(self.state, self.envelope)
+
+    def test_changed_storage_files_refuses_links_and_returns_missing_file(self):
+        uploads = self.app / "storage/app/uploads"
+        uploads.mkdir(parents=True)
+        (uploads / "real.bin").write_bytes(b"attachment")
+        (uploads / "link.bin").symlink_to("real.bin")
+        os.link(uploads / "real.bin", uploads / "hard.bin")
+        for name in ("link.bin", "hard.bin"):
+            with self.subTest(name=name):
+                with self.assertRaisesRegex(BackupError, "child-failed"):
+                    changed_storage_files(self.app, ["storage/app/uploads/" + name])
+        missing = "storage/app/uploads/gone.bin"
+        self.assertEqual(changed_storage_files(self.app, [missing]), [missing])
 
     def test_extension_change_during_copy_skips_scheduled_capture_then_next_slot_succeeds(self):
         from paymenter_backups.requests import path as request_path, worker
