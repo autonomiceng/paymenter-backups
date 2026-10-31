@@ -242,6 +242,12 @@ Full restore into an isolated new host/path:
    support. Preserve symlinks, `.env`, APP_KEY, Passport keys, native storage,
    extensions and the complete upstream release. Set ownership to the new
    application UID; never serve raw outer extraction directories over HTTP.
+   New online full backups omit the contents of `storage/logs`,
+   `storage/framework/cache`, `storage/framework/sessions`,
+   `storage/framework/views` and `storage/debugbar`, as listed in the manifest.
+   Empty writable directories (also `storage/framework/cache/data`) are already
+   in app.tar. Laravel rebuilds runtime data; users sign in again. Durable files
+   under `storage/app`, keys, configuration and extension code remain included.
 4. Create an isolated database and import database.sql using a matching MariaDB
    client. Recent MariaDB sandbox-mode comment lines can fail with older MariaDB
    or MySQL clients. This engine refuses visible routines, events, views,

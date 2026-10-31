@@ -103,7 +103,7 @@ payload={'status':503,'except':[],'secret':None,'redirect':None,'template':'fixt
         result = verify(self.state, journal["run_id"], True)
         self.assertTrue(journal["service_recovered"])
         self.assertFalse((self.app / MARKERS[0]).exists())
-        self.assertEqual(result["excluded_paths"], [])
+        self.assertIn("storage/logs", result["excluded_paths"])
         with tarfile.open(journal["archive_path"], "r:gz") as outer:
             inner = outer.extractfile("./app.tar").read()
         with tarfile.open(fileobj=io.BytesIO(inner)) as app_tar:
@@ -135,6 +135,52 @@ payload={'status':503,'except':[],'secret':None,'redirect':None,'template':'fixt
         with self.assertRaisesRegex(BackupError, "job-locks-unverified"):
             capture(self.state, self.envelope)
         self.assertEqual(count.read_text(), "dump\n")
+
+    def test_full_capture_excludes_live_runtime_data_and_restores_empty_directories(self):
+        runtime = ("storage/logs", "storage/framework/cache", "storage/framework/sessions",
+                   "storage/framework/views", "storage/debugbar")
+        for relative in runtime:
+            directory = self.app / relative
+            directory.mkdir(parents=True, exist_ok=True)
+            (directory / "live-data").write_bytes(b"x" * 2 * 1024**2)
+        required = self.app / "storage/app/oauth-private.key"
+        required.parent.mkdir(parents=True)
+        required.write_bytes(b"required-key-and-upload-data" * 100000)
+        extension = self.app / "extensions/Others/Fixture/code.php"
+        extension.parent.mkdir(parents=True)
+        extension.write_text("required extension code")
+        changed = self.base / "runtime-writes"
+        writer = self.script("runtime-writer", f"import os,pathlib\napp=pathlib.Path({str(self.app)!r})\n"
+                             f"for relative in {runtime!r}:\n"
+                             "    path=app/relative/'live-data'\n"
+                             "    info=path.stat()\n"
+                             "    os.utime(path,ns=(info.st_atime_ns,info.st_mtime_ns+1000000000))\n"
+                             "    (path.parent/'new-request').write_text('runtime request')\n"
+                             f"pathlib.Path({str(changed)!r}).write_text('wrote during tar')")
+        self.envelope["tools"]["tar"] = str(self.script("live-tar", f"import os,sys\nargs=sys.argv[1:]\n"
+            f"if {str(self.app)!r} in args:\n"
+            f"    args=['--checkpoint=32','--checkpoint-action=exec={writer}',*args]\n"
+            "os.execv('/usr/bin/tar',['tar',*args])"))
+        journal = capture(self.state, self.envelope)
+        manifest = verify(self.state, journal["run_id"], show=True)
+        self.assertTrue(changed.exists())
+        self.assertEqual(set(manifest["excluded_paths"]), set(runtime))
+        restored = self.base / "restored"
+        with tarfile.open(journal["archive_path"], "r:gz") as outer:
+            with tarfile.open(fileobj=io.BytesIO(outer.extractfile("./app.tar").read())) as inner:
+                inner.extractall(restored, filter="data")
+        for relative in (*runtime, "storage/framework/cache/data"):
+            directory = restored / relative
+            self.assertTrue(directory.is_dir(), relative)
+            self.assertFalse(any(path.is_file() for path in directory.rglob("*")), relative)
+        self.assertEqual((restored / "storage/app/oauth-private.key").read_bytes(), required.read_bytes())
+        self.assertEqual((restored / ".env").read_bytes(), (self.app / ".env").read_bytes())
+        self.assertEqual((restored / extension.relative_to(self.app)).read_text(), extension.read_text())
+        # The same real-tar mutation remains a failure for required app data.
+        writer.write_text(f"#!{sys.executable}\nimport os,pathlib\npath=pathlib.Path({str(required)!r})\n"
+                          "info=path.stat()\nos.utime(path,ns=(info.st_atime_ns,info.st_mtime_ns+1000000000))\n")
+        with self.assertRaisesRegex(BackupError, "child-failed"):
+            capture(self.state, self.envelope)
 
     def test_extension_change_during_copy_skips_scheduled_capture_then_next_slot_succeeds(self):
         from paymenter_backups.requests import path as request_path, worker
@@ -544,7 +590,7 @@ else: print({show!r})"""))
         originals = {relative: identity(self.app / relative) for relative in MARKERS}
         journal = capture(self.state, self.envelope)
         self.assertEqual({relative: identity(self.app / relative) for relative in MARKERS}, originals)
-        self.assertEqual(verify(self.state, journal["run_id"], True)["excluded_paths"], [])
+        self.assertTrue(set(verify(self.state, journal["run_id"], True)["excluded_paths"]).isdisjoint(MARKERS))
 
     def test_scheduled_initial_maintenance_skips(self):
         run([self.envelope["tools"]["php"], str(self.app / "artisan")], 2)

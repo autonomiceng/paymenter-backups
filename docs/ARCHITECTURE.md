@@ -578,10 +578,18 @@ Before the dump and after the app tar, compare the complete extension tree's
 paths, types, ownership/mode, inode, size, nanosecond modification/change times
 and file hashes, including in-app symlink targets. A change discards the capture.
 Scheduled full work skips that slot and tries at the next configured full time;
-manual capture retries are bounded. Ordinary live uploads, sessions and cache
-files may change during copying. Do not update code or schema during capture.
-Tar errors still reject incomplete copies and use the bounded capture retry;
-live-file warnings do not authorize silently ignoring unreadable files.
+manual capture retries are bounded. Live runtime contents are excluded:
+`storage/logs`, `storage/framework/cache`, `storage/framework/sessions`,
+`storage/framework/views` and `storage/debugbar`. Paymenter's standard logging,
+file cache/session stores, compiled views and debugbar write there during HTTP
+requests. The manifest lists these paths. The archive supplies empty writable
+directories, including `storage/framework/cache/data`, so Laravel can boot after
+extraction without the omitted runtime data. Restored users must sign in again.
+Application code/config, keys, extensions and durable `storage/app` uploads,
+invoices and attachments stay included and strict. Tar errors still reject
+incomplete copies and use the bounded capture retry; exit 1 is never accepted
+generally and `--ignore-failed-read` is not used. Do not update code or schema
+during capture.
 Pre-existing safe maintenance files are preserved for foreground capture;
 scheduled capture skips pre-existing maintenance. Historical maintenance ownership
 and recovery handling remain supported without creating any new owned markers.

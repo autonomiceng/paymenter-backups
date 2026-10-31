@@ -87,7 +87,7 @@ trait BuildsSettingsForm
                 Section::make('Schedule')->id('schedule')->description('Backups run from Paymenter\'s cron job at these times.')->schema([
                     Grid::make(['default' => 1, 'md' => 2])->schema([
                         Fieldset::make('Full backups')->columns(1)->schema([
-                            Text::make('Database and all files. The site stays online while the copy runs.'),
+                            Text::make('Database and application files. Runtime logs, cache and sessions are omitted. The site stays online.'),
                             Select::make('full_schedule')->label('Frequency')->options(Settings::SELECTS['full_schedule'])->required()->selectablePlaceholder(false),
                             $days('full_weekdays', 'full_schedule'),
                             $time('full_time')->helperText(fn () => $this->billingSentence())->visibleJs("\$get('full_schedule') !== 'off'"),

@@ -19,6 +19,9 @@ from .common import BackupError, TRANSIENT_ERRORS, atomic_json, digest, identity
 from .maintenance import MARKERS, billing_admission, coordination, strict_payload, schedule_admission
 from .process import boot_id, process_identity, run
 
+RUNTIME_PATHS = ("storage/logs", "storage/framework/cache", "storage/framework/sessions",
+                 "storage/framework/views", "storage/debugbar")
+
 
 def usage(path):
     total = 0
@@ -526,7 +529,7 @@ def capture(state, envelope, scheduled=False, request_id=None, envelope_loader=N
                 if not sql.stat().st_size:
                     raise BackupError("dump-empty")
                 if full:
-                    excludes = list(journal["owned_markers"])
+                    excludes = [*RUNTIME_PATHS, *journal["owned_markers"]]
                     tar_command = [envelope["tools"]["tar"], "--acls", "--xattrs", "--numeric-owner", "-cf", str(payload / "app.tar")]
                     tar_command += ["--exclude=./" + relative for relative in excludes]
                     tar_command += ["-C", str(state.app), "."]
@@ -541,6 +544,19 @@ def capture(state, envelope, scheduled=False, request_id=None, envelope_loader=N
                     if {relative: identity(state.app / relative) for relative in MARKERS
                             if (state.app / relative).exists()} != initial:
                         raise BackupError("maintenance-changed")
+                    # Omit mutable runtime data, but restore must have writable
+                    # Laravel storage directories without bootstrapping first.
+                    with tarfile.open(payload / "app.tar", "a") as app_tar:
+                        for relative in (*RUNTIME_PATHS, "storage/framework/cache/data"):
+                            remaining()
+                            entry = tarfile.TarInfo("./" + relative)
+                            entry.type = tarfile.DIRTYPE
+                            entry.mode = 0o775
+                            entry.uid, entry.gid = os.geteuid(), os.getegid()
+                            entry.mtime = int(journal["created_at"])
+                            app_tar.addfile(entry)
+                    space(state, settings)
+                    remaining()
                 if coordinated:
                     journal["hold_ended_at"] = time.time()
                 journal["phase"] = "captured"
@@ -549,7 +565,7 @@ def capture(state, envelope, scheduled=False, request_id=None, envelope_loader=N
             manifest = {"schema_version": 1, "run_id": run_id, "installation_uuid": state.uuid,
                         "mode": settings["mode"], "created_at": journal["created_at"],
                         "guarantee": proposed["guarantee"], "database_inventory": database_inventory,
-                        "excluded_paths": list(journal["owned_markers"]),
+                        "excluded_paths": excludes if full else [],
                         "external_state": "Host configuration, cron, Redis, external storage and provider actions excluded",
                         "payloads": {path.name: {"sha256": digest(path), "size": path.stat().st_size} for path in payload.iterdir()}}
             atomic_json(payload / "manifest.json", manifest)

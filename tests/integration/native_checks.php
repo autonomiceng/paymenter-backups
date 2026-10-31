@@ -346,19 +346,18 @@ if ($mode === 'upload') {
     check($secretFields($livewire) === [] && !str_contains($livewire->html(), 'CREDENTIAL-CANARY'), 'unrelated response returned S3 input');
     $notices();
 
-    // Site password: origin binding, unreadable-store preservation, explicit removal.
+    // Historical site-password compatibility: the online capture UI no longer
+    // renders these inputs, but old credentials still need safe validation/removal.
     $originalUrl = App\Models\Setting::whereNull('settingable_type')->where('key', 'app_url')->value('value');
     App\Models\Setting::whereNull('settingable_type')->where('key', 'app_url')->update(['value' => 'https://fixture.example.invalid']);
     App\Providers\SettingsProvider::flushCache();
     try {
         $probe = Livewire\Livewire::test($page);
-        check(str_contains(html_entity_decode(strip_tags($probe->html())), 'https://fixture.example.invalid'), 'site address not shown from app URL');
-        check(str_contains($text($probe), 'asks for a username and password') && str_contains($text($probe), 'Not your Paymenter login'), 'site password purpose missing before it is saved');
+        check(!str_contains($text($probe), 'asks for a username and password'), 'obsolete site password section still rendered');
         // The browser cannot choose the address; a sent origin is ignored.
         $probeSecrets = ['siteAccess.origin' => 'https://other.invalid', 'siteAccess.username' => 'PROBE-USER-CREDENTIAL-CANARY', 'siteAccess.password' => 'PROBE-PASSWORD-CREDENTIAL-CANARY'];
         $probe = $save($probeSecrets);
         check($probe->instance()->getErrorBag()->isEmpty() && $secretFields($probe) === [], 'site password save failed or kept input');
-        check(str_contains($text(Livewire\Livewire::test($page)), 'Saved for https://fixture.example.invalid'), 'saved site password state not shown');
         $bound = $bridgeRead();
         check($bound['maintenance_probe_credentials'] === ['origin' => 'https://fixture.example.invalid', 'username' => 'PROBE-USER-CREDENTIAL-CANARY', 'password' => 'PROBE-PASSWORD-CREDENTIAL-CANARY'], 'probe namespace not bound');
         check($bound['credentials']['access_key'] === 'ACCESS-CREDENTIAL-CANARY', 'probe save lost S3 keys');
@@ -366,13 +365,10 @@ if ($mode === 'upload') {
         // Paymenter on plain http: no site password is sent or saved.
         App\Models\Setting::whereNull('settingable_type')->where('key', 'app_url')->update(['value' => 'http://fixture.example.invalid']);
         App\Providers\SettingsProvider::flushCache();
-        $plain = Livewire\Livewire::test($page);
-        check(str_contains($text($plain), 'uses http://') && str_contains($text($plain), 'asks for a username and password'), 'http address or site password purpose not explained');
-        check(str_contains($plain->html(), "mountAction('removeSitePassword'"), 'saved site password cannot be removed over HTTP');
         $plain = $save($probeSecrets);
         check($plain->instance()->getErrorBag()->has('siteAccess.username') && $digest() === $credentialDigest && $secretFields($plain) === [], 'http address saved a site password or kept input');
         $httpRemoval = Livewire\Livewire::test($page);
-        $httpRemoval->call('mountAction', 'removeSitePassword', [], $schemaAction($httpRemoval, 'removeSitePassword'))->call('callMountedAction');
+        $httpRemoval->call('mountAction', 'removeSitePassword')->call('callMountedAction');
         $httpCleared = $bridgeRead();
         check($httpCleared['maintenance_probe_credentials'] === [] && $httpCleared['credentials']['access_key'] === 'ACCESS-CREDENTIAL-CANARY', 'HTTP removal failed or lost S3 keys');
         App\Models\Setting::whereNull('settingable_type')->where('key', 'app_url')->update(['value' => 'https://fixture.example.invalid']);
@@ -399,7 +395,7 @@ if ($mode === 'upload') {
         check(!is_file($root . '/config-save.json'), 'definite unreadable-store refusal left its new save guard');
         Paymenter\Extensions\Others\Backups\PrivateStore::atomic($root . '/credentials.json', $encryptedBackup);
         $removal = Livewire\Livewire::test($page);
-        $removal->call('mountAction', 'removeSitePassword', [], $schemaAction($removal, 'removeSitePassword'))->call('callMountedAction');
+        $removal->call('mountAction', 'removeSitePassword')->call('callMountedAction');
         $cleared = $bridgeRead();
         check($cleared['maintenance_probe_credentials'] === [] && $cleared['credentials']['secret_key'] === 'SECRET-CREDENTIAL-CANARY', 'site password removal lost S3 keys');
         $save($probeSecrets);
