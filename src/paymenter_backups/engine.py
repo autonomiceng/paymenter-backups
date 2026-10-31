@@ -1,5 +1,4 @@
 """Capture checkpoint, restore service, then package immutable payloads."""
-import contextlib
 import fcntl
 import hashlib
 import gzip
@@ -466,10 +465,14 @@ def capture(state, envelope, scheduled=False, request_id=None, envelope_loader=N
         temporary = None
         try:
             defaults_file(defaults, envelope["database"])
-            context = coordination(state, envelope) if full else contextlib.nullcontext()
-            with context:
-                if full:
+            with coordination(state, envelope, required=full) as coordinated:
+                if coordinated:
                     journal["billing"] = billing_admission(state, envelope)
+                    if not full:
+                        deadline = time.monotonic() + settings["capture_timeout"]
+                        journal["deadline"] = time.time() + settings["capture_timeout"]
+                        journal["hold_started_at"] = time.time()
+                if full:
                     deadline = time.monotonic() + settings["capture_timeout"] + settings["drain_seconds"] + 15
                     journal["deadline"] = time.time() + settings["capture_timeout"] + settings["drain_seconds"] + 15
                     journal["phase"] = "entering-maintenance"
@@ -499,11 +502,11 @@ def capture(state, envelope, scheduled=False, request_id=None, envelope_loader=N
                 journal["database_snapshot_lower_bound"] = time.time()
                 state.save(journal)
                 run_output_tool(state, settings, "dump", command, remaining, sql,
-                                stdout=True, register=register, deadline_check=remaining if full else None, output_root=output)
+                                stdout=True, register=register, deadline_check=remaining if coordinated else None, output_root=output)
                 if not sql.stat().st_size:
                     raise BackupError("dump-empty")
-                sql_hash = digest(sql, remaining)
                 if full:
+                    sql_hash = digest(sql, remaining)
                     # Data stability is required across the filesystem capture.
                     excludes = list(journal["owned_markers"])
                     tar_command = [envelope["tools"]["tar"], "--acls", "--xattrs", "--numeric-owner", "-cf", str(payload / "app.tar")]
@@ -522,6 +525,8 @@ def capture(state, envelope, scheduled=False, request_id=None, envelope_loader=N
                     journal["phase"] = "releasing"
                     state.save(journal)
                     cleanup(state, journal)
+                if coordinated and not full:
+                    journal["hold_ended_at"] = time.time()
                 journal["phase"] = "captured"
                 state.save(journal)
             defaults.unlink(missing_ok=True)

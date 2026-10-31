@@ -20,9 +20,16 @@ import urllib.request
 import uuid
 
 from .scheduler import cron_environment_assignment, guarded_relevant
-from .common import BackupError, identity, read_json
+from .common import BackupError, atomic_json, identity, read_json
 from .config import billing_fingerprint
 from .process import app_workers, group_members, run
+
+
+DATABASE_LOCK_WAIT = 60
+
+
+def job_lock_wait(settings):
+    return max(settings["lock_timeout"], DATABASE_LOCK_WAIT) if settings.get("mode") == "database-online" else settings["lock_timeout"]
 
 
 PROBE_TIMEOUT = 10
@@ -201,7 +208,8 @@ def billing_admission(state, envelope, now=None):
         protected = [float(item) for item in guard["instants"]]
     except (KeyError, TypeError, ValueError, BackupError):
         raise BackupError("billing-guard-stale") from None
-    bound = settings["lock_timeout"] + settings["drain_seconds"] + settings["capture_timeout"] + 30
+    drain = settings["drain_seconds"] if settings["mode"] == "full-quiesced" else 0
+    bound = job_lock_wait(settings) + drain + settings["capture_timeout"] + 30
     margin = settings["billing_margin_seconds"]
     for instant in protected:
         if now <= instant + 60 + margin and now + bound >= instant - margin:
@@ -211,37 +219,85 @@ def billing_admission(state, envelope, now=None):
             "expression": guard.get("expression")}
 
 
-@contextlib.contextmanager
-def coordination(state, envelope):
+def coordination_paths(state, envelope, inventory=None, *, database_only=False):
+    """Verify launcher configuration before taking any of its locks."""
     paths = envelope["settings"]["job_lock_paths"]
     v2 = envelope["settings"].get("settings_version", 1) == 2
-    if v2:
+    if v2 or (inventory is not None and not paths):
         from .discovery import admission, discover
-        errors, paths = admission(envelope, discover(state, envelope))
+        errors, paths = admission(envelope, inventory if inventory is not None else discover(state, envelope))
         if errors:
             first = errors[0]
             raise BackupError(first["code"], first["field"], first["detail"])
-    descriptors = []
-    try:
-        if not paths:
+    if not paths:
+        raise BackupError("job-locks-unverified")
+    if not v2:
+        try:
+            crontab = run([envelope["tools"].get("crontab", "/usr/bin/crontab"), "-l"], 5).decode()
+        except FileNotFoundError:
+            crontab = ""
+        except BackupError as error:
+            if error.code != "child-failed":
+                raise
+            crontab = ""
+        commands = ("schedule:run", "queue:work", "schedule:work", "queue:listen", "horizon") if database_only else ("schedule:run", "queue:work")
+        jobs = [line for line in crontab.splitlines() if line.strip() and not line.lstrip().startswith("#") and not cron_environment_assignment(line) and (any(word in line for word in commands) or guarded_relevant(line, state.app))]
+        continuous_locks = set() if database_only else None
+        verified = set()
+        for line in jobs:
+            lock = _legacy_cron_lock(line, state.app, paths, continuous_locks=continuous_locks)
+            if lock is not None:
+                verified.add(lock)
+        verified.update(systemd_locks(state.app, paths, envelope.get("tools", {}), continuous_locks=continuous_locks))
+        if set(paths) not in (verified, verified | (continuous_locks or set())):
             raise BackupError("job-locks-unverified")
-        if not v2:
-            try:
-                crontab = run([envelope["tools"].get("crontab", "/usr/bin/crontab"), "-l"], 5).decode()
-            except FileNotFoundError:
-                crontab = ""
-            except BackupError as error:
-                if error.code != "child-failed":
-                    raise
-                crontab = ""
-            jobs = [line for line in crontab.splitlines() if line.strip() and not line.lstrip().startswith("#") and not cron_environment_assignment(line) and (any(word in line for word in ("schedule:run", "queue:work")) or guarded_relevant(line, state.app))]
-            verified = set()
-            for line in jobs:
-                verified.add(_legacy_cron_lock(line, state.app, paths))
-            verified.update(systemd_locks(state.app, paths, envelope.get("tools", {})))
-            if verified != set(paths):
-                raise BackupError("job-locks-unverified")
-        deadline = time.monotonic() + envelope["settings"]["lock_timeout"]
+        if database_only:
+            paths = sorted(verified)
+    for path in paths:
+        info = os.stat(path, follow_symlinks=False)
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid():
+            raise BackupError("job-locks-unverified")
+    return paths
+
+
+def database_coordination_paths(state, envelope):
+    """Coordinate finite jobs; continuous writers may overlap an online snapshot."""
+    from .discovery import admission, discover
+    inventory = discover(state, envelope)
+    if inventory["state"] != "ok":
+        raise BackupError(inventory["error"] or "job-discovery-incomplete")
+    if not envelope["settings"]["job_lock_paths"] and all(
+            item["coordination"] in ("uncoordinated", "continuous") and item["lock"] is None
+            for item in inventory["items"]):
+        return []
+    if envelope["settings"].get("settings_version", 1) == 1 and envelope["settings"]["job_lock_paths"]:
+        return coordination_paths(state, envelope, inventory, database_only=True)
+    errors, paths = admission(envelope, inventory, database_only=True)
+    if errors:
+        first = errors[0]
+        raise BackupError(first["code"], first["field"], first["detail"])
+    return paths
+
+
+@contextlib.contextmanager
+def coordination(state, envelope, *, required=True):
+    descriptors = []
+    entered = False
+    try:
+        paths = coordination_paths(state, envelope) if required else database_coordination_paths(state, envelope)
+        if not paths:
+            # Fresh discovery proved no finite coordination to acquire.
+            atomic_json(state.root / "job-coordination.json", {"state": "absent", "checked_at": time.time()})
+            entered = True
+            yield False
+            return
+        if not required:
+            # Freshly verified setup replaces absence even if billing or jobs defer us.
+            atomic_json(state.root / "job-coordination.json", {"state": "verified", "checked_at": time.time()})
+            # A partial acquisition can already pause the scheduler.
+            billing_admission(state, envelope)
+        v2 = envelope["settings"].get("settings_version", 1) == 2
+        deadline = time.monotonic() + (job_lock_wait(envelope["settings"]) if not required else envelope["settings"]["lock_timeout"])
         for path in sorted(set(paths)):
             descriptor = os.open(path, os.O_RDWR | os.O_NOFOLLOW)
             descriptors.append(descriptor)
@@ -261,11 +317,19 @@ def coordination(state, envelope):
             held = os.fstat(descriptor)
             if (current.st_dev, current.st_ino) != (held.st_dev, held.st_ino):
                 raise BackupError("job-lock-unsafe" if v2 else "job-locks-unverified")
-        if app_workers(state.app):
+        if app_workers(state.app, held_locks=descriptors, allow_continuous=not required):
             raise BackupError("job-workers-running" if v2 else "job-locks-unverified")
-        yield
-    except OSError:
-        raise BackupError("job-locks-unverified") from None
+        entered = True
+        yield True
+    except (BackupError, OSError) as error:
+        if not required and not entered and (isinstance(error, OSError) or error.code not in (
+                "job-lock-busy", "billing-guard-stale", "billing-window-protected")):
+            cause = error.code if isinstance(error, BackupError) else "job-locks-unverified"
+            atomic_json(state.root / "job-coordination.json", {"state": "unverified", "checked_at": time.time(), "error": cause})
+            raise BackupError("job-coordination-unverified") from None
+        if isinstance(error, OSError) and not entered:
+            raise BackupError("job-locks-unverified") from None
+        raise
     finally:
         for descriptor in reversed(descriptors):
             os.close(descriptor)
@@ -283,9 +347,20 @@ def cron_lock(line, app, paths):
         raise BackupError('job-locks-unverified') from None
 
 
-def _legacy_cron_lock(line, app, paths, cron=True):
-    """Support explicit path-based flock invocations; ambiguous shell refuses."""
+def _legacy_cron_lock(line, app, paths, cron=True, *, continuous_locks=None):
+    """Verify legacy syntax; optionally collect and skip continuous launcher locks."""
     from .discovery import cron_command, parse
+    from .process import _continuous_worker
+    if continuous_locks is not None:
+        try:
+            item = parse(line, app, cron=cron)
+        except BackupError:
+            pass  # Finite v1 options still go through the legacy parser below.
+        else:
+            if item['coordination'] == 'continuous':
+                if item['lock'] is not None:
+                    continuous_locks.add(item['lock'])
+                return None
     if guarded_relevant(line, app):
         try:
             item = parse(line, app, cron=cron)
@@ -327,13 +402,16 @@ def _legacy_cron_lock(line, app, paths, cron=True):
             raise ValueError()
         if any(word in command for word in ("-c", "--command", "eval", ";", "&&", "||", "|", "&", ">", "<")) or any(any(symbol in word for symbol in (";", "|", "&", "`", "$", ">", "<")) for word in command):
             raise ValueError()
+        if continuous_locks is not None and _continuous_worker(command):
+            continuous_locks.add(lock)
+            return None
         return lock
     except (ValueError, StopIteration, IndexError):
         raise BackupError("job-locks-unverified") from None
 
 
-def systemd_locks(app, paths, tools):
-    """Read existing timer/service metadata. Never install, enable or start jobs."""
+def systemd_locks(app, paths, tools, *, continuous_locks=None):
+    """Read launcher locks, optionally collecting continuous locks for database mode."""
     from .discovery import SYSTEMD_RESTART_POLICIES, SYSTEMD_SHOW_PROPERTIES, systemd_service_units
 
     systemctl = tools.get("systemctl", "/usr/bin/systemctl")
@@ -420,7 +498,8 @@ def systemd_locks(app, paths, tools):
                 working = props.get("WorkingDirectory", "")
                 relevant = working == str(app) or re.search(re.escape(str(app)) + r"(?:/|[\s;'\"]|$)", execution)
                 guarded = guarded_relevant(execution, app)
-                if not guarded and (not relevant or not any(word in execution for word in ("schedule:run", "queue:work"))):
+                commands = ("schedule:run", "queue:work", "schedule:work", "queue:listen", "horizon") if continuous_locks is not None else ("schedule:run", "queue:work")
+                if not guarded and (not relevant or not any(word in execution for word in commands)):
                     continue
                 owner = props.get("User", "")
                 try:
@@ -438,8 +517,10 @@ def systemd_locks(app, paths, tools):
                 if working == str(app):
                     tokens = ["cd", str(app), "&&"] + tokens
                 line = " ".join(shlex.quote(token) for token in tokens)
-                verified_lock = _legacy_cron_lock(line, app, paths, cron=False)
-                if props.get("Restart") in SYSTEMD_RESTART_POLICIES and "queue:work" in tokens:
+                verified_lock = _legacy_cron_lock(line, app, paths, cron=False, continuous_locks=continuous_locks)
+                if verified_lock is None:
+                    continue
+                if continuous_locks is None and props.get("Restart") in SYSTEMD_RESTART_POLICIES and "queue:work" in tokens:
                     raise BackupError("job-locks-unverified")
                 verified.add(verified_lock)
         except (KeyError, ValueError, UnicodeError, BackupError):

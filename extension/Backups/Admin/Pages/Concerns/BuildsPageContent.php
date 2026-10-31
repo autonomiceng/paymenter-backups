@@ -116,6 +116,14 @@ trait BuildsPageContent
     {
         $pending = fn () => (int) ($this->overview()['s3_pending']['count'] ?? 0);
         return [
+            Text::make('Database backups are running without job locks and can overlap Paymenter jobs.')
+                ->visible(fn () => ($this->overview()['database_job_coordination']['state'] ?? null) === 'absent'),
+            Callout::make(Messages::JOB_COORDINATION_UNVERIFIED)->warning()
+                ->description(fn () => Messages::error($this->overview()['database_job_coordination']['error'] ?? null))
+                ->visible(fn () => ($this->overview()['database_job_coordination']['state'] ?? null) === 'unverified'),
+            Callout::make('Database backups have waited a day for Paymenter jobs')->warning()
+                ->description('Check scheduler and queue jobs and their lock setup on this tab. Waiting backups retry automatically. If none is waiting, queue a database backup. Backups cannot safely stop a job that may be changing data or guess which locks protect it.')
+                ->visible(fn () => (bool) ($this->overview()['job_wait_overdue'] ?? false)),
             Callout::make('Backups in S3 aren\'t encrypted')->info()
                 ->description('Save settings to turn on encryption for new uploads. Backups already in S3 stay as they are.')
                 ->actions([$this->link('alertEncryption', 'Go to Storage settings', $this->settingsUrl('storage'))->button()])

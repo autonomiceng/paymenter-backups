@@ -15,7 +15,7 @@ import stat
 import time
 
 from .common import BackupError, atomic_json, private_file, read_json
-from .process import run, probe
+from .process import ARTISAN_GLOBAL_FLAGS, run, probe
 from .scheduler import cron_environment_assignment, guarded_scheduler_path, guarded_relevant
 
 PHP_NAME = re.compile(r'(?:php(?:[0-9]+(?:\.[0-9]+)?)?|php-cli|ea-php[0-9]+|lsphp[0-9]+)')
@@ -163,13 +163,13 @@ def parse(line, app, cron=True, working=None):
         if artisan != str(app / 'artisan') and not (artisan == 'artisan' and relative):
             raise ValueError()
         safe = []
-        while tokens and tokens[0] in ("--quiet", "-q", "--no-interaction", "-n"):
+        while tokens and tokens[0] in ARTISAN_GLOBAL_FLAGS:
             safe.append(tokens.pop(0))
         command = tokens.pop(0)
         if command not in KINDS:
             raise ValueError()
         for word in tokens:
-            if word in ('--quiet', '-q', '--no-interaction', '-n', '--stop-when-empty', '--once'):
+            if word in ARTISAN_GLOBAL_FLAGS + ('--stop-when-empty', '--once'):
                 safe.append(word)
             elif re.fullmatch(r'--(?:max-time|max-jobs|sleep|tries|timeout|backoff|memory)=[0-9]+', word):
                 safe.append(word)
@@ -413,14 +413,27 @@ def lock_safe(path):
         return False
 
 
-def admission(envelope, inventory):
+def admission(envelope, inventory, *, database_only=False):
     items = []
     def add(code, field=None, detail=None):
         items.append({'code': code, 'field': field, 'detail': detail or {}})
     if inventory['state'] != 'ok':
         add(inventory.get('error') or ('job-discovery-stale' if inventory['state'] == 'stale' else 'job-discovery-unknown'))
-    jobs = inventory['items']
-    if not any(item['kind'] == 'scheduler' for item in jobs):
+    jobs = []
+    continuous_locks = set()
+    for job in inventory['items']:
+        if database_only and job['coordination'] == 'continuous':
+            # Restart=always also marks bounded workers continuous. Their lock
+            # can still exclude the next invocation while a database dump runs.
+            parsed = parse(job['command'], pathlib.Path(envelope['app']), cron=False)
+            if parsed['coordination'] == 'coordinated':
+                job = dict(job, coordination='coordinated', reason=None)
+            else:
+                if job['lock']:
+                    continuous_locks.add(job['lock'])
+                continue
+        jobs.append(job)
+    if not database_only and not any(item['kind'] == 'scheduler' for item in jobs):
         add('scheduler-missing')
     for job in jobs:
         if job['coordination'] != 'coordinated':
@@ -428,10 +441,11 @@ def admission(envelope, inventory):
         elif (not any(word in shlex.split(job['command']) for word in KINDS)
               and (not guarded_command(job['command']) or not guarded_script_safe())):
             add('job-command-unsupported', detail={'job': job['id']})
-        elif not lock_safe(job['lock']):
+        # Legacy database locks retain their descriptor checks at acquisition.
+        elif (not database_only or envelope['settings'].get('settings_version', 1) == 2) and not lock_safe(job['lock']):
             add('job-lock-unsafe', 'job_lock_paths', {'job': job['id'], 'lock': job['lock']})
     derived = {item['lock'] for item in jobs if item['coordination'] == 'coordinated'}
     override = envelope['settings']['job_lock_paths']
-    if override and set(override) != derived:
+    if override and set(override) not in (derived, derived | continuous_locks):
         add('job-lock-override-mismatch', 'job_lock_paths')
-    return items, sorted(derived if not override else set(override))
+    return items, sorted(derived if database_only or not override else set(override))
