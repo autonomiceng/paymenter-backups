@@ -190,7 +190,8 @@ def main():
                                   '--recovery', str(scratch / 'recovery.json'), '--archive', str(scratch / 'backup.tar.gz')],
                                  cwd=scratch, capture_output=True, timeout=180, env={'PATH': '/usr/bin:/bin'})
     if verification.returncode:
-        raise RuntimeError('shipped standalone recovery verifier refused')
+        raise RuntimeError('shipped standalone recovery verifier refused: '
+                           + verification.stdout.decode('utf-8', errors='replace')[:4096].strip())
     verified = json.loads(verification.stdout)
     if verified['mode'] != 'full-quiesced' or verified['verification'] != 'plaintext-content-verified':
         raise RuntimeError('full encrypted restore proof required')
