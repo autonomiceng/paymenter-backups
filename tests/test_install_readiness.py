@@ -73,11 +73,11 @@ class InstallReadinessTests(PrivateFixture):
                              plaintext_offsite_acknowledged=True)
         config.normalize(self.settings)
         self.envelope['credentials'] = {'access_key': 'fake-key', 'secret_key': 'fake-secret'}
+        self.envelope['framework']['app_key'] = 'fixture-private-app-key'
         self.assertFalse(self.check()['schedules']['database']['ready'])
         from paymenter_backups import requests, storage
         item = requests.create(self.state, 'destination-test')
-        item.update(status='complete', result={'verified': True, 'destination': 's3',
-            'destination_id': storage.destination_id(self.state, self.envelope)})
+        item.update(status='complete', result=storage.destination_test(self.state, self.envelope))
         atomic_json(requests.path(self.state, item['request_id']), item)
         self.assertEqual(self.check()['checks']['offsite']['state'], 'ready')
         self.settings['s3_bucket'] = 'changed'
@@ -97,6 +97,38 @@ class InstallReadinessTests(PrivateFixture):
             self.assertFalse((self.state.root / 'config-save.json').exists())
         self.assertEqual(commissioning.chosen_schedules(self.settings, dict(self.settings, database_schedule='off'),
             {'database_schedule': 'off'}), [])
+
+    def test_database_readiness_checks_launcher_lock_safety_without_taking_locks(self):
+        lock = self.base / 'launcher.lock'
+        line = f'* * * * * /usr/bin/flock {lock} {self.envelope["tools"]["php"]} {self.app}/artisan schedule:run'
+        self.envelope['tools']['crontab'] = self.script('crontab', 'print(' + repr(line) + ')')
+        with patch('fcntl.flock', side_effect=AssertionError('readiness took a lock')):
+            result = self.check()['schedules']['database']
+            self.assertFalse(result['ready'])
+            self.assertIn('job-lock-unsafe', result['blockers'])
+            lock.write_bytes(b'')
+            lock.chmod(0o644)
+            self.assertIn('job-lock-unsafe', self.check()['schedules']['database']['blockers'])
+            lock.chmod(0o600)
+            self.assertTrue(self.check()['schedules']['database']['ready'])
+            unlocked = f'* * * * * {self.envelope["tools"]["php"]} {self.app}/artisan schedule:run'
+            self.envelope['tools']['crontab'] = self.script('crontab', 'print(' + repr(unlocked) + ')')
+            self.assertTrue(self.check()['schedules']['database']['ready'])
+
+    def test_legacy_enabled_mode_switch_refuses_before_native_publication(self):
+        from types import SimpleNamespace
+        self.settings.update(settings_version=1, enabled=True, mode='database-online')
+        original = copy.deepcopy(self.envelope)
+        (self.state.root / 'incidents.json').unlink()
+        with patch.object(cli, 'bridge', return_value=original), patch.object(cli, 'validate'), \
+                patch.object(cli, 'native_settings') as native:
+            with self.assertRaisesRegex(BackupError, 'observer-not-run'):
+                cli.set_config(SimpleNamespace(php=self.envelope['tools']['php']), self.state,
+                               {'settings': {'mode': 'full-quiesced'}})
+            native.assert_not_called()
+        self.assertEqual(original['settings']['mode'], 'database-online')
+        self.assertEqual(commissioning.chosen_schedules(original['settings'],
+            dict(original['settings'], enabled=False, mode='full-quiesced'), {'enabled': False, 'mode': 'full-quiesced'}), [])
 
     def test_real_cli_prepares_private_state_and_refuses_unready_schedule_without_native_write(self):
         envelope = copy.deepcopy(self.envelope)

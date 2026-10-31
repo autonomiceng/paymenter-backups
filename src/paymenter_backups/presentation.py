@@ -6,6 +6,9 @@ manifests, database grants, process identities, request results, stderr or
 credential material.
 """
 import datetime
+import hashlib
+import hmac
+import json
 import pathlib
 import re
 import time
@@ -141,6 +144,17 @@ def request_entry(item, state=None, envelope=None, destination_binding=None):
     return entry
 
 
+def destination_credentials_marker(state, envelope):
+    """Bind proof to current S3 credentials without persisting a secret or its hash."""
+    key = envelope.get('framework', {}).get('app_key')
+    credentials = envelope.get('credentials') or {}
+    values = [credentials.get(name, '') for name in ('access_key', 'secret_key', 'session_token')]
+    if not isinstance(key, str) or not key or not all(isinstance(value, str) for value in values) or not all(values[:2]):
+        return None
+    payload = json.dumps([state.uuid, *values], separators=(',', ':')).encode()
+    return hmac.new(key.encode(), b'backups-destination-credentials-v1\0' + payload, hashlib.sha256).hexdigest()
+
+
 def destination_test_binding(state, envelope):
     """Build one safe current binding; reuse expensive key validation in overview."""
     if state is None or envelope is None:
@@ -151,6 +165,7 @@ def destination_test_binding(state, envelope):
         binding = {"destination": envelope["settings"]["destination"],
                    "destination_id": destination_id(state, envelope), "key_status": None}
         if binding["destination"] == "s3":
+            binding["credentials_marker"] = destination_credentials_marker(state, envelope)
             binding["format"] = encryption.FORMAT if encryption.enabled(envelope) else remote_artifacts.PLAINTEXT
             if binding["format"] == encryption.FORMAT:
                 try:
@@ -165,7 +180,7 @@ def destination_test_binding(state, envelope):
 
 
 def destination_test_current(state, envelope, item, result, destination_binding=None):
-    """A test badge proves only its current provider/format/acknowledged key."""
+    """A test badge proves its current provider, credentials, format and acknowledged key."""
     if item.get("status") != "complete" or result.get("verified") is not True:
         return False
     from . import encryption, remote_artifacts
@@ -175,6 +190,8 @@ def destination_test_current(state, envelope, item, result, destination_binding=
         return False
     if binding["destination"] == "local":
         return True
+    if not binding.get('credentials_marker') or result.get('credentials_marker') != binding['credentials_marker']:
+        return False
     if result.get("format", remote_artifacts.PLAINTEXT) != binding["format"]:
         return False
     if binding["format"] == encryption.FORMAT:

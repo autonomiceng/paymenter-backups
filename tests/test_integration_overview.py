@@ -134,13 +134,16 @@ class IntegratedOverview(PrivateFixture):
 
     def test_destination_evidence_and_schedule_coverage_survive_combined_projection(self):
         self.remote(s3_encryption=True)
+        self.envelope['framework']['app_key'] = 'fixture-private-app-key'
+        self.envelope['credentials'] = {'access_key': 'fixture-access', 'secret_key': 'fixture-secret'}
         fingerprint, _ = self.encryption_namespace()
         binding = presentation.destination_test_binding(self.state, self.envelope)
         item = {'request_id': 'test', 'action': 'destination-test', 'status': 'complete',
                 'schedule_kind': 'database', 'covered_by': 'covering-full',
                 'result': {'verified': True, 'destination': 's3',
                            'destination_id': binding['destination_id'],
-                           'format': encryption.FORMAT, 'key_fingerprint': fingerprint}}
+                           'format': encryption.FORMAT, 'key_fingerprint': fingerprint,
+                           'credentials_marker': binding['credentials_marker']}}
         value = presentation.request_entry(item, self.state, self.envelope, binding)
         self.assertTrue(value['result_verified'])
         self.assertEqual(value['schedule_kind'], 'database')

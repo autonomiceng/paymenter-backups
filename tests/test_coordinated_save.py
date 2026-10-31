@@ -309,6 +309,37 @@ class CoordinatedSaveTests(PrivateFixture):
             self.assertEqual(json.loads((self.state.root / 'native-framework-context.json').read_text()),
                              self.args.framework_context)
 
+    def test_replaced_s3_credentials_require_new_proof_before_separate_schedule_save(self):
+        from paymenter_backups import commissioning, presentation, storage
+        self.envelope['framework']['app_key'] = 'fixture-private-app-key'
+        self.settings.update(upload_s3=True, s3_encryption=False, plaintext_offsite_acknowledged=True)
+        config.normalize(self.settings)
+        item = requests.create(self.state, 'destination-test')
+        result = storage.destination_test(self.state, self.bridge(self.args))
+        item.update(status='complete', result=result)
+        atomic_json(requests.path(self.state, item['request_id']), item)
+        self.assertTrue(commissioning.check(self.state, self.bridge(self.args), prepare=True)['schedules']['database']['ready'])
+        saved = cli.set_config(self.args, self.state, {'settings': {},
+            'credentials': {'access_key': 'fake-new-access', 'secret_key': 'fake-new-secret'}})
+        self.assertTrue(saved['updated'])
+        report = commissioning.check(self.state, self.bridge(self.args), prepare=True)
+        self.assertEqual(report['checks']['offsite']['code'], 'storage-untested')
+        with self.assertRaisesRegex(BackupError, 'storage-untested'):
+            cli.set_config(self.args, self.state, {'settings': {'database_schedule': 'hourly'}})
+        self.assertNotIn('database_schedule', self.rows()['rows'])
+        result = storage.destination_test(self.state, self.bridge(self.args))
+        for secret in ('fake-new-access', 'fake-new-secret', 'fixture-private-app-key'):
+            self.assertNotIn(secret, json.dumps(result))
+        item['result'] = result
+        atomic_json(requests.path(self.state, item['request_id']), item)
+        legacy = dict(result)
+        legacy.pop('credentials_marker')
+        self.assertFalse(presentation.destination_test_current(self.state, self.bridge(self.args), item, legacy))
+        changed = self.bridge(self.args)
+        changed['credentials']['session_token'] = 'replacement-token'
+        self.assertFalse(presentation.destination_test_current(self.state, changed, item, result))
+        self.assertTrue(cli.set_config(self.args, self.state, {'settings': {'database_schedule': 'hourly'}})['updated'])
+
     def test_native_framework_context_refusal_preserves_the_safe_error_code(self):
         self.args.framework_context = {'schema_version': 1, 'password': 'fixture-store-secret'}
         before = self.rows()

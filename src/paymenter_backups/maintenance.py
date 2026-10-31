@@ -259,10 +259,10 @@ def coordination_paths(state, envelope, inventory=None, *, database_only=False):
     return paths
 
 
-def database_coordination_paths(state, envelope):
+def database_coordination_paths(state, envelope, inventory=None):
     """Coordinate finite jobs; continuous writers may overlap an online snapshot."""
     from .discovery import admission, discover
-    inventory = discover(state, envelope)
+    inventory = inventory if inventory is not None else discover(state, envelope)
     if inventory["state"] != "ok":
         raise BackupError(inventory["error"] or "job-discovery-incomplete")
     if not envelope["settings"]["job_lock_paths"] and all(

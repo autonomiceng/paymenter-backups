@@ -615,7 +615,11 @@ def destination_test(state, envelope, envelope_loader=None, locked=False):
     with contextlib.nullcontext() if locked else state.lock():
         if envelope_loader is not None:
             envelope = envelope_loader()
-        return _destination_test(state, envelope)
+        result = _destination_test(state, envelope)
+        if result['destination'] == 's3':
+            from .presentation import destination_credentials_marker
+            result['credentials_marker'] = destination_credentials_marker(state, envelope)
+        return result
 
 
 def _destination_test(state, envelope):

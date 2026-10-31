@@ -12,7 +12,7 @@ def chosen_schedules(original, proposed, changes):
     """Gate explicit schedule activation/edits, while leaving setup repairs and Off usable."""
     if proposed.get('settings_version', 1) == 1:
         return [('full' if proposed['mode'] == 'full-quiesced' else 'database')] if proposed['enabled'] and (
-            not original.get('enabled') or any(key.startswith('schedule_') or key == 'enabled' for key in changes)) else []
+            not original.get('enabled') or any(key.startswith('schedule_') or key in ('enabled', 'mode') for key in changes)) else []
     result = []
     for kind in ('full', 'database'):
         fields = {kind + suffix for suffix in ('_schedule', '_time', '_weekdays')}
@@ -131,6 +131,9 @@ def check(state, envelope, prepare=False, inventory=None, now=None, mode_readine
     for kind, mode in (('full', 'full-quiesced'), ('database', 'database-online')):
         try:
             proposed = dict(envelope, settings=dict(settings, mode=mode))
+            if kind == 'database' and state.initialized:
+                from .maintenance import database_coordination_paths
+                database_coordination_paths(state, proposed, inventory)
             items = (mode_readiness[mode]['items'] if mode_readiness is not None else
                      plan(state, proposed, inventory, probe_locks=False)['readiness_items'])
             codes = [entry['code'] for entry in items if entry['code'] not in TRANSIENT_ERRORS]
