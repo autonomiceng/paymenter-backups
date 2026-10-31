@@ -340,6 +340,24 @@ class CoordinatedSaveTests(PrivateFixture):
         self.assertFalse(presentation.destination_test_current(self.state, changed, item, result))
         self.assertTrue(cli.set_config(self.args, self.state, {'settings': {'database_schedule': 'hourly'}})['updated'])
 
+    def test_legacy_upgrade_preserves_running_schedule_on_unrelated_save(self):
+        self.envelope['settings'] = dict(config.DEFAULTS, settings_version='1', enabled='1',
+            mode='database-online', schedule_frequency='daily', schedule_time='04:15', schedule_weekdays='[1,4]')
+        (self.state.root / 'incidents.json').unlink()
+        adopted = config.from_legacy(self.envelope['settings'])
+        changes = dict(adopted, settings_version=2, retention_keep_database=9)
+        self.assertTrue(cli.set_config(self.args, self.state, {'settings': changes})['updated'])
+        saved = self.bridge(self.args)['settings']
+        config.normalize(saved)
+        self.assertEqual(saved['database_schedule'], 'daily')
+        self.assertEqual((saved['database_time'], saved['database_weekdays']), ('04:15', [1, 4]))
+        self.assertEqual(saved['retention_keep_database'], 9)
+        # Resubmitting unchanged form values still is not an activation or edit.
+        self.assertTrue(cli.set_config(self.args, self.state, {'settings': changes})['updated'])
+        with self.assertRaisesRegex(BackupError, 'observer-not-run'):
+            cli.set_config(self.args, self.state, {'settings': {'database_time': '05:15'}})
+        self.assertEqual(self.rows()['rows']['database_time']['value'], '04:15')
+
     def test_native_framework_context_refusal_preserves_the_safe_error_code(self):
         self.args.framework_context = {'schema_version': 1, 'password': 'fixture-store-secret'}
         before = self.rows()

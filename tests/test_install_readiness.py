@@ -130,6 +130,16 @@ class InstallReadinessTests(PrivateFixture):
         self.assertEqual(commissioning.chosen_schedules(original['settings'],
             dict(original['settings'], enabled=False, mode='full-quiesced'), {'enabled': False, 'mode': 'full-quiesced'}), [])
 
+    def test_removed_legacy_launcher_lock_is_a_readiness_blocker(self):
+        lock = self.state.root / 'scheduler.lock'
+        self.settings.update(settings_version=1, job_lock_paths=[str(lock)])
+        line = f'* * * * * /usr/bin/flock {lock} {self.envelope["tools"]["php"]} {self.app}/artisan schedule:run'
+        self.envelope['tools']['crontab'] = self.script('crontab', 'print(' + repr(line) + ')')
+        lock.unlink()
+        result = self.check()['schedules']['database']
+        self.assertFalse(result['ready'])
+        self.assertIn('job-locks-unverified', result['blockers'])
+
     def test_real_cli_prepares_private_state_and_refuses_unready_schedule_without_native_write(self):
         envelope = copy.deepcopy(self.envelope)
         envelope.pop('tool_checks')

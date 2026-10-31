@@ -114,16 +114,12 @@ trait BuildsPageContent
 
     private function installationSection(): Section
     {
-        return Section::make('Installation')->schema(function () {
+        return Section::make(Messages::INSTALLATION_TITLE)->schema(function () {
             $checks = $this->configuration()['installation']['checks'] ?? [];
             $rows = [];
-            foreach (['tools' => 'Tools', 'scheduler' => 'Scheduler', 'observer' => 'Independent observer',
-                'private_state' => 'Private state', 'local_storage' => 'Local storage', 'offsite' => 'Offsite storage'] as $key => $label) {
+            foreach (array_keys(Messages::INSTALLATION_CHECKS) as $key) {
                 $check = $checks[$key] ?? ['state' => 'missing', 'code' => 'engine-unavailable'];
-                $status = match ($check['state']) { 'ready' => 'Ready', 'pending' => 'Pending', default => 'Missing' };
-                $next = $check['code'] ? Messages::error($check['code']) : ($key === 'offsite' && $status === 'Pending'
-                    ? 'Local backups can be scheduled. Set up S3 and test storage when you want an offsite copy.' : null);
-                $rows[] = Text::make($label . ': ' . $status . ($next ? '. ' . $next : ''));
+                $rows[] = Text::make(Messages::installationCheck($key, $check));
             }
             return $rows;
         })->visible(fn () => isset($this->configuration()['installation']));

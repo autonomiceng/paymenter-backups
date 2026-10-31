@@ -13,13 +13,20 @@ def chosen_schedules(original, proposed, changes):
     if proposed.get('settings_version', 1) == 1:
         return [('full' if proposed['mode'] == 'full-quiesced' else 'database')] if proposed['enabled'] and (
             not original.get('enabled') or any(key.startswith('schedule_') or key in ('enabled', 'mode') for key in changes)) else []
+    from .config import normalize
+    baseline = dict(original)
+    try:
+        normalize(baseline)
+    except BackupError:
+        baseline = original  # An unreadable old schedule cannot prove an unchanged activation.
     result = []
     for kind in ('full', 'database'):
         fields = {kind + suffix for suffix in ('_schedule', '_time', '_weekdays')}
         if kind == 'database':
             fields.update(('database_every_hours', 'database_minute'))
-        if proposed[kind + '_schedule'] != 'off' and (original.get(kind + '_schedule', 'off') == 'off'
-                or fields.intersection(changes) or 'schedule_timezone' in changes):
+        fields.add('schedule_timezone')
+        edited = any(proposed.get(key) != baseline.get(key) for key in fields.intersection(changes))
+        if proposed[kind + '_schedule'] != 'off' and (baseline.get(kind + '_schedule', 'off') == 'off' or edited):
             result.append(kind)
     return result
 
@@ -139,6 +146,8 @@ def check(state, envelope, prepare=False, inventory=None, now=None, mode_readine
             codes = [entry['code'] for entry in items if entry['code'] not in TRANSIENT_ERRORS]
         except BackupError as failure:
             codes = [failure.code]
+        except OSError:
+            codes = ['job-locks-unverified']
         blockers = list(dict.fromkeys(shared + codes))
         schedules[kind] = {'ready': not blockers, 'blockers': blockers}
     return {'schema_version': 1, 'checks': checks, 'schedules': schedules}

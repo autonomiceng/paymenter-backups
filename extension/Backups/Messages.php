@@ -4,6 +4,18 @@ namespace Paymenter\Extensions\Others\Backups;
 /** Every administrator-facing sentence for engine codes, statuses, tasks and setup items. */
 final class Messages
 {
+    public const INSTALLATION_TITLE = 'Installation';
+    public const INSTALLATION_CHECKS = ['tools' => 'Tools', 'scheduler' => 'Scheduler', 'observer' => 'Independent observer',
+        'private_state' => 'Private state', 'local_storage' => 'Local storage', 'offsite' => 'Offsite storage'];
+
+    public static function installationCheck(string $key, array $check): string
+    {
+        $status = match ($check['state']) { 'ready' => 'Ready', 'pending' => 'Pending', default => 'Missing' };
+        $next = $check['code'] ? self::error($check['code']) : ($key === 'offsite' && $check['state'] === 'pending'
+            ? 'Local backups can be scheduled. Set up S3 and test storage when you want an offsite copy.' : null);
+        return self::INSTALLATION_CHECKS[$key] . ': ' . $status . ($next ? '. ' . $next : '');
+    }
+
     public static function incidentMail(string $key, string $reason): array
     {
         if ($key === 'scheduler' && $reason === 'scheduler-stopped') {
