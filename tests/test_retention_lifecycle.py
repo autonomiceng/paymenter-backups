@@ -596,23 +596,21 @@ class AdmissionChecks(unittest.TestCase):
         self.fixture.setUp()
         self.addCleanup(self.fixture.doCleanups)
 
-    def test_saved_basic_credentials_refuse_before_entering_maintenance(self):
+    def test_full_capture_is_not_blocked_by_unused_basic_credentials(self):
         credentials = {"origin": "https://first.invalid", "username": "fake-user", "password": "fake-password"}
-        for url, expected in (("http://first.invalid", "maintenance-probe-http-saved"),
-                ("https://second.invalid", "maintenance-probe-origin-mismatch"),
-                ("https://[::ffff:127.0.0.1]", "maintenance-probe-origin-invalid"),
-                ("https://é.invalid", "maintenance-probe-origin-invalid")):
+        for url in ("http://first.invalid", "https://second.invalid",
+                "https://[::ffff:127.0.0.1]", "https://é.invalid"):
             with self.subTest(app_url=url):
                 envelope = copy.deepcopy(self.fixture.envelope)
                 envelope["maintenance_probe_credentials"] = credentials
                 envelope["framework"]["app_url"] = url
-                self.assertIn(expected, engine.plan(self.fixture.state, envelope)["admission_errors"])
-                with patch.object(engine, "run", wraps=engine.run) as processes:
-                    with self.assertRaisesRegex(BackupError, expected):
-                        engine.capture(self.fixture.state, envelope)
-                self.assertFalse(any("down" in call.args[0] for call in processes.call_args_list))
-                self.assertFalse((self.fixture.app / "storage/framework/down").exists())
-                self.assertEqual(self.fixture.state.journals(), [])
+                self.assertFalse(any(code.startswith("maintenance-probe-")
+                                     for code in engine.plan(self.fixture.state, envelope)["admission_errors"]))
+        with patch.object(engine, "run", wraps=engine.run) as processes:
+            journal = engine.capture(self.fixture.state, envelope)
+        self.assertTrue(journal["local_complete"])
+        self.assertFalse(any("down" in call.args[0] for call in processes.call_args_list))
+        self.assertFalse((self.fixture.app / "storage/framework/down").exists())
 
     def test_database_only_capture_is_not_blocked_by_unused_basic_credentials(self):
         envelope = copy.deepcopy(self.fixture.envelope)
