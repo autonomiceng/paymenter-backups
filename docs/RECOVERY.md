@@ -273,22 +273,36 @@ Full restore into an isolated new host/path:
    no pending native migrations and native login before opening the site.
    Update native global `app_url` as well as `.env`, because native settings
    override environment configuration. Clear native application/config/route
-   caches for the new host. Disable the copied Backups extension record and its
-   schedule before booting any scheduler, and update its native `private_root`.
+   caches for the new host. Before any scheduler or worker starts, set the copied
+   Backups `full_schedule` and `database_schedule` to `off` and `upload_s3` to
+   false. Set native `private_root` and `local_path` to new private directories
+   outside web roots, separate from the source installation.
 6. Establish the host's native document-root symlink to app/public, scheduler,
    PHP runtime and verified cooperative locks. The archive does not restore
    Plesk/host configuration, cron, Redis, remote object storage or provider state.
    Reconcile provider state before reenabling automation.
 7. Give the restored/new host a new owner-private root and installation UUID.
-   Run the explicit CLI `init` before enabling the new scheduler; re-enter S3
-   credentials. Never copy the old UUID into an independently live
+   Run the explicit CLI `init` before enabling the new scheduler; keep S3 off
+   during the isolated check. Never copy the old UUID into an independently live
    installation: retention would share a remote prefix. Adoption of old identity
    is permitted only after the old installation is fully decommissioned.
-8. Review queued jobs, pending invoices, scheduled billing and webhook receipts
-   before enabling workers/cron/webhooks. Queue records may repeat completed
-   external actions; provider state is outside the checkpoint. Restore webhook
-   idempotency/reconciliation deliberately. Refresh billing guard and run a new
-   verified backup. Open service only after this isolated validation.
+8. Move copied queued jobs and Stripe work properties out of the active tables
+   into separate quarantine tables. Leave pending invoices unchanged. The backup
+   cannot tell whether a provider already completed an action, so copied work
+   must stay parked until provider state is reconciled.
+9. Keep the app and workers on an internal network with no default route. Turn
+   provider sends, orders, payment gateways and outgoing mail off, detach the
+   copied webhook identity, and use only TEST provider identities. Confirm these
+   checks before and after each short worker run. With the checks passing, run
+   a new backup, then bounded Stripe charge, return, fee and queue work. Verify
+   the new backup. Compare payment and quarantine tables, pending invoices,
+   provider-send records and mail counts before and after: they must stay
+   unchanged, with the active queue empty and copied work still quarantined.
+
+10. Before opening service, reconcile provider state, re-enter S3 credentials,
+    turn schedules back on and run a new verified backup.
+
+Replaying quarantined work or resuming live billing was not proved.
 
 Full mode preserves safe pre-existing maintenance files in the archive; restore
 may therefore remain in maintenance intentionally. New full captures keep the site online and create no maintenance markers.
