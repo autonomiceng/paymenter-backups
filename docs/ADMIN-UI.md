@@ -15,8 +15,8 @@ only to S3 copies when **Encrypt backups in S3** is on; it does not encrypt staf
 downloads, including copies retrieved from S3.
 
 Save downloads in a private folder outside web roots. Encrypt them before keeping
-or sharing them, keep the recovery secret separately, and remove temporary plain
-copies after use. Never attach them to tickets or commit them to a repository.
+or sharing them, store that key or passphrase separately, and remove temporary
+plain copies after use. Never attach them to tickets or commit them to a repository.
 
 ## People and jobs
 

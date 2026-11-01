@@ -287,20 +287,23 @@ Full restore into an isolated new host/path:
    installation: retention would share a remote prefix. Adoption of old identity
    is permitted only after the old installation is fully decommissioned.
 8. Move copied queued jobs and Stripe work properties out of the active tables
-   into separate quarantine tables. Leave pending invoices unchanged. The backup
+   into separate quarantine tables, with rows and ids unchanged so the move can
+   be reversed. Leave pending invoices unchanged. The backup
    cannot tell whether a provider already completed an action, so copied work
    must stay parked until provider state is reconciled.
 9. Keep the app and workers on an internal network with no default route. Turn
    provider sends, orders, payment gateways and outgoing mail off, detach the
    copied webhook identity, and use only TEST provider identities. Confirm these
    checks before and after each short worker run. With the checks passing, run
-   a new backup, then bounded Stripe charge, return, fee and queue work. Verify
-   the new backup. Compare payment and quarantine tables, pending invoices,
+   a new backup, then bounded Stripe charge, return, fee and queue work. These
+   runs stay on the internal network and make no provider calls. Verify the new
+   backup. Compare payment and quarantine tables, pending invoices,
    provider-send records and mail counts before and after: they must stay
    unchanged, with the active queue empty and copied work still quarantined.
 
 10. Before opening service, reconcile provider state, re-enter S3 credentials,
-    turn schedules back on and run a new verified backup.
+    set `upload_s3` back to true, turn schedules back on and run a new verified
+    backup. Confirm its S3 copy.
 
 Replaying quarantined work or resuming live billing was not proved.
 
