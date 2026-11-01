@@ -6,6 +6,18 @@ It is a native Filament 5 page in Paymenter 1.5.9. It uses Paymenter's compiled
 admin theme and Filament components only. It loads no fonts, CDN assets,
 JavaScript frameworks or Tailwind utilities beyond what the theme ships.
 
+## Downloads hold secrets
+
+Download is for staff with the `admin.extensions.update` permission. It saves a
+plain, unencrypted `.tar.gz`. A full backup includes `.env`, with APP_KEY and
+database credentials, plus Passport keys and customer data. S3 encryption applies
+only to S3 copies when **Encrypt backups in S3** is on; it does not encrypt staff
+downloads, including copies retrieved from S3.
+
+Save downloads in a private folder outside web roots. Encrypt them before keeping
+or sharing them, store that key or passphrase separately, and remove temporary
+plain copies after use. Never attach them to tickets or commit them to a repository.
+
 ## People and jobs
 
 | Person | First question | Page answer |
