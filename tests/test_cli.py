@@ -97,6 +97,10 @@ class CLITests(unittest.TestCase):
 
     def test_config_and_schedule_writes_stdin_and_safe_show(self):
         fixture = self.fixture
+        from paymenter_backups.common import atomic_json
+        atomic_json(fixture.state.root / 'scheduler.json', {'last_tick_at': time.time()})
+        atomic_json(fixture.state.root / 'incidents.json', {'schema_version': 1,
+            'installation_uuid': fixture.state.uuid, 'checked_at': time.time(), 'active': {}})
         native_settings = fixture.base / "settings.json"
         native_settings.write_text("{}")
         fixture.envelope.update(schema_version=1, owner_uid=os.getuid(), private_root=str(fixture.state.root))
@@ -114,6 +118,10 @@ class CLITests(unittest.TestCase):
         self.cli("schedule", "set", input={"schedule_time": schedule_time, "schedule_weekdays": [0, 2]}, command=command)
         self.cli("schedule", "enable", command=command)
         self.assertTrue(self.cli("schedule", "show", command=command)["enabled"])
+        # A failing reserve check must never trap staff with schedules On.
+        saved = self.cli('config', 'set', input={'settings': {'minimum_free_bytes': 2**62}}, command=command)
+        self.assertTrue(saved['updated'])
+        self.assertEqual(saved['local_storage_error'], 'disk-reserve-exceeded')
         self.cli("schedule", "disable", command=command)
         self.assertFalse(self.cli("schedule", "show", command=command)["enabled"])
         shown = json.dumps(self.cli("config", "show", command=command))

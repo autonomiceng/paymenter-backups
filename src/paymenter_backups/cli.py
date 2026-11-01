@@ -97,6 +97,8 @@ def parser():
     sub = commands.add_parser("overview", help="Whitelisted backup, task and readiness summary without paths or manifests")
     sub.add_argument("--offline", action="store_true", help="Skip configuration and readiness checks")
     commands.add_parser("init", help="Explicitly initialize owner-private installation state")
+    sub = commands.add_parser("readiness", help="Report installation and schedule readiness")
+    sub.add_argument("--prepare", action="store_true", help="Initialize private state and test local storage without enabling schedules")
     sub = commands.add_parser("verify")
     sub.add_argument("run_id")
     sub.add_argument("--show", action="store_true")
@@ -299,8 +301,20 @@ def set_config(args, state, changes):
             if local == state.app or state.app in local.parents:
                 raise BackupError("destination-unsafe")
             state.guard_location(local, "destination-inside-docroot")
-        # Saving settings validates the proposed values only. Billing guards,
-        # windows and job locks are checked when queued work runs.
+        from .commissioning import chosen_schedules, require_ready
+        kinds = chosen_schedules(original.get("settings", {}), envelope["settings"], settings)
+        if kinds:
+            # Current credentials are needed only when commissioning uploads.
+            # New keys must first be saved with schedules Off, then tested.
+            if envelope["settings"].get("upload_s3", envelope["settings"]["destination"] == "s3"):
+                if credentials is not None:
+                    raise BackupError("storage-untested")
+                current = bridge(args)
+                for key in ("credentials", "archive_encryption_credentials"):
+                    envelope[key] = current.get(key, {})
+            require_ready(state, envelope, kinds)
+        # Setup can be saved while schedules are Off. Actual capture still
+        # rechecks billing windows and job locks when queued work runs.
         secrets = credentials is not None or probe_credentials is not None
         merge = {"s3": credentials, "site": probe_credentials}
         if secrets:
@@ -322,6 +336,7 @@ def set_config(args, state, changes):
         receipt = {}
         committed_credentials = False
         credentials_attempted = False
+        local_storage_error = None
         from .requests import _sync_schedule
         try:
             if settings:
@@ -339,6 +354,15 @@ def set_config(args, state, changes):
                 raise BackupError("config-changed")
             State(state.app, state.root, initialize=True, extra_docroots=persisted["settings"]["extra_docroots"])
             state.apply_policy(persisted["settings"], write=True)
+            from .commissioning import local_storage
+            try:
+                local_storage(state, persisted, prepare=True)
+            except (BackupError, OSError) as failure:
+                if kinds:
+                    raise
+                # A storage problem must not prevent turning schedules Off or
+                # saving the repair. Report it after committing those settings.
+                local_storage_error = failure.code if isinstance(failure, BackupError) else "local-storage-not-ready"
             if secrets:
                 credentials_attempted = True
                 native_settings(args, state, {"snapshot": snapshot, "credentials": merge}, descriptors, actor, finalize=True)
@@ -415,7 +439,8 @@ def set_config(args, state, changes):
                                 "partial": True, "error": failure.code, "settings_restored": False, "concurrent_settings_preserved": True})
             raise failure
     return {"updated": True, "credentials_updated": credentials is not None,
-            "maintenance_probe_credentials_updated": probe_credentials is not None}
+            "maintenance_probe_credentials_updated": probe_credentials is not None,
+            **({"local_storage_error": local_storage_error} if local_storage_error else {})}
 
 
 def dispatch(args):
@@ -436,7 +461,7 @@ def dispatch(args):
         if "_framework_context" in request:
             args.framework_context = validate_framework_context(request.pop("_framework_context"))
         args.command_input = request
-    initialize = command == "init" or command == "config" and args.verb == "set" or command == "schedule" and args.verb != "show" or command == "run" and args.execute
+    initialize = command == "init" or command == "readiness" and args.prepare or command == "config" and args.verb == "set" or command == "schedule" and args.verb != "show" or command == "run" and args.execute
     preliminary = bridge(args, "read-settings") if initialize else None
     if preliminary:
         preliminary["settings"] = {**DEFAULTS, **preliminary.get("settings", {})}
@@ -446,9 +471,9 @@ def dispatch(args):
         # before State can use those privacy boundaries.
         if not (command == "config" and args.verb == "set"):
             normalize(preliminary["settings"])
-    if command == "init":
+    if command == "init" or command == "readiness" and args.prepare:
         # Refuse invalid settings before any identity is created.
-        validate(preliminary)
+        validate(preliminary, check_tools=command == "init")
     state = State(args.app, args.private_root, initialize=initialize,
                   extra_docroots=preliminary["settings"]["extra_docroots"] if preliminary else None)
     from .key_cli import COMMANDS as KEY_COMMANDS, dispatch as key_dispatch
@@ -467,6 +492,11 @@ def dispatch(args):
     if command == "observe":
         from .observation import check
         return check(state, load(args, credential_free=True, check_tools=False))
+    if command == "readiness":
+        from .commissioning import check
+        with state.lock("config.lock", timeout=10, create=state.initialized):
+            envelope = load(args, coordinated=False, check_tools=False)
+            return check(state, envelope, prepare=args.prepare)
     if command == "overview":
         envelope, error = None, None
         pending_save, pending_writer_cause = False, None

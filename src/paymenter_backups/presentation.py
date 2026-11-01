@@ -6,6 +6,9 @@ manifests, database grants, process identities, request results, stderr or
 credential material.
 """
 import datetime
+import hashlib
+import hmac
+import json
 import pathlib
 import re
 import time
@@ -141,6 +144,17 @@ def request_entry(item, state=None, envelope=None, destination_binding=None):
     return entry
 
 
+def destination_credentials_marker(state, envelope):
+    """Bind proof to current S3 credentials without persisting a secret or its hash."""
+    key = envelope.get('framework', {}).get('app_key')
+    credentials = envelope.get('credentials') or {}
+    values = [credentials.get(name, '') for name in ('access_key', 'secret_key', 'session_token')]
+    if not isinstance(key, str) or not key or not all(isinstance(value, str) for value in values) or not all(values[:2]):
+        return None
+    payload = json.dumps([state.uuid, *values], separators=(',', ':')).encode()
+    return hmac.new(key.encode(), b'backups-destination-credentials-v1\0' + payload, hashlib.sha256).hexdigest()
+
+
 def destination_test_binding(state, envelope):
     """Build one safe current binding; reuse expensive key validation in overview."""
     if state is None or envelope is None:
@@ -151,6 +165,7 @@ def destination_test_binding(state, envelope):
         binding = {"destination": envelope["settings"]["destination"],
                    "destination_id": destination_id(state, envelope), "key_status": None}
         if binding["destination"] == "s3":
+            binding["credentials_marker"] = destination_credentials_marker(state, envelope)
             binding["format"] = encryption.FORMAT if encryption.enabled(envelope) else remote_artifacts.PLAINTEXT
             if binding["format"] == encryption.FORMAT:
                 try:
@@ -165,7 +180,7 @@ def destination_test_binding(state, envelope):
 
 
 def destination_test_current(state, envelope, item, result, destination_binding=None):
-    """A test badge proves only its current provider/format/acknowledged key."""
+    """A test badge proves its current provider, credentials, format and acknowledged key."""
     if item.get("status") != "complete" or result.get("verified") is not True:
         return False
     from . import encryption, remote_artifacts
@@ -175,6 +190,8 @@ def destination_test_current(state, envelope, item, result, destination_binding=
         return False
     if binding["destination"] == "local":
         return True
+    if not binding.get('credentials_marker') or result.get('credentials_marker') != binding['credentials_marker']:
+        return False
     if result.get("format", remote_artifacts.PLAINTEXT) != binding["format"]:
         return False
     if binding["format"] == encryption.FORMAT:
@@ -191,7 +208,7 @@ def origin(url):
     return None
 
 
-def configuration(state, envelope, error=None, encryption_key_status=None, writer_cause=None):
+def configuration(state, envelope, error=None, encryption_key_status=None, writer_cause=None, destination_binding=None):
     writer_cause = safe_writer_cause(writer_cause, fields=DEFAULTS)
     if envelope is None:
         result = {"available": False, "valid": False, "error": code(error) or "unknown"}
@@ -325,6 +342,9 @@ def configuration(state, envelope, error=None, encryption_key_status=None, write
             admission = [code(error), *admission]
         result['admission'][mode] = list(dict.fromkeys(admission))
         result['readiness'][mode] = {'state': state_for(items), 'items': items}
+    from .commissioning import check as installation_check
+    result['installation'] = installation_check(state, envelope, inventory=jobs, mode_readiness=result['readiness'],
+        destination_binding=destination_binding, encryption_key_status={'code': result['encryption']['readiness_code']})
     if state.root.exists():
         used = storage_usage(state, settings)
         result["space"]["used"] = used
@@ -414,7 +434,7 @@ def overview(state, envelope=None, error=None, writer_cause=None):
     requests = list_requests(state) if state.initialized else []
     active_runs = {(item.get("action"), (item.get("arguments") or {}).get("run_id")) for item in requests if item.get("status") in ACTIVE}
     runs = sorted((run_entry(state, item, active_runs, envelope) for item in journals), key=lambda item: item["created_at"] or 0, reverse=True)
-    destination_binding = destination_test_binding(state, envelope) if any(item.get("action") == "destination-test" for item in requests) else {}
+    destination_binding = destination_test_binding(state, envelope)
     ordered = sorted((request_entry(item, state, envelope, destination_binding) for item in requests), key=lambda item: item["created_at"] or 0, reverse=True)
     active = [item for item in ordered if item["status"] in ACTIVE]
     recent = [item for item in ordered if item["status"] not in ACTIVE][:REQUEST_HISTORY]
@@ -430,7 +450,7 @@ def overview(state, envelope=None, error=None, writer_cause=None):
             "installation_uuid": state.uuid, "maintenance": (state.app / "storage/framework/down").exists(),
             "scheduler": scheduler(state) if state.initialized else {"last_tick_at": None},
             "configuration": configuration(state, envelope, error, encryption_key_status=destination_binding.get("key_status"),
-                                            writer_cause=writer_cause), "runs": runs,
+                                            writer_cause=writer_cause, destination_binding=destination_binding), "runs": runs,
             "last_good": last_good,
             "job_wait_overdue": job_wait_overdue(requests, journals, time.time()),
             "database_job_coordination": database_job_coordination(state),

@@ -244,6 +244,14 @@ class CoordinatedSaveTests(PrivateFixture):
         self.credentials_file = self.state.root / 'native-credentials.json'
         self.credentials = {'access_key': 'fake-old', 'secret_key': 'fake-old'}
         self.args = types.SimpleNamespace(app=str(self.app), private_root=str(self.state.root), php=self.php)
+        # Publication tests start commissioned; separate install tests cover refusal.
+        self.envelope['tool_checks'] = {name: {'ok': True, 'resolved': path, 'configured': '', 'code': None}
+            for name, path in self.envelope['tools'].items()}
+        cron = f'* * * * * /usr/bin/flock {self.state.root}/scheduler.lock {self.php} {self.app}/artisan schedule:run'
+        self.envelope['tools']['crontab'] = self.script('crontab', 'print(' + repr(cron) + ')')
+        atomic_json(self.state.root / 'scheduler.json', {'last_tick_at': time.time()})
+        atomic_json(self.state.root / 'incidents.json', {'schema_version': 1,
+            'installation_uuid': self.state.uuid, 'checked_at': time.time(), 'active': {}})
         for target in (cli, config):
             mocked = patch.object(target, 'bridge', side_effect=self.bridge)
             mocked.start(); self.addCleanup(mocked.stop)
@@ -301,6 +309,55 @@ class CoordinatedSaveTests(PrivateFixture):
             self.assertEqual(json.loads((self.state.root / 'native-framework-context.json').read_text()),
                              self.args.framework_context)
 
+    def test_replaced_s3_credentials_require_new_proof_before_separate_schedule_save(self):
+        from paymenter_backups import commissioning, presentation, storage
+        self.envelope['framework']['app_key'] = 'fixture-private-app-key'
+        self.settings.update(upload_s3=True, s3_encryption=False, plaintext_offsite_acknowledged=True)
+        config.normalize(self.settings)
+        item = requests.create(self.state, 'destination-test')
+        result = storage.destination_test(self.state, self.bridge(self.args))
+        item.update(status='complete', result=result)
+        atomic_json(requests.path(self.state, item['request_id']), item)
+        self.assertTrue(commissioning.check(self.state, self.bridge(self.args), prepare=True)['schedules']['database']['ready'])
+        saved = cli.set_config(self.args, self.state, {'settings': {},
+            'credentials': {'access_key': 'fake-new-access', 'secret_key': 'fake-new-secret'}})
+        self.assertTrue(saved['updated'])
+        report = commissioning.check(self.state, self.bridge(self.args), prepare=True)
+        self.assertEqual(report['checks']['offsite']['code'], 'storage-untested')
+        with self.assertRaisesRegex(BackupError, 'storage-untested'):
+            cli.set_config(self.args, self.state, {'settings': {'database_schedule': 'hourly'}})
+        self.assertNotIn('database_schedule', self.rows()['rows'])
+        result = storage.destination_test(self.state, self.bridge(self.args))
+        for secret in ('fake-new-access', 'fake-new-secret', 'fixture-private-app-key'):
+            self.assertNotIn(secret, json.dumps(result))
+        item['result'] = result
+        atomic_json(requests.path(self.state, item['request_id']), item)
+        legacy = dict(result)
+        legacy.pop('credentials_marker')
+        self.assertFalse(presentation.destination_test_current(self.state, self.bridge(self.args), item, legacy))
+        changed = self.bridge(self.args)
+        changed['credentials']['session_token'] = 'replacement-token'
+        self.assertFalse(presentation.destination_test_current(self.state, changed, item, result))
+        self.assertTrue(cli.set_config(self.args, self.state, {'settings': {'database_schedule': 'hourly'}})['updated'])
+
+    def test_legacy_upgrade_preserves_running_schedule_on_unrelated_save(self):
+        self.envelope['settings'] = dict(config.DEFAULTS, settings_version='1', enabled='1',
+            mode='database-online', schedule_frequency='daily', schedule_time='04:15', schedule_weekdays='[1,4]')
+        (self.state.root / 'incidents.json').unlink()
+        adopted = config.from_legacy(self.envelope['settings'])
+        changes = dict(adopted, settings_version=2, retention_keep_database=9)
+        self.assertTrue(cli.set_config(self.args, self.state, {'settings': changes})['updated'])
+        saved = self.bridge(self.args)['settings']
+        config.normalize(saved)
+        self.assertEqual(saved['database_schedule'], 'daily')
+        self.assertEqual((saved['database_time'], saved['database_weekdays']), ('04:15', [1, 4]))
+        self.assertEqual(saved['retention_keep_database'], 9)
+        # Resubmitting unchanged form values still is not an activation or edit.
+        self.assertTrue(cli.set_config(self.args, self.state, {'settings': changes})['updated'])
+        with self.assertRaisesRegex(BackupError, 'observer-not-run'):
+            cli.set_config(self.args, self.state, {'settings': {'database_time': '05:15'}})
+        self.assertEqual(self.rows()['rows']['database_time']['value'], '04:15')
+
     def test_native_framework_context_refusal_preserves_the_safe_error_code(self):
         self.args.framework_context = {'schema_version': 1, 'password': 'fixture-store-secret'}
         before = self.rows()
@@ -348,7 +405,7 @@ class CoordinatedSaveTests(PrivateFixture):
             'full_schedule': 'daily', 'full_time': '03:00', 'full_weekdays': [6],
             'database_schedule': 'daily', 'database_time': '02:00',
             'database_weekdays': [0, 1, 2, 3, 4, 5, 6], 'schedule_timezone': 'UTC',
-            'local_path': '/data/archives', 'local_byte_budget': 5 * 1024 ** 3,
+            'local_path': str(self.base / 'archives'), 'local_byte_budget': 5 * 1024 ** 3,
             'minimum_free_bytes': 2 * 1024 ** 3, 'keep_local': True, 'upload_s3': False,
             'automatic_retention': True, 'retention_keep_full': 7,
             'retention_keep_database': 7, 'full_host_assumptions_acknowledged': True,
@@ -390,7 +447,7 @@ class CoordinatedSaveTests(PrivateFixture):
         rows = self.rows()['rows']
         self.assertEqual(rows['full_schedule']['value'], 'daily')
         self.assertEqual(rows['database_schedule']['value'], 'daily')
-        self.assertEqual(rows['local_path']['value'], '/data/archives')
+        self.assertEqual(rows['local_path']['value'], str(self.base / 'archives'))
         self.assertEqual(rows['local_byte_budget']['value'], str(5 * 1024 ** 3))
         self.assertEqual(rows['minimum_free_bytes']['value'], str(2 * 1024 ** 3))
         self.assertEqual(rows['retention_keep_database']['value'], '7')
@@ -763,6 +820,9 @@ class CoordinatedSaveTests(PrivateFixture):
             real_atomic(path, value)
             if pathlib.Path(path).name == 'configuration-advisory.json':
                 raise OSError('one-off advisory directory fsync failure')
+        atomic_json(self.state.root / 'scheduler.json', {'last_tick_at': now})
+        atomic_json(self.state.root / 'incidents.json', {'schema_version': 1,
+            'installation_uuid': self.state.uuid, 'checked_at': now, 'active': {}})
         with patch.object(cli.time, 'time', return_value=now), patch.object(cli, 'atomic_json', side_effect=fail_advisory):
             with self.assertRaisesRegex(BackupError, 'config-save-failed'):
                 cli.set_config(self.args, self.state, {'settings': {'database_time': '09:30'}})

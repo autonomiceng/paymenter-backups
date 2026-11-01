@@ -4,6 +4,7 @@ import json
 import pathlib
 import subprocess
 import sys
+import unittest
 from unittest.mock import patch
 
 from paymenter_backups import cli, config, requests, tools
@@ -14,12 +15,32 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / 'tools'))
 import native_integration
 
 
+@unittest.skipUnless(fixtures.PHP, 'PHP required for fixture bridge exit behavior')
+class LauncherBridgeChecks(fixtures.PrivateFixture):
+    def test_launcher_inventory_survives_read_settings_early_exit(self):
+        bridge = self.base / 'native-bridge.php'
+        bridge.write_text('<?php echo json_encode(["tools"=>["php"=>PHP_BINARY]]); if ($argv[1] === "read-settings") { exit; }')
+        adapter = self.base / 'fixture-bridge.php'
+        adapter.write_text(native_integration.launcher_bridge_source(bridge, '/fixture/crontab', '/fixture/systemctl'))
+        for verb in ('read', 'read-settings'):
+            with self.subTest(verb=verb):
+                result = subprocess.run([fixtures.PHP, str(adapter), verb], check=True, capture_output=True)
+                inventory = json.loads(result.stdout)['tools']
+                self.assertEqual(inventory['crontab'], '/fixture/crontab')
+                self.assertEqual(inventory['systemctl'], '/fixture/systemctl')
+                self.assertTrue(inventory['php'])
+
+
 class GuardedWriteChecks(fixtures.PrivateFixture):
     def setUp(self):
         super().setUp()
         self.now = fixtures.instant('2026-10-15T12:00:00+00:00')
         self.envelope.update(schema_version=1, owner_uid=self.app.stat().st_uid,
                              private_root=str(self.state.root))
+        lock = self.state.root / 'scheduler.lock'
+        lock.touch(mode=0o600)
+        scheduler = '* * * * * flock -n ' + str(lock) + ' ' + self.envelope['tools']['php'] + ' ' + str(self.app / 'artisan') + ' schedule:run'
+        self.envelope['tools']['crontab'] = self.script('crontab', 'print(' + repr(scheduler) + ')')
         self.commands = []
         self.guard_failure = False
         self.cli = [sys.executable, '--app', str(self.app), '--private-root', str(self.state.root),
@@ -43,6 +64,9 @@ class GuardedWriteChecks(fixtures.PrivateFixture):
                 raise RuntimeError('fixture guard refresh failed')
             self.refresh_guard()
             return b'{}'
+        atomic_json(self.state.root / 'scheduler.json', {'last_tick_at': self.now})
+        atomic_json(self.state.root / 'incidents.json', {'schema_version': 1,
+            'installation_uuid': self.state.uuid, 'checked_at': self.now, 'active': {}})
         args = cli.parser().parse_args([str(value) for value in command[command.index('--app'):]])
 
         def native_write(command, input_bytes, descriptors):

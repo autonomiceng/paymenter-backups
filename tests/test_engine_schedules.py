@@ -17,6 +17,7 @@ import shutil
 import select
 import tarfile
 import tempfile
+import threading
 import time
 import unittest
 from unittest.mock import patch
@@ -317,6 +318,43 @@ class SchedulerTests(PrivateFixture):
         self.settings.update(full_schedule='daily', full_time='03:00', database_schedule='daily', database_time='03:00')
         config.normalize(self.settings)
         requests.sync_schedule(self.state, self.settings, now=instant('2026-10-01T00:00:00+00:00'))
+
+    def test_tick_waits_for_config_read_but_not_another_tick(self):
+        self.enable()
+        at = instant('2026-10-02T03:00:00+00:00')
+        for lock_name in ('config.lock', 'tick.lock'):
+            with self.subTest(lock=lock_name):
+                started = threading.Event()
+                finished = threading.Event()
+                results = []
+
+                def tick():
+                    started.set()
+                    try:
+                        results.append(self.tick(at))
+                    except BaseException as error:
+                        results.append(error)
+                    finally:
+                        finished.set()
+
+                with self.state.lock(lock_name):
+                    reader = threading.Thread(target=tick)
+                    reader.start()
+                    self.assertTrue(started.wait(1))
+                    if lock_name == 'tick.lock':
+                        reader.join(3)
+                        self.assertFalse(reader.is_alive())
+                        self.assertEqual(len(results), 1)
+                        self.assertIsInstance(results[0], BackupError)
+                        self.assertEqual(results[0].code, 'busy')
+                    else:
+                        self.assertFalse(finished.wait(0.15))
+                reader.join(3)
+                self.assertFalse(reader.is_alive())
+                self.assertEqual(len(results), 1)
+                if lock_name == 'config.lock':
+                    self.assertIsInstance(results[0], dict, repr(results[0]))
+                    self.assertEqual(len(results[0]['launched']), 1)
 
     def test_same_minute_distinct_ids_modes_epochs_and_deduplication(self):
         self.enable()

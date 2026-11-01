@@ -4,6 +4,18 @@ namespace Paymenter\Extensions\Others\Backups;
 /** Every administrator-facing sentence for engine codes, statuses, tasks and setup items. */
 final class Messages
 {
+    public const INSTALLATION_TITLE = 'Installation';
+    public const INSTALLATION_CHECKS = ['tools' => 'Tools', 'scheduler' => 'Scheduler', 'observer' => 'Independent observer',
+        'private_state' => 'Private state', 'local_storage' => 'Local storage', 'offsite' => 'Offsite storage'];
+
+    public static function installationCheck(string $key, array $check): string
+    {
+        $status = match ($check['state']) { 'ready' => 'Ready', 'pending' => 'Pending', default => 'Missing' };
+        $next = $check['code'] ? self::error($check['code']) : ($key === 'offsite' && $check['state'] === 'pending'
+            ? 'Local backups can be scheduled. Set up S3 and test storage when you want an offsite copy.' : null);
+        return self::INSTALLATION_CHECKS[$key] . ': ' . $status . ($next ? '. ' . $next : '');
+    }
+
     public static function incidentMail(string $key, string $reason): array
     {
         if ($key === 'scheduler' && $reason === 'scheduler-stopped') {
@@ -28,6 +40,10 @@ final class Messages
     }
 
     private const ERRORS = [
+        'scheduler-not-running' => 'Paymenter\'s scheduler has not checked in within five minutes. Check its host cron job or timer, then wait for the next minute.',
+        'observer-not-run' => 'The independent backup observer has not run. Add the separate host cron line in INSTALL.md and run artisan backups:observe once as the site user. Backups cannot manage the host\'s cron service.',
+        'observer-stale' => 'The independent backup observer has not completed a healthy check within 15 minutes. Check its separate host cron job and logs, then run artisan backups:observe again.',
+        'local-storage-not-ready' => 'Local backup storage is not ready. Save Settings to create its private directory, or run artisan backups:readiness --prepare. If it still fails, check the site user\'s storage permissions and quota.',
         'observer-result-invalid' => 'The backup incident check returned an invalid result. Check the installed Backups files and run backups:observe again.',
         'staff-mail-not-configured' => 'Backup incident mail could not be sent. Set Paymenter\'s system email address, enable system mail, and run backups:observe again.',
         // Scheduling and admission
@@ -54,8 +70,8 @@ final class Messages
         'discovery-stale' => 'The cron job check is out of date. It refreshes when Paymenter\'s cron job runs.',
         'continuous-worker-present' => 'A queue worker runs all the time. Full backups need queue jobs to run from cron with a lock file.',
         'job-command-unsupported' => 'Backups can\'t read one of Paymenter\'s cron jobs. Replace it with the line shown on the Backups tab.',
-        'job-discovery-failed' => 'Backups couldn\'t read the crontab or systemd units for this site\'s user.',
-        'job-discovery-incomplete' => 'Backups couldn\'t read every crontab entry or systemd unit for this site\'s user.',
+        'job-discovery-failed' => 'Backups couldn\'t read the crontab or systemd units for this site\'s user. Check that the site user can read its cron and systemd jobs.',
+        'job-discovery-incomplete' => 'Backups couldn\'t read every crontab entry or systemd unit for this site\'s user. Check that the site user can read its cron and systemd jobs.',
         'job-discovery-stale' => 'The cron job check is out of date. It refreshes when Paymenter\'s cron job runs.',
         'job-discovery-unknown' => 'Cron jobs haven\'t been checked yet. The check runs from Paymenter\'s cron job.',
         'job-lock-unsafe' => 'A lock file is missing or unsafe. It must be a regular file owned by the site user, with permissions 600.',

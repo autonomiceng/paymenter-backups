@@ -541,7 +541,8 @@ class AdminWorkflowTests(unittest.TestCase):
         with patch.object(cli, "bridge", side_effect=bridge), \
                 patch.object(cli, "stdin_json", return_value={"settings": changes}), \
                 patch.object(cli, "native_settings", return_value={"receipt": {}, "snapshot": {}}), \
-                patch.object(cli, "load", return_value=persisted):
+                patch.object(cli, "load", return_value=persisted), \
+                patch("paymenter_backups.commissioning.require_ready"):
             result = cli.dispatch(save)
         self.assertTrue(result["updated"])
 

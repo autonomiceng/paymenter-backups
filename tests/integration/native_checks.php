@@ -269,12 +269,14 @@ if ($mode === 'upload') {
     $staleGuard = json_decode(file_get_contents($guardPath), true, 16, JSON_THROW_ON_ERROR);
     $staleGuard['generated_at'] = time() - 1000;
     file_put_contents($guardPath, json_encode($staleGuard, JSON_THROW_ON_ERROR));
-    $staleSave = $save(['settings.full_schedule' => 'daily'], false);
+    // Model an existing running schedule; unrelated repairs remain saveable before commissioning.
+    $record->settings()->where('key', 'full_schedule')->update(['value' => 'daily']);
+    $staleSave = $save(['settings.retention_keep_full' => (int) $before['retention_keep_full'] + 1], false);
     check($staleSave->instance()->getErrorBag()->isEmpty() && $record->settings()->where('key', 'full_schedule')->value('value') === 'daily',
         'stale billing guard blocked Settings Save');
     $notices();
     check(Illuminate\Support\Facades\Artisan::call('backups:guard') === 0, 'billing guard restore failed');
-    $save(['settings.full_schedule' => $before['full_schedule']]);
+    $save(['settings.full_schedule' => $before['full_schedule'], 'settings.retention_keep_full' => (int) $before['retention_keep_full']]);
     check($nativeRows() === $before, 'stale-guard Save test did not restore native rows');
     foreach ([['settings.retention_keep_full', 0, 'settings.retention_keep_full'], ['settings.local_byte_budget', 0, 'settings.local_byte_budget'],
               ['settings.capture_timeout', '1.5', 'settings.capture_timeout'], ['settings.job_lock_paths', 'relative.lock', 'settings.job_lock_paths'],
@@ -287,9 +289,9 @@ if ($mode === 'upload') {
     check($weekly->instance()->getErrorBag()->has('settings.full_weekdays') && $nativeRows() === $before, 'weekly schedule without days accepted');
     $neither = $save(['settings.keep_local' => false, 'settings.upload_s3' => false]);
     check($neither->instance()->getErrorBag()->has('settings.keep_local') && $nativeRows() === $before, 'storage with no place accepted');
-    // A billing overlap is a readiness wait and never blocks Settings Save.
-    $overlap = $save(['settings.full_schedule' => 'daily', 'settings.full_time' => '23:59']);
-    check($overlap->instance()->getErrorBag()->isEmpty() && $nativeRows()['full_schedule'] === 'daily'
+    // A billing overlap may be configured while Off; activation still needs host readiness.
+    $overlap = $save(['settings.full_time' => '23:59']);
+    check($overlap->instance()->getErrorBag()->isEmpty() && $nativeRows()['full_schedule'] === 'off'
         && $nativeRows()['full_time'] === '23:59', 'billing overlap blocked Settings Save');
     $save(['settings.full_schedule' => $before['full_schedule'], 'settings.full_time' => $before['full_time']]);
     check($nativeRows() === $before, 'billing-window test did not restore native rows');
@@ -298,17 +300,21 @@ if ($mode === 'upload') {
     // A valid save writes only changed native rows and never touches credentials.
     config(['audit.console' => true]); // This CLI process stands in for an admin web request.
     $credentialDigest = $digest();
-    $changedKeys = ['full_schedule', 'full_weekdays', 'retention_keep_database', 'job_lock_paths'];
-    $livewire = $save(['settings.full_schedule' => 'weekly', 'settings.full_weekdays' => ['6', '0'], 'settings.retention_keep_database' => 4,
+    $save(['settings.full_schedule' => 'daily']);
+    check($nativeRows() === $before && array_filter($notices(), static fn ($n) => $n['status'] === 'danger') !== [],
+        'uncommissioned schedule activation did not refuse visibly before native publication');
+    $changedKeys = ['full_weekdays', 'retention_keep_database', 'job_lock_paths'];
+    $livewire = $save(['settings.full_weekdays' => ['6', '0'], 'settings.retention_keep_database' => 4,
         'settings.job_lock_paths' => "/fixture/a.lock\n\n /fixture/b.lock "]);
     check($livewire->instance()->getErrorBag()->isEmpty(), 'valid page settings refused: ' . json_encode($livewire->instance()->getErrorBag()->toArray()));
     $after = $nativeRows();
-    check($after['full_schedule'] === 'weekly' && $after['retention_keep_database'] === '4' && json_decode($after['full_weekdays'], true) === [0, 6]
+    check($after['full_schedule'] === 'off' && $after['retention_keep_database'] === '4' && json_decode($after['full_weekdays'], true) === [0, 6]
         && json_decode($after['job_lock_paths'], true) === ['/fixture/a.lock', '/fixture/b.lock'] && $after['settings_version'] === '2', 'page settings not persisted in engine form: ' . json_encode(array_intersect_key($after, array_flip($changedKeys))));
     check(array_diff_key($after, array_flip($changedKeys)) === array_diff_key($before, array_flip($changedKeys)), 'page save changed unrelated rows');
-    check(!str_contains(html_entity_decode(Livewire\Livewire::test($page)->html()), 'Next full backup Off'), 'full schedule not summarized');
-    $save(['settings.full_schedule' => 'off']);
-    check($nativeRows()['full_schedule'] === 'off' && json_decode($nativeRows()['full_weekdays'], true) === [0, 6], 'schedule could not be turned off');
+    $installation = $text(Livewire\Livewire::test($page));
+    foreach (Paymenter\Extensions\Others\Backups\Messages::INSTALLATION_CHECKS as $label) {
+        check(str_contains($installation, $label . ': '), 'Installation row not rendered: ' . $label);
+    }
     check($after['local_byte_budget'] === $before['local_byte_budget'], 'unchanged byte limit rewritten');
     // Space settings are entered in GiB and stored in bytes.
     $save(['settings.local_byte_budget' => '1.5']);

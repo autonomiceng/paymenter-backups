@@ -69,6 +69,8 @@ class Encryption(unittest.TestCase):
         self.envelope = {'settings': dict(DEFAULTS, destination='s3', s3_encryption=True, s3_bucket='synthetic',
                                          minimum_free_bytes=0, capture_timeout=10, local_byte_budget=20 * 1024**2),
                          'tools': {'gpg': '/usr/bin/gpg'},
+                         'framework': {'app_key': 'fixture-private-app-key'},
+                         'credentials': {'access_key': 'fixture-access', 'secret_key': 'fixture-secret'},
                          'archive_encryption_credentials': {'version': 1, 'active_fingerprint': self.fp,
                              'pending_fingerprint': None, 'keys': {self.fp: self.record}}}
         self.s3 = MemoryS3()
@@ -660,8 +662,12 @@ time.sleep(30)
         self.envelope['settings']['s3_endpoint'] = original
         self.envelope['settings']['s3_encryption'] = False
         self.assertFalse(badge())
-        # Historical successful plaintext tests had no explicit format.
+        # Proofs without a credential marker must be tested again.
         request['result'] = {'destination': 's3', 'destination_id': storage.destination_id(self.state, self.envelope), 'verified': True}
+        self.assertFalse(badge())
+        # Current plaintext proofs need no explicit format.
+        request['result'] = storage.destination_test(self.state, self.envelope)
+        request['result'].pop('format')
         self.assertTrue(badge())
         self.envelope['settings']['s3_encryption'] = True
         self.assertFalse(badge())
@@ -684,6 +690,9 @@ time.sleep(30)
 
     def test_overview_validates_current_test_key_once_for_many_historical_rows(self):
         from paymenter_backups.presentation import overview
+        self.envelope['settings']['upload_s3'] = True
+        from paymenter_backups.config import normalize
+        normalize(self.envelope['settings'])
         result = storage.destination_test(self.state, self.envelope)
         for index in range(50):
             request_id = 'badge-' + str(index)

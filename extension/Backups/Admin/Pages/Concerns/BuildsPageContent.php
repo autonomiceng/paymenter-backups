@@ -76,6 +76,7 @@ trait BuildsPageContent
                 ->persistTabInQueryString('tab')
                 ->tabs([
                     Tab::make('Backups')->id('backups')->schema([
+                        $this->installationSection(),
                         $this->setupSection(),
                         ...$this->alertCallouts(),
                         $this->overviewSection(),
@@ -109,6 +110,19 @@ trait BuildsPageContent
                 return $blocks;
             })
             ->visible(fn () => $this->setupOpen());
+    }
+
+    private function installationSection(): Section
+    {
+        return Section::make(Messages::INSTALLATION_TITLE)->schema(function () {
+            $checks = $this->configuration()['installation']['checks'] ?? [];
+            $rows = [];
+            foreach (array_keys(Messages::INSTALLATION_CHECKS) as $key) {
+                $check = $checks[$key] ?? ['state' => 'missing', 'code' => 'engine-unavailable'];
+                $rows[] = Text::make(Messages::installationCheck($key, $check));
+            }
+            return $rows;
+        })->visible(fn () => isset($this->configuration()['installation']));
     }
 
     /** Transient conditions, one callout each. */
