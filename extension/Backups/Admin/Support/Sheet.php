@@ -22,7 +22,8 @@ final class Sheet
     {
         $children = [$entry->inlineLabel()->grow()];
         if ($actions) { $children[] = Actions::make($actions)->grow(false); }
-        return Flex::make($children)->from('md')->extraAttributes(['class' => 'domains-row']);
+        $row = Flex::make($children)->from('md')->extraAttributes(['class' => 'domains-row']);
+        return $actions ? $row : $row->hiddenWhenAllChildComponentsHidden();
     }
 
     public static function rows(array $entries, array $actions = []): array

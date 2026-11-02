@@ -3,9 +3,14 @@
 try {
 $base = $argv[1];
 require $base . '/vendor/autoload.php';
+$mode = $argv[2];
+if ($mode === 'sheet-rows') {
+    require __DIR__ . '/sheet_rows.php';
+    echo json_encode(['sheet_rows' => true]) . "\n";
+    exit(0);
+}
 $app = require $base . '/bootstrap/app.php';
 $app->make(Illuminate\Contracts\Console\Kernel::class)->bootstrap();
-$mode = $argv[2];
 function check($test, $message) { if (!$test) { throw new RuntimeException($message); } }
 if ($mode === 'upload') {
     $service = new App\Services\Extensions\UploadExtensionService;
@@ -120,6 +125,7 @@ if ($mode === 'upload') {
     }
     echo json_encode(['env_only_mariadb_save' => true]) . "\n";
 } elseif ($mode === 'check') {
+    require __DIR__ . '/sheet_rows.php';
     // Many Livewire renders of a large page in one process.
     ini_set('memory_limit', '512M');
     $record = App\Models\Extension::where('extension', 'Backups')->firstOrFail();
