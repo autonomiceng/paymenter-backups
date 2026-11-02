@@ -40,7 +40,10 @@ namespace Filament\Actions {
 namespace Filament\Forms\Components { class Checkbox extends \Filament\Actions\Action {} }
 namespace Filament\Notifications { class Notification extends \Filament\Actions\Action {} }
 namespace Filament\Schemas { class Schema { public function fill($state) {} } }
-namespace Filament\Support\Enums { enum Size { case Small; } }
+namespace Filament\Support\Enums {
+    enum Size { case Small; }
+    enum Width { case SixExtraLarge; }
+}
 namespace Illuminate\Support\Facades {
     class Auth {
         public static function user() { return new class { public function hasPermission($permission) { return true; } }; }
