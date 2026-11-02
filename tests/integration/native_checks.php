@@ -311,9 +311,23 @@ if ($mode === 'upload') {
     check($after['full_schedule'] === 'off' && $after['retention_keep_database'] === '4' && json_decode($after['full_weekdays'], true) === [0, 6]
         && json_decode($after['job_lock_paths'], true) === ['/fixture/a.lock', '/fixture/b.lock'] && $after['settings_version'] === '2', 'page settings not persisted in engine form: ' . json_encode(array_intersect_key($after, array_flip($changedKeys))));
     check(array_diff_key($after, array_flip($changedKeys)) === array_diff_key($before, array_flip($changedKeys)), 'page save changed unrelated rows');
-    $installation = $text(Livewire\Livewire::test($page));
+    // Shared rows render labels and values separately, without a text colon.
+    $installation = new DOMDocument;
+    $installation->loadHTML(Livewire\Livewire::test($page)->html(), LIBXML_NOERROR | LIBXML_NOWARNING | LIBXML_NONET);
+    $installationXPath = new DOMXPath($installation);
+    $installationRows = [];
+    foreach ($installationXPath->query('//*[contains(concat(" ", normalize-space(@class), " "), " domains-row ")]') as $row) {
+        $labels = $installationXPath->query('.//*[@role="term"]', $row);
+        $values = $installationXPath->query('.//*[@role="definition"]', $row);
+        if ($labels->length === 1 && $values->length === 1) {
+            $label = trim(preg_replace('/\s+/', ' ', $labels->item(0)->textContent));
+            $installationRows[$label][] = trim($values->item(0)->textContent);
+        }
+    }
     foreach (Paymenter\Extensions\Others\Backups\Messages::INSTALLATION_CHECKS as $label) {
-        check(str_contains($installation, $label . ': '), 'Installation row not rendered: ' . $label);
+        $values = $installationRows[$label] ?? [];
+        check(count($values) === 1, 'Installation row not rendered exactly once: ' . $label);
+        check(preg_match('/^(Ready|Pending|Missing)(?:\.|$)/', $values[0]) === 1, 'Installation row has no status: ' . $label);
     }
     check($after['local_byte_budget'] === $before['local_byte_budget'], 'unchanged byte limit rewritten');
     // Space settings are entered in GiB and stored in bytes.
