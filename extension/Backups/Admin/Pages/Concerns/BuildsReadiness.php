@@ -198,7 +198,7 @@ trait BuildsReadiness
             'waiting' => ['ri-time-line', 'info', 'Ready. Waiting before the next start.'],
             default => $frequency === 'off'
                 ? ['ri-checkbox-blank-circle-line', 'gray', 'Ready. No schedule; create backups manually.']
-                : ['ri-checkbox-circle-line', 'success', 'Ready.' . ($next ? ' Next: ' . $this->time($next, true) . '.' : '')],
+                : ['ri-checkbox-circle-line', 'success', new \Illuminate\Support\HtmlString('Ready.' . ($next ? ' Next: ' . $this->moment($next) . '.' : ''))],
         };
     }
 }

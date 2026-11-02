@@ -82,24 +82,18 @@ trait LoadsOverview
         return \App\Models\Extension::where('extension', 'Backups')->where('type', 'other')->firstOrFail();
     }
 
-    private function zone(): string { return config('app.timezone') ?: 'UTC'; }
-
-    private function time(?float $timestamp, bool $withZone = false): string
+    /** Browser-local display, with UTC as the no-JavaScript fallback and on hover. */
+    private function moment(?float $timestamp): string|\Illuminate\Support\HtmlString
     {
         if ($timestamp === null) { return '—'; }
-        $date = CarbonImmutable::createFromTimestamp((int) $timestamp)->setTimezone($this->zone());
-        return $date->format('j M Y, H:i') . ($withZone ? ' ' . $this->zone() : '');
+        return new \Illuminate\Support\HtmlString(view('backups::partials.moment', [
+            'instant' => CarbonImmutable::createFromTimestamp((int) $timestamp, 'UTC'),
+        ])->render());
     }
 
     private function ago(?float $timestamp): string
     {
         return $timestamp === null ? '' : CarbonImmutable::createFromTimestamp((int) $timestamp)->diffForHumans();
-    }
-
-    /** "13 Oct 2026, 02:00 UTC (4 hours ago)" */
-    private function when(?float $timestamp): string
-    {
-        return $timestamp === null ? '—' : $this->time($timestamp, true) . ' (' . $this->ago($timestamp) . ')';
     }
 
     private function storage(): array

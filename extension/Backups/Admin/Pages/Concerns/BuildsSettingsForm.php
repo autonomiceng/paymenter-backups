@@ -10,18 +10,18 @@ use Filament\Forms\Components\Textarea;
 use Filament\Forms\Components\Toggle;
 use Filament\Schemas\Components\Actions;
 use Filament\Schemas\Components\EmbeddedSchema;
-use Filament\Schemas\Components\Fieldset;
 use Filament\Schemas\Components\Flex;
 use Filament\Schemas\Components\Form;
 use Filament\Schemas\Components\Grid;
 use Filament\Schemas\Components\Group;
 use Filament\Schemas\Components\Icon;
-use Filament\Schemas\Components\Section;
 use Filament\Schemas\Components\Text;
 use Filament\Schemas\Components\Utilities\Get;
 use Filament\Schemas\Schema;
 use Filament\Support\Enums\FontFamily;
+use Filament\Support\Enums\FontWeight;
 use Paymenter\Extensions\Others\Backups\Messages;
+use Paymenter\Extensions\Others\Backups\Admin\Support\Sheet;
 use Paymenter\Extensions\Others\Backups\PrivateStore;
 use Paymenter\Extensions\Others\Backups\Settings;
 
@@ -66,27 +66,28 @@ trait BuildsSettingsForm
         $zones = array_combine(\DateTimeZone::listIdentifiers(), \DateTimeZone::listIdentifiers());
 
         return $schema->components([
-            Form::make([
-                Section::make('Public web folders need correction')->visible(fn () => in_array('extra_docroots', $this->malformedKeys, true))
+            Form::make([Sheet::make([
+                Sheet::section('Public web folders need correction')->visible(fn () => in_array('extra_docroots', $this->malformedKeys, true))
                     ->description('The saved list is damaged. Enter the complete list, confirm it, and save it by itself first.')
-                    ->schema([
+                    ->schema(Sheet::contentRows([
                         $lineList('extra_docroots', 'Other public web folders', 'One full path per line. Leave empty only if this account has no other public web folders.'),
                         Checkbox::make('confirm_public_directories')->label('I have listed all public web folders for this account.')
                             ->accepted()->validationMessages(['accepted' => 'Confirm the complete list before saving.']),
-                    ]),
-                Section::make('First-time setup')->id('first-time-setup')
+                    ])),
+                Sheet::section('First-time setup')->id('first-time-setup')
                     ->description('Choose where Backups keeps its private data. You can\'t change this after the first save.')
                     ->visible(fn () => !$this->initialized())
-                    ->schema([
+                    ->schema(Sheet::contentRows([
                         $path('private_root', 'Data directory', 'Holds backup history, the installation ID and encrypted keys. Must be outside Paymenter and any public web folder.', PrivateStore::defaultPath(realpath(base_path())))
                             ->visible(fn () => !$this->initialized()),
                         $lineList('extra_docroots', 'Other public web folders', 'Document roots of other sites on this account, one per line. Backups are never stored inside them.')
                             ->visible(fn () => !$this->initialized() && !in_array('extra_docroots', $this->malformedKeys, true)),
-                    ]),
+                    ])),
 
-                Section::make('Schedule')->id('schedule')->description('Backups run from Paymenter\'s cron job at these times.')->schema([
+                Sheet::section('Schedule')->id('schedule')->description('Backups run from Paymenter\'s cron job at these times.')->schema(Sheet::contentRows([
                     Grid::make(['default' => 1, 'md' => 2])->schema([
-                        Fieldset::make('Full backups')->columns(1)->schema([
+                        Group::make()->columns(1)->schema([
+                            Text::make('Full backups')->weight(FontWeight::SemiBold)->columnSpanFull(),
                             Text::make('Database and application files. Runtime logs, cache and sessions are omitted. The site stays online.'),
                             Select::make('full_schedule')->label('Frequency')->options(Settings::SELECTS['full_schedule'])->required()->selectablePlaceholder(false),
                             $days('full_weekdays', 'full_schedule'),
@@ -97,7 +98,8 @@ trait BuildsSettingsForm
                                 Actions::make([$this->link('scheduleFullSetup', 'See what\'s needed', static::getUrl(['tab' => 'backups']) . '#setup')]),
                             ])->verticallyAlignCenter()->visible(fn () => $this->initialized() && $this->overviewError === null && $this->blockers('full-quiesced') !== []),
                         ]),
-                        Fieldset::make('Database backups')->columns(1)->schema([
+                        Group::make()->columns(1)->schema([
+                            Text::make('Database backups')->weight(FontWeight::SemiBold)->columnSpanFull(),
                             Text::make('Database only. The site stays online. To restore, you also need a copy of Paymenter\'s files.'),
                             Select::make('database_schedule')->label('Frequency')->options(Settings::SELECTS['database_schedule'])->required()->selectablePlaceholder(false),
                             Grid::make(2)->schema([
@@ -114,9 +116,9 @@ trait BuildsSettingsForm
                     ]),
                     Select::make('schedule_timezone')->label('Time zone')->options($zones)->searchable()->required()->rule('timezone')
                         ->helperText('Use UTC to avoid daylight-saving gaps.'),
-                ]),
+                ])),
 
-                Section::make('Storage')->id('storage')->schema([
+                Sheet::section('Storage')->id('storage')->schema(Sheet::contentRows([
                     $path('local_path', 'Backup directory', 'In a private folder outside Paymenter. Leave empty to use the default. Changing it affects new backups only.',
                         fn () => $this->storage()['default_local_path'] ?? (($root = $this->safePrivateRoot()) ? $root . '/backups' : null)),
                     Text::make(fn () => $this->legacyDirectorySentence())->visible(fn () => $this->legacyDirectorySentence() !== null),
@@ -130,7 +132,8 @@ trait BuildsSettingsForm
                         ->validationMessages(['accepted' => 'Keep backups on this server, upload them to S3, or both.']),
                     Checkbox::make('upload_s3')->label('Upload to S3')->helperText('AWS S3 or any S3-compatible storage.'),
                     Group::make([
-                        Fieldset::make('S3 bucket')->id('s3')->columns(['default' => 1, 'md' => 2])->schema([
+                        Group::make()->id('s3')->columns(['default' => 1, 'md' => 2])->schema([
+                            Text::make('S3 bucket')->weight(FontWeight::SemiBold)->columnSpanFull(),
                             TextInput::make('s3_endpoint')->label('Endpoint')->placeholder('https://s3.example.com')
                                 ->helperText('Leave empty for AWS. For other providers, enter their S3 API URL, for example https://s3.example.com.')
                                 ->rules(['nullable', 'regex:/^https:\/\/[^\s\/?#@]+(?:\/[^\s?#]*)?$/D'])->validationMessages(['regex' => 'Enter the provider\'s https:// API URL, without a username or query.']),
@@ -143,14 +146,17 @@ trait BuildsSettingsForm
                                 ->validationMessages(['regex' => 'The folder can\'t contain "//", ".", ".." or "\\".']),
                             Toggle::make('s3_path_style')->label('Path-style addressing')->helperText('Turn on for MinIO and some other S3-compatible providers.')->inline(false),
                         ]),
-                        Fieldset::make('S3 access keys')->columns(1)->schema([
+                        Group::make()->columns(1)->schema([
+                            Text::make('S3 access keys')->weight(FontWeight::SemiBold)->columnSpanFull(),
                             EmbeddedSchema::make('s3KeysForm'),
                         ]),
-                        Fieldset::make('Keep in S3')->columns(['default' => 1, 'md' => 2])->schema([
+                        Group::make()->columns(['default' => 1, 'md' => 2])->schema([
+                            Text::make('Keep in S3')->weight(FontWeight::SemiBold)->columnSpanFull(),
                             Grid::make(1)->schema($s3Policy('full', 'Full backups')),
                             Grid::make(1)->schema($s3Policy('database', 'Database backups')),
                         ]),
-                        Fieldset::make('Encryption')->id('encryption')->columns(1)->schema([
+                        Group::make()->id('encryption')->columns(1)->schema([
+                            Text::make('Encryption')->weight(FontWeight::SemiBold)->columnSpanFull(),
                             Toggle::make('s3_encryption')->label('Encrypt backups in S3')
                                 ->helperText(fn () => $this->encryptionHelp()),
                             EmbeddedSchema::make('encryptionForm')
@@ -168,30 +174,32 @@ trait BuildsSettingsForm
                     ])->visibleJs("\$get('upload_s3')"),
                     Toggle::make('automatic_retention')->label('Delete old backups automatically')
                         ->helperText('After each backup, delete backups beyond the numbers to keep.'),
-                ]),
+                ])),
 
-                Section::make('Full backup requirements')->id('full-backup-requirements')
+                Sheet::section('Full backup requirements')->id('full-backup-requirements')
                     ->description('A full backup pauses Paymenter\'s cron jobs while it copies. The site stays online.')
                     ->collapsible()->collapsed(fn () => ($this->formValues()['full_schedule'] ?? 'off') === 'off' && $this->blockers('full-quiesced') === [])
-                    ->schema(fn () => [
+                    ->schema(Sheet::contentRows(fn () => [
                         ...$this->detectedChecks(),
                         Checkbox::make('full_host_assumptions_acknowledged')->label('No other program writes to Paymenter\'s database or files.')
                             ->helperText('Only Paymenter\'s cron jobs are paused. Writes from other programs can leave a broken backup.'),
-                    ]),
+                    ])),
 
-                Section::make('Before backups run')->id('before-backups-run')->schema([
+                Sheet::section('Before backups run')->id('before-backups-run')->schema(Sheet::contentRows([
                     Checkbox::make('no_concurrent_ddl_acknowledged')->label('I won\'t update Paymenter, install extensions or run migrations while a backup runs.')
                         ->helperText('A schema change during a backup can make the database copy unusable. This applies to both backup types.'),
-                ]),
+                ])),
 
-                Section::make('Advanced')->id('advanced')->description('Binary paths, time limits and folders. Most sites don\'t need to change these.')
-                    ->collapsible()->collapsed()->schema([
-                        Fieldset::make('Binary paths')->columns(['default' => 1, 'md' => 2])->schema([
+                Sheet::section('Advanced')->id('advanced')->description('Binary paths, time limits and folders. Most sites don\'t need to change these.')
+                    ->collapsible()->collapsed()->schema(Sheet::contentRows([
+                        Group::make()->columns(['default' => 1, 'md' => 2])->schema([
+                            Text::make('Binary paths')->weight(FontWeight::SemiBold)->columnSpanFull(),
                             Text::make('An empty path uses the binary Backups detects.')->columnSpanFull(),
                             $tool('python', 'Python 3'), $tool('php', 'PHP'), $tool('dump', 'mysqldump or mariadb-dump'),
                             $tool('mysql', 'mysql or mariadb client'), $tool('tar', 'tar'), $tool('gzip', 'gzip'), $tool('gpg', 'GnuPG (gpg)'),
                         ]),
-                        Fieldset::make('Time limits')->columns(['default' => 1, 'md' => 2])->schema([
+                        Group::make()->columns(['default' => 1, 'md' => 2])->schema([
+                            Text::make('Time limits')->weight(FontWeight::SemiBold)->columnSpanFull(),
                             $integer('capture_timeout', 'Backup time limit', 'seconds', 'Limits the database export, extension checks and file copy while cron jobs are paused.'),
                             $integer('lock_timeout', 'Wait for running cron jobs', 'seconds', 'If a Paymenter cron job is running, wait this long before trying again next minute.'),
                             $integer('billing_margin_seconds', 'Billing safety margin', 'seconds', 'Extra time kept clear before and after Paymenter\'s daily billing run.'),
@@ -199,17 +207,19 @@ trait BuildsSettingsForm
                             $integer('s3_timeout', 'S3 timeout', 'seconds', 'Per request.'),
                             $integer('s3_retries', 'S3 retries', 'attempts', 'Total attempts per request, including the first.'),
                         ]),
-                        Fieldset::make('Lock files')->columns(1)->schema([
+                        Group::make()->columns(1)->schema([
+                            Text::make('Lock files')->weight(FontWeight::SemiBold)->columnSpanFull(),
                             $lineList('job_lock_paths', 'Lock files (override)', 'Leave empty to use the lock files your cron jobs use. One full path per line.'),
                         ]),
-                        Fieldset::make('Folders')->columns(['default' => 1, 'md' => 2])->visible(fn () => $this->initialized())->schema([
+                        Group::make()->columns(['default' => 1, 'md' => 2])->visible(fn () => $this->initialized())->schema([
+                            Text::make('Folders')->weight(FontWeight::SemiBold)->columnSpanFull(),
                             $path('private_root', 'Data directory', 'Holds backup history, the installation ID and encrypted keys. Can\'t be changed after setup.')
                                 ->disabled()->visible(fn () => $this->initialized()),
                             $lineList('extra_docroots', 'Other public web folders', 'Document roots of other sites on this account, one per line. Backups are never stored inside them.')
                                 ->visible(fn () => $this->initialized() && !in_array('extra_docroots', $this->malformedKeys, true)),
                         ]),
-                    ]),
-            ])->livewireSubmitHandler('saveSettings')->footer([
+                    ])),
+            ])])->livewireSubmitHandler('saveSettings')->footer([
                 Actions::make([Action::make('saveSettings')->label(fn () => $this->initialized() ? 'Save settings' : 'Save and finish setup')->submit('saveSettings')->keyBindings(['mod+s'])]),
             ]),
         ])->statePath('settings');

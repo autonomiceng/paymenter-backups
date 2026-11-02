@@ -7,10 +7,11 @@ use Filament\Pages\Page;
 use Filament\Pages\PageConfiguration;
 use Filament\Panel;
 use Filament\Schemas\Components\Group;
-use Filament\Schemas\Components\Section;
+use Paymenter\Extensions\Others\Backups\Admin\Support\Sheet;
 use Filament\Schemas\Components\Text;
 use Filament\Schemas\Components\Utilities\Get;
 use Filament\Support\Facades\FilamentView;
+use Filament\Support\Enums\Width;
 use Filament\Tables\Concerns\InteractsWithTable;
 use Filament\Tables\Contracts\HasTable;
 use Illuminate\Support\Facades\Auth;
@@ -42,6 +43,7 @@ class Backups extends Page implements HasTable
     protected static string|\BackedEnum|null $activeNavigationIcon = 'ri-save-fill';
     protected static string|\UnitEnum|null $navigationGroup = 'System';
     protected static ?string $title = 'Backups';
+    protected Width|string|null $maxContentWidth = Width::SixExtraLarge;
     /** Native page that renders action modals before the tabs, not inside the Backups tab with the history table. */
     protected string $view = 'backups::page';
 
@@ -224,21 +226,21 @@ class Backups extends Page implements HasTable
     {
         $bullets = fn (array $lines) => $this->bullets($lines);
         return [
-            Section::make('What\'s in a backup')->id('backup-contents')->collapsible()->collapsed()->schema([
+            Sheet::section('What\'s in a backup')->id('backup-contents')->collapsible()->collapsed()->schema(Sheet::contentRows([
                 $bullets([
                     'Full backup: the database and every file in Paymenter\'s folder, including .env, APP_KEY, uploads and extensions. The site stays online. Cron jobs are paused for the database and file copy; page requests can still change live data.',
                     'Database backup: the database only. The site stays online. To restore, you also need Paymenter\'s files, from a full backup or your own copy.',
                     'Backups contain customer data and secrets (.env, APP_KEY). Keep downloads private. Saved S3 keys, site passwords and recovery keys are never included.',
                 ]),
-            ]),
-            Section::make('How backups run')->id('how-backups-run')->collapsible()->schema([
+            ])),
+            Sheet::section('How backups run')->id('how-backups-run')->collapsible()->schema(Sheet::contentRows([
                 Text::make('Backups runs from Paymenter\'s cron job, once a minute. If the cron job isn\'t running, nothing happens. Backups never edits your crontab or systemd units.'),
                 Text::make(fn () => 'Add this line to the crontab of ' . ($this->checks()['jobs']['crontab_user'] ?? 'the user that owns Paymenter') . ' with crontab -e. If a scheduler entry is already there, replace it:'),
                 $this->command(fn () => $this->schedulerLine()),
                 Text::make('flock lets a full backup pause this job while it copies. Database backups work without it.'),
                 Text::make('Copying needs HTTPS. Over HTTP, select the text to copy it.')->visible(fn () => !request()->isSecure()),
-            ]),
-            Section::make('Full backups: what has to be true')->id('full-backups')->collapsible()->schema([
+            ])),
+            Sheet::section('Full backups: what has to be true')->id('full-backups')->collapsible()->schema(Sheet::contentRows([
                 Text::make('A full backup waits for running cron jobs, holds their lock files, and copies the database and files. The site stays online. If extension files change during a scheduled copy, it retries at the next full backup time.'),
                 Text::make('A cron job without the required lock can keep writing during the backup. The database and files in the backup could then be from different times.'),
                 $bullets([
@@ -250,14 +252,14 @@ class Backups extends Page implements HasTable
                     'No Redis or other outside storage for cache, sessions, queue or files. Data held there isn\'t in the backup. The Backups tab names the .env keys to change.',
                     'Nothing else writes to Paymenter\'s database or files, such as another app, a sync script or manual SQL.',
                 ]),
-            ]),
-            Section::make('Encrypted backups in S3')->id('encryption')->collapsible()->collapsed()->schema([
+            ])),
+            Sheet::section('Encrypted backups in S3')->id('encryption')->collapsible()->collapsed()->schema(Sheet::contentRows([
                 Text::make('Backups uploaded to S3 are encrypted on this server with GnuPG (AES-256) before upload. Copies on this server and downloads from this page aren\'t encrypted.'),
                 Text::make('The recovery key decrypts them. Keep it in a password manager or another safe place outside this server. If this server is lost, APP_KEY and your S3 keys can\'t replace it.'),
                 Text::make('A new recovery key applies to new uploads only. Earlier backups keep needing the key they were encrypted with, so keep every key you\'ve saved.'),
                 Text::make('If you turn encryption off, turn on server-side encryption in the bucket if you need it.'),
-            ]),
-            Section::make('Schedules and missed backups')->id('schedules')->collapsible()->collapsed()->schema([
+            ])),
+            Sheet::section('Schedules and missed backups')->id('schedules')->collapsible()->collapsed()->schema(Sheet::contentRows([
                 $bullets([
                     'A new or changed schedule starts at its next time. It doesn\'t run immediately. Changing one schedule doesn\'t affect the other.',
                     'If the cron job was down and a backup was missed in the last 8 days, one backup of that type runs once it\'s back. Missed backups don\'t pile up.',
@@ -266,14 +268,14 @@ class Backups extends Page implements HasTable
                     'A failed upload retries the same backup, without taking a new copy. Keep its original S3 destination and recovery key available.',
                     'With a time zone other than UTC, a time skipped by a daylight-saving change doesn\'t run that day, and a repeated time runs once.',
                 ]),
-            ]),
-            Section::make('Cleanup')->id('cleanup')->collapsible()->collapsed()->schema([
+            ])),
+            Sheet::section('Cleanup')->id('cleanup')->collapsible()->collapsed()->schema(Sheet::contentRows([
                 $bullets([
                     'After each backup, Backups deletes the oldest backups beyond the number to keep, per type, on this server and in S3.',
                     'The newest verified backup in each place is always kept. So are backups not yet uploaded to S3, backups that failed verification, backups in an old S3 folder, and copies downloaded from S3 in the last 24 hours.',
                 ]),
-            ]),
-            Section::make('Restoring')->id('restoring')->collapsible()->collapsed()->schema([
+            ])),
+            Sheet::section('Restoring')->id('restoring')->collapsible()->collapsed()->schema(Sheet::contentRows([
                 Text::make('Restore into a new folder and a new database, never over the running site.'),
                 Group::make([
                     Text::make('1. Get the backup file: Download it here, or on the server run paymenter_backups export BACKUP-ID --output /new/folder. If this server is lost, download the backup\'s files from your bucket and decrypt them with your recovery key, as the full guide shows.'),
@@ -286,10 +288,10 @@ class Backups extends Page implements HasTable
                 Text::make('Full guide on this server:'),
                 $this->command(dirname(__DIR__, 2) . '/docs/RECOVERY.md'),
                 Text::make(fn () => 'Installation ID: ' . ($this->overview()['installation_uuid'] ?? 'not created yet') . '.'),
-            ]),
-            Section::make('Command line')->id('command-line')->collapsible()->collapsed()
+            ])),
+            Sheet::section('Command line')->id('command-line')->collapsible()->collapsed()
                 ->description('Run these as the user that owns Paymenter. They work even when Paymenter won\'t start.')
-                ->schema([
+                ->schema(Sheet::contentRows([
                     Text::make('Define this once per shell:'),
                     $this->command(fn () => $this->terminalFunction()),
                     Text::make('See backups and queued tasks:'),
@@ -302,7 +304,7 @@ class Backups extends Page implements HasTable
                     $this->command('paymenter_backups recover acknowledge --run BACKUP-ID'),
                     Text::make('Copy a verified backup to a new folder. The backup ID is in each backup\'s Details:'),
                     $this->command('paymenter_backups export BACKUP-ID --output /new/folder'),
-                ]),
+                ])),
         ];
     }
 
