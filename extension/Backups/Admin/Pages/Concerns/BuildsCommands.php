@@ -114,6 +114,6 @@ trait BuildsCommands
 
     private function link(string $name, string $label, string $url): Action
     {
-        return Action::make($name)->label($label)->url($url)->button()->size(Size::Small)->color('gray');
+        return Action::make($name)->label($label)->url($url)->link()->size(Size::Small)->color('gray');
     }
 }

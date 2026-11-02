@@ -1,0 +1,2 @@
+{{-- Viewer-local time, with an unambiguous UTC fallback and hover text. Alpine ships with Filament. --}}
+<time datetime="{{ $instant->toIso8601String() }}" title="{{ $instant->utc()->format('M j, Y, g:i A \\U\\T\\C') }}" x-data x-init="const date = new Date($el.dateTime); if (!isNaN(date)) $el.textContent = new Intl.DateTimeFormat('en-US', {year: 'numeric', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', timeZoneName: 'short'}).format(date)">{{ $instant->utc()->format('M j, Y, g:i A \\U\\T\\C') }}</time>

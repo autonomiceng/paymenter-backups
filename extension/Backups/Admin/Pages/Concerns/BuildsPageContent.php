@@ -2,16 +2,11 @@
 namespace Paymenter\Extensions\Others\Backups\Admin\Pages\Concerns;
 
 use Filament\Infolists\Components\TextEntry;
-use Filament\Schemas\Components\Actions;
 use Filament\Schemas\Components\Callout;
 use Filament\Schemas\Components\Component;
 use Filament\Schemas\Components\EmbeddedSchema;
 use Filament\Schemas\Components\EmbeddedTable;
-use Filament\Schemas\Components\Fieldset;
-use Filament\Schemas\Components\Flex;
-use Filament\Schemas\Components\Grid;
 use Filament\Schemas\Components\Group;
-use Filament\Schemas\Components\Icon;
 use Filament\Schemas\Components\Section;
 use Filament\Schemas\Components\Tabs;
 use Filament\Schemas\Components\Tabs\Tab;
@@ -20,22 +15,19 @@ use Filament\Schemas\Schema;
 use Filament\Support\Enums\FontWeight;
 use Filament\Support\Enums\Size;
 use Paymenter\Extensions\Others\Backups\Messages;
-use Paymenter\Extensions\Others\Backups\Settings;
+use Paymenter\Extensions\Others\Backups\Admin\Support\Sheet;
 
 trait BuildsPageContent
 {
-    /** One setup item: icon, title, one line, exact fixes and at most one action. */
+    /** One setup row: title, explanation, exact fixes and the existing actions. */
     private function setupItem(array $item, string $prefix): Component
     {
-        $tone = $item['tone'];
-        $children = [Group::make([
-            Text::make($item['title'])->weight(FontWeight::SemiBold)->color('gray'),
-            Text::make($item['text']),
-        ])->gap(false)];
+        $children = [];
         foreach ($item['fixes'] as $fix) {
             if (filled($fix['lead'] ?? null)) { $children[] = Text::make($fix['lead']); }
             $children[] = $this->command($fix['code']);
         }
+        $actions = [];
         $action = $item['action'];
         if ($action) {
             $name = $prefix . preg_replace('/[^A-Za-z0-9]/', '', ucwords($item['code'], '-'));
@@ -46,13 +38,9 @@ trait BuildsPageContent
                 'recovery-key' => $this->recoveryKeyActions(),
                 default => [],
             };
-            if ($actions) { $children[] = Actions::make($actions); }
         }
-        return Flex::make([
-            Icon::make(match ($tone) { 'danger' => 'ri-alert-line', 'info' => 'ri-information-line', default => 'ri-error-warning-line' })
-                ->color(match ($tone) { 'danger' => 'danger', 'info' => 'info', default => 'warning' })->grow(false),
-            Group::make($children)->dense()->grow(),
-        ])->verticallyAlignStart();
+        return Sheet::row(TextEntry::make($prefix . '_' . $item['code'])->label($item['title'])
+            ->state($item['text'])->belowContent([Group::make($children)->grow()->maxWidth('full')]), $actions);
     }
 
     public function content(Schema $schema): Schema
@@ -76,34 +64,35 @@ trait BuildsPageContent
                 ->persistTabInQueryString('tab')
                 ->tabs([
                     Tab::make('Backups')->id('backups')->schema([
-                        $this->installationSection(),
-                        $this->setupSection(),
-                        ...$this->alertCallouts(),
-                        $this->overviewSection(),
+                        Sheet::make([
+                            $this->installationSection(),
+                            $this->setupSection(),
+                            ...$this->alertCallouts(),
+                            $this->overviewSection(),
+                        ]),
                         EmbeddedTable::make(),
                     ]),
                     Tab::make('Settings')->id('settings')->schema([
                         EmbeddedSchema::make('settingsForm'),
                     ]),
-                    Tab::make('Help')->id('help')->schema($this->helpSections()),
+                    Tab::make('Help')->id('help')->schema([Sheet::make($this->helpSections())]),
                 ]),
         ]);
     }
 
     private function setupSection(): Section
     {
-        return Section::make('Setup')->id('setup')
+        return Sheet::section('Setup')->id('setup')
             ->schema(function () {
                 $groups = $this->setupGroups();
                 $blocks = [];
                 if ($groups['all']) {
-                    $blocks[] = Fieldset::make('All backups')->columns(1)
-                        ->schema(array_map(fn ($item) => $this->setupItem($item, 'setupAll'), $groups['all']));
+                    $blocks[] = Group::make([Text::make('All backups')->weight(FontWeight::SemiBold), ...(array_map(fn ($item) => $this->setupItem($item, 'setupAll'), $groups['all']))]);
                 }
                 foreach (self::KIND_LABELS as $mode => $label) {
-                    [$icon, $color, $line] = $this->typeStatus($mode);
-                    $blocks[] = Fieldset::make($label)->columns(1)->schema([
-                        Flex::make([Icon::make($icon)->color($color)->grow(false), Text::make($line)->grow()])->verticallyAlignStart(),
+                    [, , $line] = $this->typeStatus($mode);
+                    $blocks[] = Group::make([
+                        Sheet::row(TextEntry::make('setup_' . self::KINDS[$mode])->label($label)->state($line)),
                         ...array_map(fn ($item) => $this->setupItem($item, 'setup' . ucfirst(self::KINDS[$mode])), $groups[$mode]),
                     ]);
                 }
@@ -114,12 +103,14 @@ trait BuildsPageContent
 
     private function installationSection(): Section
     {
-        return Section::make(Messages::INSTALLATION_TITLE)->schema(function () {
+        return Sheet::section(Messages::INSTALLATION_TITLE)->schema(function () {
             $checks = $this->configuration()['installation']['checks'] ?? [];
             $rows = [];
             foreach (array_keys(Messages::INSTALLATION_CHECKS) as $key) {
                 $check = $checks[$key] ?? ['state' => 'missing', 'code' => 'engine-unavailable'];
-                $rows[] = Text::make(Messages::installationCheck($key, $check));
+                $label = Messages::INSTALLATION_CHECKS[$key];
+                $rows[] = Sheet::row(TextEntry::make('installation_' . $key)->label($label)
+                    ->state(substr(Messages::installationCheck($key, $check), strlen($label) + 2)));
             }
             return $rows;
         })->visible(fn () => isset($this->configuration()['installation']));
@@ -140,7 +131,7 @@ trait BuildsPageContent
                 ->visible(fn () => (bool) ($this->overview()['job_wait_overdue'] ?? false)),
             Callout::make('Backups in S3 aren\'t encrypted')->info()
                 ->description('Save settings to turn on encryption for new uploads. Backups already in S3 stay as they are.')
-                ->actions([$this->link('alertEncryption', 'Go to Storage settings', $this->settingsUrl('storage'))->button()])
+                ->actions([$this->link('alertEncryption', 'Go to Storage settings', $this->settingsUrl('storage'))])
                 ->visible(fn () => $this->overviewError === null && $this->settingsVersion() < 2 && $this->uploadsToS3()
                     && !($this->encryption()['enabled'] ?? true)),
             Callout::make(fn () => $pending() . ($pending() === 1 ? ' backup isn\'t' : ' backups aren\'t') . ' uploaded to S3 yet')->warning()
@@ -148,7 +139,7 @@ trait BuildsPageContent
                 ->visible(fn () => $pending() > 0),
             Callout::make('Backup space is full')->danger()
                 ->description(fn () => 'Backups on this server reached the ' . Messages::bytes($this->configuration()['space']['budget'] ?? null) . ' limit. New backups stop until you delete old ones or raise the limit.')
-                ->actions([$this->link('alertSpace', 'Go to Storage settings', $this->settingsUrl('storage'))->button()])
+                ->actions([$this->link('alertSpace', 'Go to Storage settings', $this->settingsUrl('storage'))])
                 ->visible(fn () => ($this->configuration()['space']['state'] ?? null) === 'full'),
             Callout::make('The site is in maintenance mode')->info()
                 ->description('Queued tasks wait until it\'s back online.')
@@ -200,22 +191,23 @@ trait BuildsPageContent
         $next = function (string $mode) {
             $schedule = $this->scheduleFor($mode);
             if (($schedule['frequency'] ?? 'off') === 'off') { return 'Off'; }
-            return ($schedule['next_at'] ?? null) ? $this->time($schedule['next_at'], true) : 'None in the next 8 days';
+            return ($schedule['next_at'] ?? null) ? $this->moment($schedule['next_at']) : 'None in the next 8 days';
         };
-        return Section::make('Overview')
-            ->headerActions([$this->testStorageAction(), $this->applyRetentionAction()])
-            ->schema([
-                Grid::make(['default' => 1, 'md' => 2])->schema([
+        return Sheet::section('Overview')
+            ->schema(Sheet::rows([
                     TextEntry::make('overview_last_full')->label('Last full backup')
-                        ->state(fn () => ($run = $this->lastGood('full-quiesced')) ? $this->when($run['created_at']) : 'None yet'),
+                        ->state(fn () => ($run = $this->lastGood('full-quiesced')) ? $this->moment($run['created_at']) : 'None yet'),
                     TextEntry::make('overview_last_database')->label('Last database backup')
-                        ->state(fn () => ($run = $this->lastGood('database-online')) ? $this->when($run['created_at']) : 'None yet'),
+                        ->state(fn () => ($run = $this->lastGood('database-online')) ? $this->moment($run['created_at']) : 'None yet'),
                     TextEntry::make('overview_next_full')->label('Next full backup')->state(fn () => $next('full-quiesced')),
                     TextEntry::make('overview_next_database')->label('Next database backup')->state(fn () => $next('database-online')),
                     TextEntry::make('overview_last_s3')->label('Last upload to S3')->state(function () {
                         $run = $this->run($this->overview()['last_good']['s3'] ?? null);
                         if (!$run) { return 'None yet'; }
-                        return $this->time($run['created_at'], true) . ($run['remote_checked_at'] ? ', checked ' . $this->ago($run['remote_checked_at']) : ', not checked yet');
+                        return $this->moment($run['created_at']);
+                    })->belowContent(function () {
+                        $run = $this->run($this->overview()['last_good']['s3'] ?? null);
+                        return $run ? [Text::make($run['remote_checked_at'] ? 'Checked ' . $this->ago($run['remote_checked_at']) : 'Not checked yet')] : [];
                     })->visible(fn () => $this->uploadsToS3()),
                     TextEntry::make('overview_storage')->label('Stored on')->state(function () {
                         $storage = $this->storage();
@@ -251,7 +243,7 @@ trait BuildsPageContent
                         $test = $this->latestRequest('destination-test');
                         return match ($this->storageTestState()) {
                             'none' => 'Not tested',
-                            'passed' => 'Passed ' . $this->ago($test['finished_at']),
+                            'passed' => 'OK ' . $this->ago($test['finished_at']),
                             'stale' => 'Settings changed since the last test',
                             'failed' => 'Failed ' . $this->ago($test['finished_at']) . '. ' . Messages::error($test['error']),
                             'cancelled' => 'Last test cancelled',
@@ -259,7 +251,9 @@ trait BuildsPageContent
                             default => 'Queued',
                         };
                     })->color(fn () => $this->storageTestState() === 'failed' ? 'danger' : null),
-                ]),
-            ]);
+            ], [
+                'overview_space' => [$this->applyRetentionAction()],
+                'overview_test' => [$this->testStorageAction()],
+            ]));
     }
 }

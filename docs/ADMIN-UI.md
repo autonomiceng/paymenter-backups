@@ -3,8 +3,9 @@
 The Backups page is where a Paymenter administrator sets up private backups,
 checks that they are working, and downloads or deletes individual backups.
 It is a native Filament 5 page in Paymenter 1.5.9. It uses Paymenter's compiled
-admin theme and Filament components only. It loads no fonts, CDN assets,
-JavaScript frameworks or Tailwind utilities beyond what the theme ships.
+admin theme and Filament components. An optional shared admin skin styles the
+existing sheet and row classes; without it, the same page stays plain Filament.
+The extension loads no fonts, CDN assets or JavaScript frameworks.
 
 ## Downloads hold secrets
 
@@ -30,84 +31,29 @@ plain copies after use. Never attach them to tickets or commit them to a reposit
 
 ## Layout
 
-One page, three tabs. "Create backup" is the only header action.
+One page, three native tabs: Backups, Settings and Help. "Create backup" is
+the only header action. Detail content caps at Filament's SixExtraLarge width.
 
-```
-Backups                                                     [Create backup]
-[ Backups ]  [ Settings ]  [ Help ]
+Backups joins Setup, current alerts and Overview into one sheet. Facts use a
+label, value and optional action row. Setup keeps every blocker, exact command
+and existing recovery-key action. Cleanup sits beside Space used; Test storage
+sits beside Storage test. The history table has its own surface below the sheet.
 
-  Section: Setup (only while something is open)
-   All backups
-    ⚠ Save your recovery key          [Show recovery key] [Download] [I saved it]
-    ⓘ Test your storage                                         [Test storage]
-   Database backups
-    ✓ Ready. Next: 14 Oct 2026, 06:00 UTC.
-   Full backups
-    ⚠ Not ready. Scheduled backups can't run yet.
-    ⚠ Add a lock file to this cron job
-      Now: * * * * * php /var/www/paymenter/artisan schedule:run >> /dev/null 2>&1
-      Replace it with: * * * * * /usr/bin/flock -n …/scheduler.lock … (copyable)
-    ⚠ Paymenter stores data in Redis
-      CACHE_STORE=file SESSION_DRIVER=file (copyable)
-    ⚠ Confirm nothing else writes to Paymenter               [Confirm in Settings]
+Settings is one form in one sheet, with one Save settings button (mod+s).
+Schedule groups sit side by side on wide screens and stack below 768 px.
+Fields, conditional visibility, validation and secret-handling flows stay native.
+Help joins its collapsible sections into a sheet with padded prose and commands.
 
-  Callouts, one per condition: not uploaded to S3, space full, maintenance
-  mode, cleanup skipped, legacy unencrypted uploads
+History searches the entire eligible array before paging, including backup and
+task IDs, type, origin, status, failure detail, location and displayed size.
+Words match case-insensitively and all words must match. Show deleted still
+controls eligibility. The default is 25 rows, with 25, 50 and 100 choices and one
+pager. Columns can hide Type, Size, Status and Stored on; Created stays visible.
+A search with no matches names the next step instead of offering first-backup setup.
 
-  Section: Overview (description list)               [Delete old backups now]
-   Last full backup       13 Oct 2026, 02:00 UTC (4 hours ago)
-   Last database backup   14 Oct 2026, 06:00 UTC (12 minutes ago)
-   Next full backup       18 Oct 2026, 03:00 UTC
-   Next database backup   14 Oct 2026, 07:00 UTC
-   Last upload to S3      13 Oct 2026, 02:00 UTC, checked 2 hours ago
-   Stored on              This server, S3 (my-bucket)
-   S3 encryption          On, recovery key 3f9a…
-   Space used             1.2 GiB of 10 GiB, 3 backups
-   Cron job               Ran 1 minute ago
-   Storage test           Passed 2 hours ago                    [Test storage]
-
-  Table: Backup history                                         [Show deleted]
-   | Created (UTC)  | Type             | Size    | Status   | Stored on        |
-   | 13 Oct, 02:00  | Full / Scheduled | 412 MiB | Verified | This server, S3  | Download ⋯
-```
-
-Settings tab, one form, one "Save settings" button at the bottom (mod+s):
-
-```
-  First-time setup (only before the first save)
-   Data directory [/srv/paymenter-backups-private]   Other public web folders
-  Schedule
-   ┌ Full backups ──────────────┐ ┌ Database backups ─────────────┐
-   │ Frequency  Off/Daily/Weekly│ │ Frequency Off/Hourly/Daily/W. │
-   │ On these days, At (billing │ │ Every N hours, At minute      │
-   │ window as clock times)     │ │ (or At, On these days)        │
-   │ Keep on this server  [7]   │ │ Keep on this server  [24]     │
-   └────────────────────────────┘ └───────────────────────────────┘
-   Time zone
-  Storage
-   Backup directory (placeholder = default)   legacy-folder hint
-   Space limit for backups (GiB)   Minimum free disk space (GiB)
-   [x] Keep backups on this server
-   [ ] Upload to S3
-       Endpoint, Region, Bucket, Folder in bucket, Path-style addressing
-       Access key ID, Secret access key, Session token ("Saved. Leave empty to keep.")
-       Keep full / database backups in S3: same number / last N / N days / all
-       [x] Encrypt backups in S3
-           Recovery key: (•) Generate a recovery key  ( ) Use my own passphrase
-           or, once a key exists: status line, Show / Download / I saved it,
-           Create a new recovery key, Discard this key
-       [ ] I understand backups in S3 won't be encrypted (only with encryption off)
-   Delete old backups automatically
-  Full backup requirements
-   Detected cron jobs and queue workers, each with status and fix line
-   Detected cache, session, queue and file storage drivers
-   [ ] No other program writes to Paymenter's database or files.
-  Before backups run
-   [ ] I won't update Paymenter, install extensions or run migrations while a backup runs.
-  Advanced (collapsed)
-   Binary paths (placeholder = detected), Time limits, Lock files (override), Folders
-                                                             [Save settings]
-```
+Absolute dates in facts, setup, history, Details and the delete confirmation use
+the viewer's time zone, with the zone written. UTC stays in the title and is the
+fallback when JavaScript is unavailable. Relative-time and S3 check notes remain.
 
 Help is a set of collapsible sections with ids for deep links:
 `backup-contents`, `how-backups-run`, `full-backups`, `encryption`,
@@ -118,7 +64,7 @@ Help is a set of collapsible sections with ids for deep links:
 
 Below 640 px the history table uses Filament's stacked-on-mobile layout. Type,
 Size and Stored on move to Details below 768 px (Stored on below 1024 px). The
-two schedule fieldsets stack below 768 px. Commands scroll inside their block.
+two schedule groups stack below 768 px. Commands scroll inside their block.
 
 ### Readiness
 
@@ -157,7 +103,9 @@ confirmed; earlier copies keep needing their own keys.
 
 Use Paymenter's native theme, typography, and components. Keep the hierarchy
 quiet and make Setup prominent, with each backup type's blockers and fixes
-shown inline. Use Filament semantic status colors:
+shown inline. Plain Filament keeps semantic status colors. The optional skin
+uses an explicit history status-to-tone map for its hex marks; unknown status
+words keep the native appearance. Colors alone never set a mark:
 
 | Meaning | Filament color | Used for |
 | --- | --- | --- |
@@ -167,9 +115,8 @@ shown inline. Use Filament semantic status colors:
 | Broken | danger | Failed backups and tasks, damaged archives, interrupted full backups |
 | Historical, off, unknown | gray | Deleted backups, cancelled tasks, types without a schedule |
 
-* Show overview facts in one description list.
-* Use status icons for independent setup conditions. Name each blocker and its
-  fix without a blocker count.
+* Show overview facts as shared label/value/action rows.
+* Name each setup blocker and its exact fix without a blocker count.
 * Render lists with `UnorderedList` and commands with `Text` in the theme's
   monospace font. Commands are copyable over HTTPS. At 375 px each command line
   stays whole (`white-space: pre`) and scrolls sideways (`overflow-x: auto`), so

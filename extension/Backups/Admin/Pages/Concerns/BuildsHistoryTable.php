@@ -8,12 +8,14 @@ use Filament\Infolists\Components\TextEntry;
 use Filament\Notifications\Notification;
 use Filament\Schemas\Components\Callout;
 use Filament\Schemas\Components\Grid;
+use Filament\Schemas\Components\Text;
 use Filament\Support\Enums\FontFamily;
 use Filament\Support\Enums\Size;
 use Filament\Tables\Columns\TextColumn;
 use Filament\Tables\Table;
 use Illuminate\Pagination\LengthAwarePaginator;
 use Paymenter\Extensions\Others\Backups\Messages;
+use Paymenter\Extensions\Others\Backups\Admin\Support\{HistorySearch, StatusTone};
 use Paymenter\Extensions\Others\Backups\Runtime;
 
 trait BuildsHistoryTable
@@ -106,13 +108,16 @@ trait BuildsHistoryTable
         $inS3 = static fn (array $record) => in_array($record['run']['remote'] ?? null, ['delivered', 'present'], true);
         return $table
             ->heading('Backup history')
-            ->records(function (int|string $page, int|string $recordsPerPage) {
-                $rows = $this->historyRows($this->showDeleted);
+            ->records(function (int|string $page, int|string $recordsPerPage, ?string $search) {
+                $rows = HistorySearch::filter($this->historyRows($this->showDeleted), $search);
                 $perPage = max(1, (int) $recordsPerPage);
                 $page = max(1, (int) $page);
                 return new LengthAwarePaginator(array_slice($rows, ($page - 1) * $perPage, $perPage), count($rows), $perPage, $page);
             })
-            ->paginated([10, 25, 50])
+            ->paginated([25, 50, 100])->defaultPaginationPageOption(25)
+            ->searchable()->searchPlaceholder('Search backup ID, type, status or location')
+            ->columnManagerTriggerAction(fn (Action $action) => $action->label('Columns')->button())
+            ->extraAttributes(['class' => 'beco-own-table'])
             // No polling while a dialog is open: it would re-render the dialog, including a shown recovery key.
             ->poll(fn () => $this->hasActiveWork() && !$this->mountedActions ? '5s' : null)
             // Below sm each row stacks, so long status details and both row actions get the full width.
@@ -123,15 +128,16 @@ trait BuildsHistoryTable
                     ->action(function () { $this->showDeleted = !$this->showDeleted; $this->resetPage(); }),
             ])
             ->columns([
-                TextColumn::make('created_at')->label(fn () => 'Created (' . $this->zone() . ')')
-                    ->formatStateUsing(fn ($state) => $this->time($state))
+                TextColumn::make('created_at')->label('Created')
+                    ->formatStateUsing(fn ($state) => $this->moment($state))
                     ->description(fn (array $record) => $this->ago($record['created_at'])),
                 // Below md these move to Details so the table stays readable.
-                TextColumn::make('type')->label('Type')->description(fn (array $record) => $record['origin'])->visibleFrom('md'),
-                TextColumn::make('size_label')->label('Size')->visibleFrom('md'),
+                TextColumn::make('type')->label('Type')->description(fn (array $record) => $record['origin'])->visibleFrom('md')->toggleable(),
+                TextColumn::make('size_label')->label('Size')->alignEnd()->extraCellAttributes(['class' => 'tabular-nums'])->visibleFrom('md')->toggleable(),
                 TextColumn::make('status_label')->label('Status')->badge()->color(fn (array $record) => $record['status_color'])
-                    ->description(fn (array $record) => $record['detail'])->wrap(),
-                TextColumn::make('location')->label('Stored on')->visibleFrom('lg'),
+                    ->extraCellAttributes(fn (array $record) => ['data-beco-tone' => StatusTone::forLabel($record['status_label'])])
+                    ->description(fn (array $record) => $record['detail'])->wrap()->toggleable(),
+                TextColumn::make('location')->label('Stored on')->visibleFrom('lg')->toggleable(),
             ])
             ->recordActions([
                 Action::make('download')->label('Download')->icon('ri-download-2-line')->button()->color('gray')
@@ -174,7 +180,7 @@ trait BuildsHistoryTable
                         ->visible(fn (array $record) => $isRun($record) && in_array($record['run']['status'], ['ready', 'damaged', 'delete-interrupted'], true)
                             && !$this->activeRequest('delete', $record['run_id']))
                         ->requiresConfirmation()
-                        ->modalHeading(fn (array $record) => 'Delete the ' . strtolower(Messages::mode($record['run']['mode'])) . ' from ' . $this->time($record['created_at']) . '?')
+                        ->modalHeading(fn (array $record) => new \Illuminate\Support\HtmlString('Delete the ' . e(strtolower(Messages::mode($record['run']['mode']))) . ' from ' . $this->moment($record['created_at']) . '?'))
                         ->modalDescription('This can\'t be undone.')
                         ->fillForm(fn (array $record) => ['location' => $this->defaultDeletionLocation($record)])
                         ->schema(fn (array $record) => [
@@ -196,9 +202,9 @@ trait BuildsHistoryTable
                 ])->label('More actions')->icon('ri-more-2-fill')->color('gray')->tooltip('More actions'),
             ])
             ->emptyStateIcon('ri-save-line')
-            ->emptyStateHeading('No backups yet')
-            ->emptyStateDescription(fn () => $this->setupOpen() && $this->nothingCanStart() ? 'Finish setup above to create your first backup.' : 'Create a backup or turn on a schedule.')
-            ->emptyStateActions([$this->backupAction('createFirstBackup')->visible(fn () => !$this->nothingCanStart())]);
+            ->emptyStateHeading(fn () => filled($this->getTableSearch()) ? 'No matching backups' : 'No backups yet')
+            ->emptyStateDescription(fn () => filled($this->getTableSearch()) ? 'Try another backup ID, type, status or location.' : ($this->setupOpen() && $this->nothingCanStart() ? 'Finish setup above to create your first backup.' : 'Create a backup or turn on a schedule.'))
+            ->emptyStateActions([$this->backupAction('createFirstBackup')->visible(fn () => !filled($this->getTableSearch()) && !$this->nothingCanStart())]);
     }
 
     private function pendingTaskLabel(array $record): string
@@ -274,14 +280,15 @@ trait BuildsHistoryTable
             TextEntry::make('d_id')->label('Backup ID')->state($run['run_id'])->fontFamily(FontFamily::Mono)
                 ->copyable(request()->isSecure())->copyMessage('Copied'),
             Grid::make(2)->schema([
-                TextEntry::make('d_created')->label('Created')->state($this->time($run['created_at'], true)),
+                TextEntry::make('d_created')->label('Created')->state($this->moment($run['created_at'])),
                 TextEntry::make('d_type')->label('Type')->state(Messages::mode($run['mode']) . ($record['origin'] ? ', ' . strtolower($record['origin']) : '')),
                 TextEntry::make('d_size')->label('Size')->state(Messages::bytes($run['size'])),
                 TextEntry::make('d_location')->label('Stored on')->state($record['location']),
                 TextEntry::make('d_remote_format')->label('S3 copy')->state($format . (($run['ciphertext_size'] ?? null) !== null ? ', ' . Messages::bytes($run['ciphertext_size']) : ''))->visible($format !== null),
-                TextEntry::make('d_verified')->label('Last verified')->state($run['verified_at'] ? $this->time($run['verified_at'], true) . ($run['verification_source'] === 'capture' ? ' (at creation)' : '') : 'Not verified yet'),
+                TextEntry::make('d_verified')->label('Last verified')->state($run['verified_at'] ? $this->moment($run['verified_at']) : 'Not verified yet')
+                    ->belowContent($run['verified_at'] && $run['verification_source'] === 'capture' ? [Text::make('At creation')] : []),
                 TextEntry::make('d_status')->label('Status')->state($record['status_label']),
-                TextEntry::make('d_retrieved')->label('Downloaded copy kept until')->state(fn () => $this->time($run['local_download_until'] ?? null, true))
+                TextEntry::make('d_retrieved')->label('Downloaded copy kept until')->state(fn () => $this->moment($run['local_download_until'] ?? null))
                     ->visible((bool) ($run['local_download_until'] ?? null)),
             ]),
             TextEntry::make('d_detail')->label('Details')->state($record['detail'])->visible((bool) $record['detail']),

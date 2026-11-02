@@ -11,12 +11,12 @@ trait BuildsHelp
         return 'Backups are encrypted with a recovery key before upload. Copies on this server and downloads aren\'t encrypted.';
     }
 
-    private function recoveryKeySentence(): string
+    private function recoveryKeySentence(): string|\Illuminate\Support\HtmlString
     {
         $key = $this->keyInfo();
         $pending = $this->pendingKeyShort();
         if ($this->keyState() === 'active' && $pending === null) {
-            return 'Recovery key ' . $key['short'] . ($key['created_at'] ?? null ? ', created ' . $this->time($key['created_at']) : '') . '.';
+            return new \Illuminate\Support\HtmlString('Recovery key ' . e($key['short']) . ($key['created_at'] ?? null ? ', created ' . $this->moment($key['created_at']) : '') . '.');
         }
         if ($this->keyState() === 'active') {
             return 'New recovery key ' . $pending . ' isn\'t confirmed yet. Uploads use key ' . $key['short'] . ' until you save the new key and confirm.';
