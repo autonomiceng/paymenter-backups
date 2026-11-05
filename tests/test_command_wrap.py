@@ -30,6 +30,7 @@ namespace Illuminate\Support {
 }
 namespace {
     function e($value) { return htmlspecialchars((string) $value, ENT_QUOTES, 'UTF-8'); }
+    function request() { return new class { public function isSecure() { return true; } }; }
     require $argv[1] . '/extension/Backups/Admin/Pages/Concerns/BuildsCommands.php';
     final class CommandPage { use \Paymenter\Extensions\Others\Backups\Admin\Pages\Concerns\BuildsCommands { command as public; } }
     $text = (new CommandPage)->command($argv[2]);
@@ -63,7 +64,7 @@ class CommandBlockWrap(unittest.TestCase):
 
     def test_command_block_keeps_words_whole_and_scrolls(self):
         rendered = self.render()
-        span = re.fullmatch(r'<span style="([^"]*)">(.*)</span>', rendered['html'], re.S)
+        span = re.fullmatch(r'<span style="([^"]*)">(.*?)</span><span class="backups-copy" aria-hidden="true"[^>]*>Copy</span>', rendered['html'], re.S)
         self.assertIsNotNone(span, rendered['html'])
         self.assertEqual(span[2], COMMAND.replace('&', '&amp;').replace('>', '&gt;'))
         attributes = rendered['attributes']

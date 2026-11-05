@@ -64,7 +64,8 @@ def run_status(item, active_runs):
 
 def run_entry(state, item, active_runs, envelope=None):
     status = run_status(item, active_runs)
-    entry = {"run_id": item["run_id"], "created_at": number(item.get("created_at")), "mode": code(item.get("mode")),
+    entry = {"run_id": item["run_id"], "created_at": number(item.get("created_at")),
+             "finished_at": number(item.get("finished_at")), "mode": code(item.get("mode")),
              "status": status, "phase": code(item.get("phase")), "error": code(item.get("error")),
              "recovery_error": code(item.get("recovery_error")), "size": None, "download": None,
              "local": False, "remote": "none", "delivery_error": code(item.get("delivery_error")),

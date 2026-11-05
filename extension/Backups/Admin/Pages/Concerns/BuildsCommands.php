@@ -88,17 +88,19 @@ trait BuildsCommands
         return $window ? 'Paymenter bills daily at ' . $window['time'] . ' ' . $window['timezone'] . '. Full backups won\'t start between ' . $window['start'] . ' and ' . $window['end'] . '.' : null;
     }
 
-    /** Exact escaped text, copyable over HTTPS with click, Enter or Space. */
+    /** One command in a box: exact escaped text, copyable over HTTPS with click, Enter or Space, which the Copy word says. */
     private function command(string|\Closure $command): Text
     {
         $plain = static fn () => $command instanceof \Closure ? (string) $command() : $command;
         // Keep meaningful whitespace inside its own span: preserving whitespace
         // on the native Text wrapper would also show the template's indentation.
-        return Text::make(static fn () => new \Illuminate\Support\HtmlString('<span style="white-space: pre">' . e($plain()) . '</span>'))->fontFamily(FontFamily::Mono)
+        // The Copy word is not copied: copyableState() sets the exact command.
+        $copy = '<span class="backups-copy" aria-hidden="true" style="margin-left: auto; padding-left: 1rem; font-family: var(--font-sans, inherit); font-weight: 600; color: var(--primary-600)">Copy</span>';
+        return Text::make(static fn () => new \Illuminate\Support\HtmlString('<span style="white-space: pre">' . e($plain()) . '</span>' . (request()->isSecure() ? $copy : '')))->fontFamily(FontFamily::Mono)
             ->copyable(fn () => request()->isSecure())->copyableState($plain)->copyMessage('Copied')
             ->tooltip(fn () => request()->isSecure() ? 'Copy' : null)
             // Keep command lines intact and scroll long paths inside the theme's input frame.
-            ->extraAttributes(['data-backups-command' => true, 'tabindex' => '0', 'class' => 'fi-input-wrp w-full px-4 py-2', 'style' => 'overflow-wrap: normal; overflow-x: auto; max-width: 100%']);
+            ->extraAttributes(['data-backups-command' => true, 'tabindex' => '0', 'class' => 'fi-input-wrp w-full px-4 py-2 backups-code', 'style' => 'display: flex; overflow-wrap: normal; overflow-x: auto; max-width: 100%']);
     }
 
     /** A bulleted list. Items are blocks so each bullet sits on the first line of a wrapped item. */

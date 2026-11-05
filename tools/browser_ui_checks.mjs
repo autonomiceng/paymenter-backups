@@ -334,9 +334,9 @@ try {
       for (const viewport of [{width:1440,height:1000}, {width:390,height:844}]) {
         const client = await login(metadata.admin_email, viewport); await load(client, 'Settings');
         assert.equal(await client.getByRole('button', {name: /^Help for /}).count(), 0, 'A field still opens a help dialog');
-        assert.equal(await client.getByLabel('Backup directory', {exact:true}).count(), 1);
+        assert.equal(await client.getByLabel('Backup folder', {exact:true}).count(), 1);
         const heading = client.getByRole('heading', {name:'Site password (HTTP Basic)',exact:true});
-        if (!await heading.isVisible()) await client.getByRole('heading', {name:'Full backup requirements',exact:true}).click();
+        if (!await heading.isVisible()) await client.getByRole('heading', {name:'Full backups need',exact:true}).click();
         await heading.waitFor(); const section = client.locator('.fi-section').filter({has:heading}).last();
         assert.match(await section.innerText(), /asks for a username and password[\s\S]*maintenance page/);
         await shot(client, viewport.width < 640 ? 'mobile-site-password-collapsed' : 'desktop-site-password-collapsed');
@@ -488,7 +488,7 @@ try {
       // The fixture address is plain http: no site password form is offered, and the reason is shown.
       await load(page, 'Settings');
       const heading = page.getByRole('heading', {name:'Site password (HTTP Basic)',exact:true});
-      if (!await heading.isVisible()) await page.getByRole('heading', {name:'Full backup requirements',exact:true}).click();
+      if (!await heading.isVisible()) await page.getByRole('heading', {name:'Full backups need',exact:true}).click();
       await heading.click();
       assert.match(await page.locator('main').innerText(), /Your App URL uses http:\/\/\. A site password can only be sent over https:\/\//);
       assert.equal(await page.locator('[id="siteAccessForm.username"]').count(), 0, 'Site password form offered over http');
@@ -628,7 +628,7 @@ try {
       while (await page.getByRole('button', {name: 'Verify', exact: true}).count()) {
         const row = page.locator('tr').filter({has: page.getByRole('button', {name: 'Verify', exact: true})}).first();
         const before = await requests(); await menu(page, row, 'Delete');
-        await livewire(page, () => page.locator('.fi-modal.fi-modal-open').getByRole('button', {name: 'Delete', exact: true}).click());
+        await livewire(page, () => page.locator('.fi-modal.fi-modal-open').getByRole('button', {name: 'Delete backup', exact: true}).click());
         const pending = await newRequest(before, 'delete'); await control('worker', ['--request-id', pending.request_id]);
         assert.equal((await requests()).find(r => r.request_id === pending.request_id).status, 'complete'); await load(page);
       }
@@ -636,9 +636,9 @@ try {
       while (await page.getByRole('link', {name: 'Download', exact: true}).count() > 1) {
         const link = page.getByRole('link', {name: 'Download', exact: true}).last(); const runId = (await link.getAttribute('href')).split('/').pop();
         const row = await findRow(page, runId); const before = await requests(); await menu(page, row, 'Delete');
-        const dialog = page.locator('.fi-modal.fi-modal-open'); const api = await localDeletionPreview(runId); assert.equal(api.refusal,null); assert(api.local_copy && !api.remote_copy); assert.equal(await dialog.getByRole('button',{name:'Delete',exact:true}).isVisible(),true); (report.localDeletionPreviews ||= []).push({runId,api,submitVisible:true,localSelected:await dialog.getByRole('radio',{name:'This server',exact:true}).count() ? await dialog.getByRole('radio',{name:'This server',exact:true}).isChecked() : null}); assert.match(await dialog.innerText(), /The backup file on this server|The backup in S3/); if (await dialog.getByRole('radio', {name:'This server',exact:true}).count()) assert.equal(await dialog.getByRole('radio', {name:'This server',exact:true}).isChecked(),true); await shot(page, 'delete-confirmation');
+        const dialog = page.locator('.fi-modal.fi-modal-open'); const api = await localDeletionPreview(runId); assert.equal(api.refusal,null); assert(api.local_copy && !api.remote_copy); assert.equal(await dialog.getByRole('button',{name:'Delete backup',exact:true}).isVisible(),true); (report.localDeletionPreviews ||= []).push({runId,api,submitVisible:true,localSelected:await dialog.getByRole('radio',{name:'This server',exact:true}).count() ? await dialog.getByRole('radio',{name:'This server',exact:true}).isChecked() : null}); assert.match(await dialog.innerText(), /The file on this server|The copy in S3/); if (await dialog.getByRole('radio', {name:'This server',exact:true}).count()) assert.equal(await dialog.getByRole('radio', {name:'This server',exact:true}).isChecked(),true); await shot(page, 'delete-confirmation');
         const archiveFile = await archivePath(runId);
-        await livewire(page, () => dialog.getByRole('button', {name: 'Delete', exact: true}).click());
+        await livewire(page, () => dialog.getByRole('button', {name: 'Delete backup', exact: true}).click());
         const pending = await newRequest(before, 'delete'); assert((await stat(archiveFile)).isFile(), 'Queued delete removed bytes during FPM request');
         await control('worker', ['--request-id', pending.request_id]); assert.equal((await requests()).find(r => r.request_id === pending.request_id).status, 'complete');
         await assert.rejects(stat(archiveFile), {code: 'ENOENT'}); await load(page);
@@ -646,7 +646,7 @@ try {
       const link = page.getByRole('link', {name: 'Download', exact: true}).first(); const runId = (await link.getAttribute('href')).split('/').pop();
       const before = await requests(); await menu(page, await findRow(page, runId), 'Delete');
       const dialog = page.locator('.fi-modal.fi-modal-open'); assert.match(await dialog.innerText(), /Can't delete|only usable backup|no other verified/i);
-      assert.equal(await dialog.getByRole('button', {name: 'Delete', exact: true}).count(), 0); assert.deepEqual(await requests(), before);
+      assert.equal(await dialog.getByRole('button', {name: 'Delete backup', exact: true}).count(), 0); assert.deepEqual(await requests(), before);
       await shot(page, 'last-good-protection'); await closeDialog(page);
     });
     await check('limited admin gets 403 for page and download', async () => {
@@ -683,11 +683,11 @@ try {
       // Execution-time refusal for undetected damage stays covered by the engine tests.
       before = await requests(); await menu(page, await findRow(page, goodId), 'Delete'); await shot(page, 'damaged-candidate-preview');
       const preview = page.locator('.fi-modal.fi-modal-open'); assert.match(await preview.innerText(), /Can't delete[\s\S]*only usable backup/);
-      assert.equal(await preview.getByRole('button', {name: 'Delete', exact: true}).count(), 0); await closeDialog(page);
+      assert.equal(await preview.getByRole('button', {name: 'Delete backup', exact: true}).count(), 0); await closeDialog(page);
       assert.deepEqual(await requests(), before); assert.deepEqual(await readFile(goodPath), bytes);
       const damaged = page.locator('tr').filter({has: page.getByRole('button', {name: 'Verify', exact: true})}).first();
       before = await requests(); await menu(page, damaged, 'Delete'); await shot(page, 'delete-damaged-preview');
-      await livewire(page, () => page.locator('.fi-modal.fi-modal-open').getByRole('button', {name: 'Delete', exact: true}).click());
+      await livewire(page, () => page.locator('.fi-modal.fi-modal-open').getByRole('button', {name: 'Delete backup', exact: true}).click());
       const cleanup = await newRequest(before, 'delete'); await control('worker', ['--request-id', cleanup.request_id]);
       assert.equal((await requests()).find(item => item.request_id === cleanup.request_id).status, 'complete'); assert.deepEqual(await readFile(goodPath), bytes);
       await load(page); assert.equal(await page.getByRole('link', {name: 'Download', exact: true}).count(), 1); await shot(page, 'good-survivor');
@@ -695,15 +695,15 @@ try {
     });
   }
   if (phase === 'lifecycle' || phase === 's3' || phase === 'all') {
-    await check('Delete old backups now queues cleanup and preserves the newest database backups', async () => {
+    await check('Run cleanup queues cleanup and preserves the newest database backups', async () => {
       await control('seed-runs', ['--count', '3']); await load(page, 'Settings');
       await field(page, 'retention_keep_database').fill('2'); await selectedOption(page, field(page, 'full_schedule'), 'off');
       await selectedOption(page, field(page, 'database_schedule'), 'off'); await save(page); await load(page);
-      const before = await requests(); const cleanup = page.getByRole('button', {name:'Delete old backups now',exact:true});
+      const before = await requests(); const cleanup = page.getByRole('button', {name:'Run cleanup',exact:true});
       assert.equal(await cleanup.isEnabled(), true);
       await livewire(page, () => cleanup.click());
       const dialog = page.locator('.fi-modal.fi-modal-open');
-      await dialog.getByRole('heading', {name:'Delete old backups now?',exact:true}).waitFor();
+      await dialog.getByRole('heading', {name:'Run cleanup?',exact:true}).waitFor();
       await livewire(page, () => dialog.getByRole('button', {name:'Delete old backups',exact:true}).click());
       const task = await newRequest(before, 'retention'); assert.equal(task.arguments.execute, true);
       await control('worker', ['--request-id', task.request_id]); await load(page);
@@ -746,7 +746,7 @@ try {
       const journal = JSON.parse(await readFile(path.join(metadata.private_root, 'runs', captureId, 'journal.json'), 'utf8'));
       assert.equal(journal.mode, 'database-online'); assert.equal(journal.local_complete, false); assert.equal(journal.remote_delivered, true);
       if (phase === 'all' || phase === 's3') assert.equal(journal.remote?.format, 'openpgp-symmetric-aes256-seipd-v1', 'All workflows must exercise encrypted S3 delivery');
-      const remote = (await findRow(page, captureId)).getByRole('button', {name:'Download from S3',exact:true});
+      const remote = (await findRow(page, captureId)).getByRole('button', {name:'Get from S3',exact:true});
       assert.equal(await remote.isVisible(), true, 'S3-only capture lacks retrieval action');
       before = await requests(); await livewire(page, () => remote.click());
       const retrieve = await newRequest(before, 'retrieve'); const runId = retrieve.arguments.run_id; assert.equal(runId, captureId);
@@ -765,7 +765,7 @@ try {
       await selectedOption(page, field(page, 's3_retention_policy_database'), 'count');
       await visible(field(page, 's3_retention_keep_database'), true); await field(page, 's3_retention_keep_database').fill('1');
       await save(page); await load(page);
-      before = await requests(); await livewire(page, () => page.getByRole('button', {name:'Delete old backups now',exact:true}).click());
+      before = await requests(); await livewire(page, () => page.getByRole('button', {name:'Run cleanup',exact:true}).click());
       await livewire(page, () => page.locator('.fi-modal.fi-modal-open').getByRole('button', {name:'Delete old backups',exact:true}).click());
       const retention = await newRequest(before, 'retention'); await control('worker', ['--request-id', retention.request_id]); await load(page);
       const retentionCompleted = (await requests()).find(item => item.request_id === retention.request_id);

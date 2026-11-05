@@ -237,9 +237,9 @@ echo (string) \Paymenter\Extensions\Others\Backups\Messages::schedulerWaitLine('
         result = subprocess.run([PHP, '-r', script, str(ROOT / 'extension/Backups/Messages.php')],
                                 capture_output=True, timeout=10)
         self.assertEqual(result.returncode, 0, result.stdout.decode() + result.stderr.decode())
-        self.assertIn("Waiting for Paymenter's scheduled tasks.", result.stdout.decode())
+        self.assertIn("Waits for the cron job.", result.stdout.decode())
         self.assertIn('href="/admin/backups?x=&quot;&amp;"', result.stdout.decode())
-        self.assertIn('>the Backups tab</a>', result.stdout.decode())
+        self.assertIn('>See Checks</a>', result.stdout.decode())
 
     def test_engine_field_reaches_the_save_form_error(self):
         result = subprocess.run([PHP, str(ROOT / 'tests/integration/save_refusal_checks.php')],

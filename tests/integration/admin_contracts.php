@@ -810,7 +810,7 @@ PHP;
             testCheck($retrieve instanceof Filament\Actions\Action, 'Native S3 retrieval action is missing');
             $retrieve->record(['__key' => 'test-remote-only', 'key' => 'test-remote-only', 'kind' => 'run',
                               'run_id' => 'test-remote-only', 'run' => ['status' => 'ready', 'download' => 'retrieve']]);
-            testCheck($retrieve->isVisible() && str_contains($retrieve->toHtml(), 'Download from S3'),
+            testCheck($retrieve->isVisible() && str_contains($retrieve->toHtml(), 'Get from S3'),
                         'Remote-only verified history has no visible S3 retrieval action');
             testCheck(Filament\Support\Facades\FilamentView::hasSpaMode($class::getUrl()), 'Download disabled ordinary admin SPA navigation');
         } finally {

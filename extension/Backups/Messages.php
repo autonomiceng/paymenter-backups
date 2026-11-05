@@ -4,16 +4,30 @@ namespace Paymenter\Extensions\Others\Backups;
 /** Every administrator-facing sentence for engine codes, statuses, tasks and setup items. */
 final class Messages
 {
-    public const INSTALLATION_TITLE = 'Installation';
-    public const INSTALLATION_CHECKS = ['tools' => 'Tools', 'scheduler' => 'Scheduler', 'observer' => 'Independent observer',
-        'private_state' => 'Private state', 'local_storage' => 'Local storage', 'offsite' => 'Offsite storage'];
+    public const INSTALLATION_TITLE = 'Checks';
+    public const INSTALLATION_CHECKS = ['tools' => 'Tools', 'scheduler' => 'Cron job', 'observer' => 'Health check',
+        'private_state' => 'Data folder', 'local_storage' => 'This server', 'offsite' => 'S3'];
+
+    /** @return array{0: string, 1: string, 2: ?string} State word, Filament color and the next step, if any. */
+    public static function installationState(string $key, array $check): array
+    {
+        [$status, $color] = match ($check['state']) { 'ready' => ['OK', 'success'], 'pending' => ['Off', 'gray'], default => ['Missing', 'danger'] };
+        $next = $check['code'] ? self::error($check['code']) : ($key === 'offsite' && $check['state'] === 'pending'
+            ? 'Optional. Set up S3 for a copy off this server.' : null);
+        return [$status, $color, $next];
+    }
 
     public static function installationCheck(string $key, array $check): string
     {
-        $status = match ($check['state']) { 'ready' => 'Ready', 'pending' => 'Pending', default => 'Missing' };
-        $next = $check['code'] ? self::error($check['code']) : ($key === 'offsite' && $check['state'] === 'pending'
-            ? 'Local backups can be scheduled. Set up S3 and test storage when you want an offsite copy.' : null);
+        [$status, , $next] = self::installationState($key, $check);
         return self::INSTALLATION_CHECKS[$key] . ': ' . $status . ($next ? '. ' . $next : '');
+    }
+
+    /** @return array{0: string, 1: ?string} An error's first sentence, what happened, then the rest, what to do. */
+    public static function reasonAndNext(?string $code): array
+    {
+        $text = self::error($code);
+        return preg_match('/^(.+?[.!?])\s+(\S.*)$/s', $text, $parts) ? [$parts[1], $parts[2]] : [$text, null];
     }
 
     public static function incidentMail(string $key, string $reason): array
@@ -60,7 +74,7 @@ final class Messages
         'schedule-field-invalid' => 'A schedule setting is invalid. Review the schedule settings and try again.',
         'schedule-kind-required' => 'Name the schedule: add --kind full or --kind database.',
         'scheduler-missing' => 'No cron job runs Paymenter\'s scheduler. Add the cron job shown on the Backups tab.',
-        'job-lock-busy' => 'A Paymenter scheduled or queue job was still running. The backup will try again next minute.',
+        'job-lock-busy' => 'A Paymenter cron job was still running. Tries again next minute.',
         'job-coordination-unverified' => 'Backups could not verify Paymenter job locks. The backup will try again next minute.',
         'job-locks-unverified' => 'A Paymenter cron job or queue worker has no lock file. The Backups tab shows which one and the line to use instead.',
         'job-uncoordinated' => 'A Paymenter cron job has no lock file. Replace it with the line shown on the Backups tab.',
@@ -152,7 +166,7 @@ final class Messages
         'maintenance-probe-https-required' => 'A site password needs an https:// App URL.',
         'maintenance-probe-http-saved' => 'App URL now uses http://, so the saved site password can\'t be sent. Full backups can\'t start. Remove the password or change App URL to https://.',
         'maintenance-probe-origin-invalid' => 'App URL isn\'t a valid web address. Fix it in Paymenter\'s settings.',
-        's3-credentials-required' => 'Add S3 keys in Settings, Storage, to upload backups.',
+        's3-credentials-required' => 'Add S3 keys in Settings, S3, to upload backups.',
 
         // Encryption
         'archive-encryption-tool-missing' => 'GnuPG (gpg) wasn\'t found. Install it, or set its path under Advanced, Binary paths.',
@@ -182,10 +196,10 @@ final class Messages
         'remote-format-unsupported' => 'This S3 backup uses a format this version doesn\'t read.',
         'remote-descriptor-invalid' => 'The S3 backup\'s description file is invalid or doesn\'t match the backup.',
         'delivery-ciphertext-unavailable' => 'The encrypted file for this unfinished upload changed or is missing. Trying again can\'t recreate it. Ask your server administrator to put back the exact file or resolve the upload.',
-        'legacy-plaintext-delivery-blocked' => 'This unfinished upload isn\'t encrypted, and your settings require encryption. Trying again can\'t change that. Ask your server administrator to resolve the upload, or allow unencrypted uploads in Settings, Storage.',
+        'legacy-plaintext-delivery-blocked' => 'This unfinished upload isn\'t encrypted, and your settings require encryption. Trying again can\'t change that. Ask your server administrator to resolve the upload, or allow unencrypted uploads in Settings, S3.',
 
         // Capture
-        'maintenance-probe-failed' => 'Full backup stopped: App URL didn\'t show Paymenter\'s maintenance page (HTTP 503). Check App URL and any redirect, proxy or CDN. If the site asks for a password, add it under Site password.',
+        'maintenance-probe-failed' => 'The site didn\'t show Paymenter\'s maintenance page (HTTP 503) at App URL, so the full backup stopped. If your web server asks for a username and password, add them as the site password. Otherwise check App URL and any redirect, proxy or CDN in front of the site.',
         'maintenance-unsafe' => 'Full backups need Paymenter\'s standard maintenance mode, with no secret bypass URL or redirect. Run php artisan up, then try again.',
         'maintenance-driver-unsupported' => 'Full backups need file-based maintenance mode. Set APP_MAINTENANCE_DRIVER=file in .env.',
         'extension-files-changed' => 'Extension files changed during the copy. Keep extension files unchanged during backup. Scheduled backups try again at the next full backup time.',
@@ -208,8 +222,8 @@ final class Messages
         'recovery-failed' => 'Backups could not confirm that the site reopened safely. Run paymenter_backups recover and follow the recovery steps in Help.',
         'unresolved-run-not-found' => 'That backup has no unresolved recovery record. Run paymenter_backups recover to see the records that still need attention.',
         'dump-empty' => 'The database export was empty. Check the database name and user in Paymenter\'s .env.',
-        'disk-reserve-exceeded' => 'Disk is below the minimum free space. Free space, or lower the minimum in Settings, Storage.',
-        'local-byte-budget-exceeded' => 'Backup space is full. Delete old backups or raise the limit in Settings, Storage.',
+        'disk-reserve-exceeded' => 'The disk has less free space than Keep free. Free some space, or lower Keep free in Settings, This server.',
+        'local-byte-budget-exceeded' => 'Backup space is full. Delete old backups, or raise Space limit in Settings, This server.',
         'destination-unsafe' => 'The backup directory must be dedicated to this site, writable by the site user, and outside Paymenter and any public web folder.',
         'destination-inside-docroot' => 'The backup directory is inside a public web folder. Choose a folder that no site serves.',
         'private-root-move-refused' => 'The data directory can\'t be changed after setup. It holds your backup history and saved keys.',
@@ -286,7 +300,7 @@ final class Messages
         's3-manifest-readback-mismatch' => 'The S3 copy didn\'t match after upload. The copy on this server is kept. Upload again.',
         's3-pointer-readback-mismatch' => 'The latest-backup record in S3 didn\'t match after upload. The copy on this server is kept. Check that record, then upload again.',
         's3-pointer-invalid' => 'The latest-backup record in S3 doesn\'t match this site\'s backups. The copy on this server is kept. Check the S3 bucket, folder and that record, then upload again.',
-        's3-delivery-failed' => 'Upload to S3 failed. The copy on this server is kept. Check S3 settings and keys, then upload again.',
+        's3-delivery-failed' => 'Upload to S3 failed. Check the S3 keys in Settings, then retry.',
         'destination-probe-failed' => 'The storage test couldn\'t write and read back a test file.',
         'destination-readback-mismatch' => 'The storage test read back different data than it wrote.',
         'destination-test-failed' => 'Couldn\'t write to the bucket. Check endpoint, region, bucket name and key permissions.',
@@ -389,7 +403,7 @@ final class Messages
     {
         $url = htmlspecialchars($url, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
         return new \Illuminate\Support\HtmlString(
-            'Waiting for Paymenter\'s scheduled tasks. Set them up on <a class="underline" href="' . $url . '">the Backups tab</a>.'
+            'Waits for the cron job. <a class="underline" href="' . $url . '">See Checks</a>'
         );
     }
 
@@ -446,7 +460,7 @@ final class Messages
         if (!$run['local'] && $run['remote'] === 'missing') { return ['S3 copy missing', 'warning']; }
         return match ($run['status']) {
             'ready' => match ($run['download']) {
-                'ready' => ['Verified', 'success'],
+                'ready' => $run['remote'] === 'failed' ? ['Upload failed', 'warning'] : ['Verified', 'success'],
                 'retrieve' => ['In S3', 'info'],
                 'verify' => ['Not verified', 'warning'],
                 default => match ($run['remote']) {
@@ -476,13 +490,17 @@ final class Messages
         }
         return match ($run['status']) {
             'ready' => match ($run['download']) {
-                'ready' => $run['remote'] === 'failed' ? self::error($run['delivery_error'] ?: 's3-delivery-failed') : null,
-                'retrieve' => 'Only in S3. Use Download from S3.',
-                'verify' => 'Verify before downloading.',
+                'ready' => match (true) {
+                    $run['remote'] === 'failed' => 'Kept on this server. ' . (self::reasonAndNext($run['delivery_error'] ?: 's3-delivery-failed')[1] ?? self::error($run['delivery_error'])),
+                    ($run['uploads'] ?? false) && $run['remote'] === 'none' => 'Not uploaded yet.',
+                    default => null,
+                },
+                'retrieve' => 'Only in S3. Use Get from S3, then Download.',
+                'verify' => 'Verify it before you download.',
                 default => self::error($run['download']),
             },
             'damaged' => self::error($run['verification_error']),
-            'running' => 'Backup running. The site stays online.',
+            'running' => ($run['mode'] === 'full-quiesced' ? 'Copying the database and files.' : 'Copying the database.') . ' The site stays online.',
             'failed' => self::error($run['error'] ?: 'capture-failed'),
             'attention' => (($run['maintenance'] ?? false) ? 'Site in maintenance mode. ' : 'Site online. ') . self::error($run['recovery_error'] ?: 'maintenance-ownership-uncertain'),
             'interrupted' => 'The backup stopped before it finished.',
@@ -494,7 +512,7 @@ final class Messages
     }
 
     /** Where a backup's copies are, in a few words. */
-    public static function location(array $run, bool $uploadsToS3): string
+    public static function location(array $run): string
     {
         if (!$run['local']) {
             return $run['status'] === 'deleted' ? '—' : match ($run['remote']) {
@@ -504,10 +522,9 @@ final class Messages
         }
         return match ($run['remote']) {
             'delivered', 'present' => 'This server, S3',
-            'failed' => 'This server (S3 upload failed)',
             'missing' => 'This server (S3 copy missing)', 'damaged' => 'This server (S3 copy damaged)',
             'scope-changed' => 'This server, old S3 folder', 'unbound' => 'This server, S3 (unchecked)',
-            default => $uploadsToS3 ? 'This server (not uploaded yet)' : 'This server',
+            default => 'This server',
         };
     }
 
@@ -524,7 +541,7 @@ final class Messages
 
     public const TASKS = [
         'run' => 'Create backup', 'verify' => 'Verify', 'deliver' => 'Upload to S3',
-        'retrieve' => 'Download from S3', 'retention' => 'Delete old backups', 'destination-test' => 'Test storage', 'delete' => 'Delete backup',
+        'retrieve' => 'Get from S3', 'retention' => 'Run cleanup', 'destination-test' => 'Test storage', 'delete' => 'Delete backup',
     ];
 
     public static function task(array $request): string
@@ -537,8 +554,8 @@ final class Messages
 
     public static function taskProgress(string $action, string $status): string
     {
-        $label = match ($action) { 'verify' => 'Verification', 'deliver' => 'Upload to S3', 'retrieve' => 'Download from S3', 'delete' => 'Deletion', 'retention' => 'Cleanup', default => self::TASKS[$action] ?? 'Task' };
-        return $label . match ($status) { 'pending' => ' queued.', 'deferred' => ' retrying soon.', 'launching' => ' starting.', default => ' in progress.' };
+        $label = match ($action) { 'verify' => 'Verification', 'deliver' => 'Upload to S3', 'retrieve' => 'Get from S3', 'delete' => 'Deletion', 'retention' => 'Cleanup', default => self::TASKS[$action] ?? 'Task' };
+        return $label . match ($status) { 'pending' => ' queued.', 'deferred' => ' waiting.', 'launching' => ' starting.', default => ' in progress.' };
     }
 
     /** [label, Filament color] for a task row. */
@@ -546,7 +563,7 @@ final class Messages
     {
         return match ($status) {
             'pending' => ['Queued', 'info'],
-            'deferred' => ['Retrying soon', 'warning'],
+            'deferred' => ['Waiting', 'info'],
             'launching' => ['Starting', 'info'],
             'running' => ['Running', 'info'],
             'complete' => ['Done', 'success'],
@@ -557,6 +574,19 @@ final class Messages
             'satisfied' => ['Covered', 'gray'],
             default => ['Not recognized', 'gray'],
         };
+    }
+
+    /** "41 seconds", "3 minutes 12 seconds", "2 hours 5 minutes": the two largest parts. */
+    public static function duration(float $seconds): string
+    {
+        $left = max(0, (int) round($seconds));
+        $parts = [];
+        foreach (['day' => 86400, 'hour' => 3600, 'minute' => 60, 'second' => 1] as $unit => $size) {
+            $count = intdiv($left, $size);
+            $left %= $size;
+            if ($count > 0 || ($unit === 'second' && $parts === [])) { $parts[] = $count . ' ' . $unit . ($count === 1 ? '' : 's'); }
+        }
+        return implode(' ', array_slice($parts, 0, 2));
     }
 
     public static function bytes(?int $bytes): string
@@ -683,15 +713,15 @@ final class Messages
             case 'full-host-assumptions-acknowledgement-required':
                 return $item('Confirm nothing else writes to Paymenter', 'Cron jobs and workers are paused during a full backup. Other programs aren\'t.', [], $settings('Confirm in Settings', 'full-backup-requirements'));
             case 'no-concurrent-ddl-acknowledgement-required':
-                return $item('Confirm updates don\'t run during backups', 'A Paymenter update or migration during a backup can leave the copy unusable.', [], $settings('Confirm in Settings', 'before-backups-run'));
+                return $item('Confirm updates don\'t run during backups', 'A Paymenter update or migration during a backup can leave the copy unusable.', [], $settings('Confirm in Settings', 'full-backup-requirements'));
             case 's3-credentials-required':
-                return $item('Add your S3 access keys', 'Backups can\'t upload to S3 without keys.', [], $settings('Go to Storage settings', 'storage'));
+                return $item('Add your S3 access keys', 'Backups can\'t upload to S3 without keys.', [], $settings('Go to S3 settings', 's3'));
             case 'remote-configuration-required':
-                return $item('Enter your S3 bucket', 'Backups can\'t upload to S3 without a bucket name.', [], $settings('Go to Storage settings', 'storage'));
+                return $item('Enter your S3 bucket', 'Backups can\'t upload to S3 without a bucket name.', [], $settings('Go to S3 settings', 's3'));
             case 'plaintext-offsite-acknowledgement-required':
-                return $item('Confirm unencrypted uploads', 'Encryption is off, so backups in S3 won\'t be encrypted. Confirm this, or turn encryption on.', [], $settings('Go to Storage settings', 'storage'));
+                return $item('Confirm unencrypted uploads', 'Encryption is off, so backups in S3 won\'t be encrypted. Confirm this, or turn encryption on.', [], $settings('Go to S3 settings', 's3'));
             case 'archive-key-required':
-                return $item('Create a recovery key', 'Backups in S3 are encrypted with a recovery key. Save settings with "Encrypt backups in S3" on to create one.', [], $settings('Go to Storage settings', 'storage'));
+                return $item('Create a recovery key', 'Backups in S3 are encrypted with a recovery key. Save settings with "Encrypt backups in S3" on to create one.', [], $settings('Go to S3 settings', 's3'));
             case 'archive-key-save-required':
                 return $item('Save your recovery key', 'Uploads to S3 start after you save it outside this server and confirm. Without it, encrypted backups can\'t be restored if this server is lost.', [], ['kind' => 'recovery-key', 'label' => '', 'target' => null]);
             case 'archive-encryption-tool-missing':

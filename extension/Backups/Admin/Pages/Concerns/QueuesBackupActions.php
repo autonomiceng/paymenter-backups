@@ -79,15 +79,14 @@ trait QueuesBackupActions
             return implode('. ', array_keys($titles)) . '.';
         };
         $base = [
-            'full-quiesced' => 'Database and application files. Runtime logs, cache and sessions are omitted. The site stays online.',
-            'database-online' => 'Database only. The site stays online.',
+            'full-quiesced' => 'The database and all Paymenter files, except logs, cache and sessions. The site stays online.',
+            'database-online' => 'The database only. The site stays online.',
         ];
         return Action::make($name)->label('Create backup')->icon('ri-add-line')
-            ->modalHeading('Create backup')
-            ->modalDescription('Runs in the background. You can leave this page.')
+            ->modalHeading('Create backup')->modalWidth('lg')
             ->fillForm(fn () => ['mode' => $this->preferredMode()])
             ->schema([
-                Radio::make('mode')->label('Type')->required()->live()
+                Radio::make('mode')->hiddenLabel()->required()->live()
                     ->options(Messages::MODES)
                     ->descriptions(fn () => array_map(fn ($mode) => $base[$mode] . ($this->blockers($mode) !== [] ? ' Not ready yet.' : ''), array_combine(array_keys($base), array_keys($base))))
                     // A type that cannot start is shown but not selectable; the callout says why.
@@ -96,8 +95,8 @@ trait QueuesBackupActions
                     ->description($blockedText)
                     ->actions([$this->link($name . 'Setup', 'See what\'s needed', static::getUrl(['tab' => 'backups']) . '#setup')])
                     ->visible(fn () => $this->blockers('full-quiesced') !== [] || $this->blockers('database-online') !== []),
-                Text::make(fn (Get $get) => $this->createInfoLine($get('mode')))->color('gray')
-                    ->visible(fn (Get $get) => !$this->nothingCanStart() && $this->createInfoLine($get('mode')) !== null),
+                Text::make(fn (Get $get) => ($this->createInfoLine($get('mode')) ?? $this->startLine()) . ' You can leave this page.')->color('gray')
+                    ->visible(fn () => !$this->nothingCanStart()),
             ])
             ->modalSubmitAction(fn (Action $action) => $this->nothingCanStart() ? false : $action)
             ->modalSubmitActionLabel('Create backup')
@@ -151,14 +150,14 @@ trait QueuesBackupActions
     public function applyRetentionAction(): Action
     {
         $count = static fn (int $n) => $n . ($n === 1 ? ' backup' : ' backups');
-        return Action::make('applyRetention')->label('Delete old backups now')->color('gray')
+        return Action::make('applyRetention')->label('Run cleanup')->color('gray')
             ->disabled(fn () => array_sum($this->retentionPending()) === 0)
             ->tooltip(fn () => array_sum($this->retentionPending()) === 0 ? 'Nothing to delete' : null)
-            ->requiresConfirmation()->modalHeading('Delete old backups now?')
+            ->requiresConfirmation()->modalHeading('Run cleanup?')
             ->modalDescription(function () use ($count) {
                 $pending = $this->retentionPending();
                 $places = array_filter([$pending['local'] ? $count($pending['local']) . ' on this server' : null, $pending['s3'] ? $count($pending['s3']) . ' in S3' : null]);
-                return 'Deletes ' . implode(' and ', $places) . ' beyond your numbers to keep. The newest verified backup in each place is always kept.';
+                return 'Deletes ' . implode(' and ', $places) . ' past Keep. The newest verified backup in each place is always kept.';
             })
             ->modalSubmitActionLabel('Delete old backups')
             ->action(function () {
