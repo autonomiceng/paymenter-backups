@@ -193,8 +193,6 @@ trait BuildsSettingsForm
                         ->extraFieldWrapperAttributes(['id' => 'before-backups-run']),
                 ])),
 
-                $this->sitePasswordSection(),
-
                 Sheet::section('Advanced')->id('advanced')->description('Binary paths, time limits and folders. Most sites don\'t need to change these.')
                     ->collapsible()->collapsed()->schema(Sheet::contentRows([
                         Group::make()->columns(['default' => 1, 'md' => 2])->schema([
