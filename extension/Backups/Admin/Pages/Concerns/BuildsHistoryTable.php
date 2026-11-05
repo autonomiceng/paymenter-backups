@@ -407,7 +407,7 @@ trait BuildsHistoryTable
             ]))->visible($run['status'] === 'ready' || $run['status'] === 'damaged'),
             Sheet::section('Restore')->schema(Sheet::contentRows([
                 Text::make('Restore into a new folder and a new database, never over the running site. As the site user, this copies the backup out:'),
-                $this->command('paymenter_backups export ' . $run['run_id'] . ' --output /new/folder'),
+                $this->command('paymenter_backups export ' . self::shell($run['run_id']) . ' --output /new/folder'),
                 Actions::make([$this->link('detailsRestoreSteps', 'Full restore steps', static::getUrl(['tab' => 'help']) . '#restoring')]),
             ]))->visible($run['status'] === 'ready'),
             Sheet::section('Keep')->schema(fn () => $this->keepRows($run))->visible($run['status'] === 'ready'),

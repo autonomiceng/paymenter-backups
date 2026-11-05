@@ -610,7 +610,7 @@ PHP;
             && $record->settings()->where('key', 'settings_version')->value('value') === $initialRows['settings_version'],
             'Folder-only repair was blocked by an implicit default or published another damaged row/version');
         $record->settings()->where('key', 'retention_keep_full')->update(['value' => $initialRows['retention_keep_full']]);
-        $record->settings()->where('key', 's3_encryption')->update(['value' => '1']);
+        $record->settings()->where('key', 's3_encryption')->update(['value' => '1']); // gitleaks:allow -- next line is a boolean setting name, not a credential
         $record->settings()->where('key', 'plaintext_offsite_acknowledged')->update(['value' => '1']);
         $record->settings()->where('key', 'extra_docroots')->update(['value' => 'invalid-json']);
         $consentRepair = submitSettings($class, ['extra_docroots' => implode("\n", json_decode($initialRows['extra_docroots'], true)), 'confirm_public_directories' => true]);

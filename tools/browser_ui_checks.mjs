@@ -117,7 +117,7 @@ async function save(page) {
   // Browser input min/required checks are also covered by native attributes. Disable only
   // the HTML gate here to exercise server validation and prove persistence stays atomic.
   await page.locator('form').evaluateAll(forms => forms.forEach(form => form.noValidate = true));
-  return livewire(page, () => page.getByRole('button', {name: /^Save (settings|and finish setup)$/}).click());
+  return livewire(page, () => page.getByRole('button', {name: /^Save( and finish setup)?$/}).click());
 }
 async function snapshot() {
   const {stdout} = await run('mariadb', ['--no-defaults', '--socket=' + metadata.socket, '-uroot', '-N', '-B', 'paymenter_fixture', '-e',
@@ -226,11 +226,13 @@ try {
       const text = await setup.innerText();
       assert.doesNotMatch(text, /need \d+ (items|changes)/, 'Setup counts items instead of naming them');
       assert.match(text, /schedule:run|\/usr\/local\/bin\/php \/opt\/paymenter\/scheduler\.php/, 'Setup does not give the cron line');
-      const groups = setup.locator('fieldset');
-      const full = groups.filter({has:page.locator('legend').filter({hasText:/^Full backups$/})});
-      const database = groups.filter({has:page.locator('legend').filter({hasText:/^Database backups$/})});
-      assert.equal(await full.count(), 1); assert.equal(await database.count(), 1);
-      assert.match(await database.innerText(), /Ready|Not ready/);
+      const full = setup.locator('.backups-group-title').filter({hasText: /^Full backups only$/});
+      assert.equal(await full.count(), 1);
+      // Only blocked types get Setup groups; a ready database type lives in Checks.
+      const checks = page.locator('[id="checks"] .domains-trace-item');
+      const database = checks.filter({has: page.locator('.domains-trace-title').filter({hasText: /^Database backups$/})});
+      assert.equal(await database.count(), 1);
+      assert.match(await database.locator('.domains-trace-word').innerText(), /^(OK|Off|Waiting|Not ready)$/);
       assert.doesNotMatch(await database.innerText(), /maintenance|queue worker|No other program|Redis/i, 'Database readiness leaked full-only requirements');
       assert.equal(await page.getByRole('link', {name: 'Paymenter scheduler setup', exact: true}).count(), 0, 'External scheduler link returned');
       await shot(page, 'setup-readiness');
@@ -271,7 +273,7 @@ try {
     });
     await check('one Save and independent per-type schedule choices stay in browser state', async () => {
       await load(page, 'Settings'); const before = await snapshot();
-      assert.equal(await page.getByRole('button', {name: /^Save (settings|and finish setup)$/}).count(), 1);
+      assert.equal(await page.getByRole('button', {name: /^Save( and finish setup)?$/}).count(), 1);
       await selectedOption(page, field(page, 'full_schedule'), 'weekly');
       await visible(field(page, 'full_time'), true);
       await selectedOption(page, field(page, 'database_schedule'), 'hourly');
@@ -280,7 +282,7 @@ try {
       await selectedOption(page, field(page, 'database_every_hours'), '2'); await field(page, 'database_minute').fill('15');
       assert.equal(await field(page, 'full_schedule').inputValue(), 'weekly');
       await uploadToS3(page);
-      assert.equal(await page.getByRole('button', {name: /^Save (settings|and finish setup)$/}).count(), 1, 'S3 fields added another Save');
+      assert.equal(await page.getByRole('button', {name: /^Save( and finish setup)?$/}).count(), 1, 'S3 fields added another Save');
       await visible(page.locator('[id="s3KeysForm.access_key"]'), true);
       await unchanged(before); await shot(page, 'per-type-schedule-choices');
       await load(page, 'Settings');

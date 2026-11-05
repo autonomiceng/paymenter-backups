@@ -333,7 +333,7 @@ if ($mode === 'upload') {
         $values = $installationRows[$label] ?? [];
         // This server shows only when it needs attention.
         check(count($values) === 1 || ($key === 'local_storage' && $values === []), 'Installation check not rendered exactly once: ' . $label);
-        check($values === [] || in_array($values[0], ['OK', 'Off', 'Missing'], true), 'Installation check has no state word: ' . $label);
+        check($values === [] || in_array($values[0], $key === 'scheduler' ? ['OK', 'Off', 'Missing', 'Not running'] : ['OK', 'Off', 'Missing'], true), 'Installation check has no state word: ' . $label);
     }
     check($after['local_byte_budget'] === $before['local_byte_budget'], 'unchanged byte limit rewritten');
     // Space settings are entered in GiB and stored in bytes.

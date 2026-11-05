@@ -2,6 +2,7 @@
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -58,7 +59,20 @@ const { chromium } = require(process.env.PAYMENTER_BACKUPS_PLAYWRIGHT || 'playwr
 '''
 
 
+@unittest.skipUnless(os.environ.get('PHP_BINARY') and os.environ.get('PAYMENTER_TEST_APP'),
+                     'PHP_BINARY and PAYMENTER_TEST_APP required')
 class PollTimes(unittest.TestCase):
+    def setUp(self):
+        node = shutil.which(os.environ.get('NODE_BINARY', 'node'))
+        if not node:
+            self.skipTest('Node required')
+        probe = subprocess.run([node, '-e',
+                                "const p = require(process.env.PAYMENTER_BACKUPS_PLAYWRIGHT || 'playwright'); "
+                                "if (!require('node:fs').existsSync(p.chromium.executablePath())) process.exit(1)"],
+                               capture_output=True, text=True)
+        if probe.returncode:
+            self.skipTest('Playwright and its Chromium browser required')
+
     def test_staff_times_survive_repeated_poll_morphs_and_changed_instants(self):
         app = Path(os.environ['PAYMENTER_TEST_APP'])
         with tempfile.TemporaryDirectory(prefix='panel-times-') as scratch:
