@@ -77,8 +77,11 @@ class HistoryStates(unittest.TestCase):
         keep = details['sections']['Keep']
         self.assertEqual(keep['This server'][0], 'Deleted after 24 newer database backups')
         self.assertEqual(keep['S3'][0], 'Deleted 90 days after it was made')
-        _, _, details = self.render([both], details='both', settings=dict(automatic_retention=False))
-        self.assertEqual(details['sections']['Keep']['Cleanup'][0], 'Kept until you run cleanup')
+        _, _, details = self.render([s3_only], details='away', settings=dict(automatic_retention=False, s3_retention_policy_database='keep-all'))
+        keep = details['sections']['Keep']
+        self.assertEqual(list(keep), ['Cleanup', 'S3'])
+        self.assertEqual(keep['Cleanup'][0], 'Automatic cleanup is off')
+        self.assertEqual(keep['S3'][0], 'Kept. Cleanup never deletes it')
 
     def test_waiting_request_names_the_reason(self):
         waiting = dict(request_id='r1', action='run', status='deferred', error='job-lock-busy', created_at=2000.0,

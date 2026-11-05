@@ -313,13 +313,14 @@ trait BuildsHistoryTable
         $kind = $run['mode'] === 'full-quiesced' ? 'full' : 'database';
         $type = strtolower(Messages::type($run['mode']));
         $below = static fn (?string $text) => $text === null ? [] : [Text::make($text)];
+        $rows = [];
+        // Off only stops the automatic run: Run cleanup still applies each place's rule below.
         if (!($values['automatic_retention'] ?? true)) {
-            return [Sheet::row(TextEntry::make('d_keep')->label('Cleanup')->state('Kept until you run cleanup')
-                ->belowContent($below('Automatic cleanup is off. Or delete it yourself from the row menu.')),
-                [$this->link('detailsKeep', 'Change', $this->settingsUrl('cleanup'))])];
+            $rows[] = Sheet::row(TextEntry::make('d_keep')->label('Cleanup')->state('Automatic cleanup is off')
+                ->belowContent($below('The rules below apply only when you run cleanup.')),
+                [$this->link('detailsKeep', 'Change', $this->settingsUrl('cleanup'))]);
         }
         $local = (int) ($values['retention_keep_' . $kind] ?? 0);
-        $rows = [];
         if ($run['local']) {
             $rows[] = Sheet::row(TextEntry::make('d_keep_local')->label('This server')->state('Deleted after ' . $local . ' newer ' . $type . ' backups')
                 ->belowContent($below('Or delete it yourself from the row menu.')),
