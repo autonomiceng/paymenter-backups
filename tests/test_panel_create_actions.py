@@ -11,7 +11,7 @@ require $argv[1].'/vendor/autoload.php';
 Illuminate\Container\Container::setInstance(new Illuminate\Container\Container);
 require $argv[2].'/extension/Backups/Messages.php';
 require $argv[2].'/extension/Backups/Admin/Pages/Concerns/QueuesBackupActions.php';
-$page = new class {
+$page = new class extends Livewire\Component {
     use Paymenter\Extensions\Others\Backups\Admin\Pages\Concerns\QueuesBackupActions;
     public bool $blocked = false;
     public static function getUrl(array $parameters = []): string { return '/admin/backups'; }
@@ -23,7 +23,7 @@ $page = new class {
 $result = [];
 foreach ([false, true] as $blocked) {
     $page->blocked = $blocked;
-    $action = $page->createBackupAction();
+    $action = $page->createBackupAction()->livewire($page);
     $result[] = array_values(array_map(fn ($button) => $button->getLabel(), $action->getModalFooterActions()));
 }
 echo json_encode($result, JSON_THROW_ON_ERROR);
