@@ -14,7 +14,6 @@ use Filament\Schemas\Components\Flex;
 use Filament\Schemas\Components\Form;
 use Filament\Schemas\Components\Grid;
 use Filament\Schemas\Components\Group;
-use Filament\Schemas\Components\Icon;
 use Filament\Schemas\Components\Text;
 use Filament\Schemas\Components\Utilities\Get;
 use Filament\Schemas\Schema;
@@ -223,8 +222,9 @@ trait BuildsSettingsForm
                         ]),
                     ])),
             ], [
-                Sheet::section('Full backup checks')->id('full-backup-checks')
-                    ->schema(Sheet::contentRows(fn () => $this->detectedChecks())),
+                Sheet::section('Full backup diagnostics')->id('full-backup-checks')
+                    ->description('Detected commands and storage settings, for debugging full backups.')
+                    ->schema(fn () => $this->detectedChecks()),
             ])])->livewireSubmitHandler('saveSettings')->footer([
                 Actions::make([Action::make('saveSettings')->label(fn () => $this->initialized() ? 'Save' : 'Save and finish setup')->submit('saveSettings')->keyBindings(['mod+s'])]),
             ]),
@@ -252,21 +252,20 @@ trait BuildsSettingsForm
     {
         $jobs = $this->checks()['jobs'] ?? null;
         $rows = [];
-        $row = function (string $tone, string $title, array $lines = []) {
-            $icon = match ($tone) { 'success' => 'ri-checkbox-circle-line', 'gray' => 'ri-question-line', default => 'ri-error-warning-line' };
-            return Flex::make([Icon::make($icon)->color($tone)->grow(false), Group::make([Text::make($title), ...$lines])->grow()->extraAttributes(['style' => 'min-width: 0'])])->verticallyAlignStart();
-        };
+        $row = static fn (string $tone, string $label, string $value, string $detail, array $lines = []) => [
+            'label' => $label, 'color' => $tone, 'value' => $value, 'detail' => $detail, 'content' => $lines,
+        ];
         if (!is_array($jobs)) {
-            $rows[] = $row('gray', 'Cron jobs haven\'t been checked yet. The check runs from Paymenter\'s cron job.');
+            $rows[] = $row('gray', 'Cron jobs', 'Not checked', 'Cron jobs haven\'t been checked yet. The check runs from Paymenter\'s cron job.');
         } else {
             $user = $jobs['crontab_user'] ?? 'the site user';
             $state = $jobs['state'] ?? 'unknown';
             if ($state === 'failed') {
-                $rows[] = $row('warning', 'Couldn\'t read the crontab or systemd units for ' . $user . '.');
+                $rows[] = $row('warning', 'Cron jobs', 'Failed', 'Couldn\'t read the crontab or systemd units for ' . $user . '.');
             } elseif ($state === 'stale') {
-                $rows[] = $row('gray', 'Cron jobs were last checked ' . $this->ago($jobs['checked_at'] ?? null) . '. The check refreshes while Paymenter\'s cron job runs.');
+                $rows[] = $row('gray', 'Cron jobs', 'Stale', 'Cron jobs were last checked ' . $this->ago($jobs['checked_at'] ?? null) . '. The check refreshes while Paymenter\'s cron job runs.');
             } elseif ($state !== 'ok') {
-                $rows[] = $row('gray', 'Cron jobs haven\'t been checked yet. The check runs from Paymenter\'s cron job.');
+                $rows[] = $row('gray', 'Cron jobs', 'Not checked', 'Cron jobs haven\'t been checked yet. The check runs from Paymenter\'s cron job.');
             }
             $hasScheduler = false;
             foreach ($jobs['items'] ?? [] as $job) {
@@ -278,16 +277,16 @@ trait BuildsSettingsForm
                 $fix = $kind === 'Queue worker' ? $this->queueLine() : $this->schedulerLine();
                 $systemd = ($job['source'] ?? null) === 'systemd' && filled($job['label'] ?? null);
                 $rows[] = match ($job['coordination'] ?? null) {
-                    'coordinated' => $row('success', $kind . $source . ' uses lock file ' . ($job['lock'] ?? '') . '.', $command),
-                    'continuous' => $row('warning', $kind . $source . ' runs all the time, so full backups can\'t pause it.', [...$command,
+                    'coordinated' => $row('success', $kind . $source, 'OK', 'Uses lock file ' . ($job['lock'] ?? '') . '.', $command),
+                    'continuous' => $row('warning', $kind . $source, 'Needs setup', 'Runs all the time, so full backups can\'t pause it.', [...$command,
                         ...($systemd ? [Text::make('Stop and disable it:'), $this->command('systemctl disable --now ' . $job['label'])] : []),
                         Text::make('Run queue jobs from cron instead:'), $this->command($this->queueLine())]),
-                    'unsupported' => $row('warning', $kind . $source . ': Backups can\'t read this line.', [...$command, Text::make('Replace it with:'), $this->command($fix)]),
-                    default => $row('warning', $kind . $source . ' has no lock file.', [...$command, Text::make('Replace it with:'), $this->command($fix)]),
+                    'unsupported' => $row('warning', $kind . $source, 'Needs setup', 'Backups can\'t read this line.', [...$command, Text::make('Replace it with:'), $this->command($fix)]),
+                    default => $row('warning', $kind . $source, 'Needs setup', 'Has no lock file.', [...$command, Text::make('Replace it with:'), $this->command($fix)]),
                 };
             }
             if (!$hasScheduler && in_array($jobs['state'] ?? null, ['ok', 'stale'], true)) {
-                $rows[] = $row('warning', 'No cron job runs Paymenter\'s scheduler. Add this line to the crontab of ' . $user . ':', [$this->command($this->schedulerLine())]);
+                $rows[] = $row('warning', 'Cron job', 'Missing', 'No cron job runs Paymenter\'s scheduler. Add this line to the crontab of ' . $user . ':', [$this->command($this->schedulerLine())]);
             }
         }
         foreach ($this->checks()['stores'] ?? [] as $store) {
@@ -295,12 +294,12 @@ trait BuildsSettingsForm
             $name = Messages::STORES[$store['kind'] ?? ''] ?? 'Storage';
             $driver = (string) ($store['driver'] ?? 'not detected');
             $rows[] = match ($store['supported'] ?? null) {
-                true => $row('success', $name . ': ' . $driver),
-                false => $row('warning', $name . ': ' . $driver . '. Full backups need local storage. Change it in .env:',
+                true => $row('success', $name, 'OK', $driver),
+                false => $row('warning', $name, 'Needs setup', $driver . '. Full backups need local storage. Change it in .env:',
                     filled($store['env'] ?? null) && filled($store['suggest'] ?? null) ? [$this->command($store['env'] . '=' . $store['suggest'])] : []),
-                default => $row('gray', $name . ': ' . $driver . '. Backups can\'t tell whether this keeps data outside Paymenter.'),
+                default => $row('gray', $name, 'Unknown', $driver . '. Backups can\'t tell whether this keeps data outside Paymenter.'),
             };
         }
-        return $rows;
+        return [Sheet::steps($rows, false)];
     }
 }

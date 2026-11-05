@@ -13,6 +13,16 @@ from paymenter_backups.common import State
 ROOT = Path(__file__).resolve().parents[1]
 PHP = r'''
 require $argv[1].'/vendor/autoload.php';
+function view($name, $data = []) {
+    return new class($name, $data) {
+        public function __construct(private string $name, private array $data) {}
+        public function render() {
+            $compiler = new Illuminate\View\Compilers\BladeCompiler(new Illuminate\Filesystem\Filesystem, sys_get_temp_dir());
+            $compiled = $compiler->compileString(file_get_contents($GLOBALS['argv'][2].'/extension/Backups/resources/views/'.str_replace('.', '/', substr($this->name, 9)).'.blade.php'));
+            extract($this->data); ob_start(); eval('?>'.$compiled); return ob_get_clean();
+        }
+    };
+}
 $app = new Illuminate\Foundation\Application($argv[1]);
 Illuminate\Support\Facades\Facade::setFacadeApplication($app);
 $app->bind(Filament\Support\Contracts\LoadingIndicator::class, Filament\Support\View\DefaultLoadingIndicator::class);
@@ -27,7 +37,7 @@ spl_autoload_register(function ($class) use ($argv) {
 });
 $class = Paymenter\Extensions\Others\Backups\Admin\Pages\Backups::class;
 $page = new class extends Paymenter\Extensions\Others\Backups\Admin\Pages\Backups {
-    public static function getUrl(array $parameters = [], bool $isAbsolute = true, ?string $panel = null, ?Illuminate\Database\Eloquent\Model $tenant = null, bool $shouldGuessMissingParameters = false, ?string $configuration = null): string { return '/admin/backups'; }
+    public static function getUrl(array $parameters = [], bool $isAbsolute = true, ?string $panel = null, ?Illuminate\Database\Eloquent\Model $tenant = null, bool $shouldGuessMissingParameters = false, ?string $configuration = null): string { return '/admin/backups'.($parameters ? '?'.http_build_query($parameters) : ''); }
     public static function downloadUrl(string $runId): string { return '/admin/backups/download/'.$runId; }
 };
 $input = json_decode(file_get_contents('php://stdin'), true);
@@ -68,6 +78,24 @@ if ($input['case'] === 'health') {
         'url' => isset($actions['detailsDownload']) ? $actions['detailsDownload']->getUrl() : null,
         // Inline decoration avoids requiring an icon-pack provider in this isolated fixture.
         'html' => $action->icon(new Illuminate\Support\HtmlString('<svg aria-hidden="true"></svg>'))->toHtml()]);
+} elseif ($input['case'] === 'checks') {
+    $settings = $page->settingsForm(Filament\Schemas\Schema::make($page));
+    $sections = [];
+    foreach (flatten($settings->getComponents()) as $component) {
+        if ($component instanceof Filament\Schemas\Components\Section && $component->getId() === 'full-backup-checks') $sections[] = ['title' => $component->getHeading(), 'description' => $component->getDescription()];
+    }
+    $serialize = function ($components) {
+        return array_map(function ($component) {
+            $html = [];
+            foreach (flatten([$component]) as $child) {
+                if ($child instanceof Filament\Schemas\Components\Html) $html[] = (string) $child->getContent();
+                if ($child instanceof Filament\Schemas\Components\Text) $html[] = '<div class="command" '.new Illuminate\View\ComponentAttributeBag($child->getExtraAttributes()).'>'.e((string) $child->getContent()).'</div>';
+            }
+            return ['attributes' => $component->getExtraAttributes(), 'children' => array_map(fn ($child) => $child->getExtraAttributes(), $component->getChildComponents()), 'html' => $html];
+        }, $components);
+    };
+    $backups = Filament\Schemas\Schema::make($page)->components($call('checksSection'))->getComponents()[0];
+    echo json_encode(['sections' => $sections, 'backups' => $serialize($backups->getChildComponents()), 'diagnostics' => $serialize(Filament\Schemas\Schema::make($page)->components($call('detectedChecks'))->getComponents())]);
 } elseif ($input['case'] === 'settings') {
     $rows = Filament\Schemas\Schema::make($page)->components($call('detectedChecks'))->getComponents();
     $command = null;
@@ -139,3 +167,41 @@ class ClickReview(unittest.TestCase):
         self.assertIn('min-width: 0', result['command'].get('style', ''))
         self.assertEqual(len(result['columns']), 2)
         self.assertTrue(all('align-content: start' in col.get('style', '') for col in result['columns']))
+
+    def test_diagnostics_share_readiness_rows_and_link_from_full_backups(self):
+        command = '/usr/bin/flock -n /fixture/scheduler.lock /usr/bin/php /app/artisan schedule:run'
+        result = self.page('checks', checks={'jobs': {'state': 'ok', 'items': [
+            {'kind': 'scheduler', 'coordination': 'coordinated', 'command': command, 'lock': '/fixture/scheduler.lock'}]},
+            'stores': [{'kind': 'cache', 'driver': 'redis', 'supported': False, 'env': 'CACHE_STORE', 'suggest': 'file'}]})
+        self.assertEqual(result['sections'], [{'title': 'Full backup diagnostics', 'description':
+            'Detected commands and storage settings, for debugging full backups.'}])
+        for panel in ('backups', 'diagnostics'):
+            self.assertEqual(len(result[panel]), 1)
+            rows = result[panel][0]
+            self.assertEqual(rows['attributes']['role'], 'list')
+            self.assertIn('backups-checks', rows['attributes']['class'].split())
+            self.assertTrue(rows['children'])
+            self.assertTrue(all(row.get('role') == 'listitem' for row in rows['children']))
+            self.assertTrue(all('domains-trace-item' in row['class'].split() for row in rows['children']))
+        readiness = ''.join(result['backups'][0]['html'])
+        self.assertIn('Full backups', readiness)
+        self.assertIn('Waiting', readiness)
+        self.assertIn('href="/admin/backups?tab=settings#full-backup-checks"', readiness)
+        diagnostics = ''.join(result['diagnostics'][0]['html'])
+        self.assertIn('domains-trace-title', diagnostics)
+        self.assertIn('domains-trace-word', diagnostics)
+        self.assertIn('OK', diagnostics)
+        self.assertIn('Needs setup', diagnostics)
+        self.assertIn(command, diagnostics)
+        self.assertIn('CACHE_STORE=file', diagnostics)
+        self.assertIn('overflow-x: auto', diagnostics)
+        self.assertIn('tabindex="0"', diagnostics)
+
+    def test_diagnostics_keep_unknown_failed_and_stale_inventory_visible(self):
+        for jobs, expected in ((None, 'Not checked'), ({'state': 'failed'}, 'Failed'),
+                               ({'state': 'stale', 'items': []}, 'Stale')):
+            with self.subTest(jobs=jobs):
+                result = self.page('checks', checks={'jobs': jobs})
+                html = ''.join(result['diagnostics'][0]['html'])
+                self.assertIn('domains-trace-word', html)
+                self.assertIn(expected, html)
