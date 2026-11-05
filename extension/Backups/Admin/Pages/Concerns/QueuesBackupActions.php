@@ -101,7 +101,6 @@ trait QueuesBackupActions
             ])
             ->modalSubmitAction(fn (Action $action) => $this->nothingCanStart() ? false : $action)
             ->modalSubmitActionLabel('Create backup')
-            ->modalFooterActions(fn (Action $action): array => array_filter([$action->getModalCancelAction(), $action->getModalSubmitAction()]))
             ->modalCancelActionLabel(fn () => $this->nothingCanStart() ? 'Close' : 'Cancel')
             ->action(function (array $data, Action $action) {
                 $mode = in_array($data['mode'] ?? null, array_keys(self::KINDS), true) ? $data['mode'] : null;
