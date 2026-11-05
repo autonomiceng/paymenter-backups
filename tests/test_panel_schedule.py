@@ -9,6 +9,8 @@ import subprocess
 import tempfile
 import unittest
 
+from panel_browser import browser_node
+
 ROOT = Path(__file__).resolve().parents[1]
 PHP = r'''
 require $argv[1].'/vendor/autoload.php';
@@ -28,21 +30,23 @@ require $argv[2].'/extension/Backups/Admin/Pages/Concerns/BuildsPageContent.php'
 $page = new class {
     use Paymenter\Extensions\Others\Backups\Admin\Pages\Concerns\BuildsPageContent { scheduleSentence as public sentence; }
     private const KINDS = ['full-quiesced' => 'full', 'database-online' => 'database'];
-    public int $next = 1794106800; // Sunday Nov 8, 03:00 UTC; Saturday in Pacific.
+    public ?int $next = 1794106800; // Sunday Nov 8, 03:00 UTC; Saturday in Pacific.
     public string $frequency = 'weekly';
     private function formValues() { return ['full_schedule' => $this->frequency, 'full_weekdays' => [6], 'full_time' => '03:00', 'schedule_timezone' => 'UTC', 'database_schedule' => 'daily', 'database_time' => '02:00']; }
-    private function configuration() { return ['schedules' => ['full' => ['frequency' => $this->frequency, 'next_at' => $this->next], 'database' => ['frequency' => 'daily', 'next_at' => $this->next - 3600]]]; }
+    private function configuration() { return ['schedules' => ['full' => ['frequency' => $this->frequency, 'next_at' => $this->next], 'database' => ['frequency' => 'daily', 'next_at' => $this->next === null ? null : $this->next - 3600]]]; }
 };
 $rows = [];
 foreach ([1794106800, 1783220400] as $next) {
     $page->next = $next; $rows[] = (string) $page->sentence('full-quiesced').'|'.(string) $page->sentence('database-online');
 }
 $page->frequency = 'off'; $rows[] = (string) $page->sentence('full-quiesced');
+$page->frequency = 'weekly'; $page->next = null;
+$rows[] = (string) $page->sentence('full-quiesced').'|'.(string) $page->sentence('database-online');
 echo json_encode($rows, JSON_THROW_ON_ERROR);
 '''
 JS = r'''
 const fs = require('node:fs');
-const {chromium} = require(process.env.PAYMENTER_BACKUPS_PLAYWRIGHT);
+const {chromium} = require(process.env.PAYMENTER_BACKUPS_PLAYWRIGHT || 'playwright');
 (async () => {
  const input = JSON.parse(fs.readFileSync(0, 'utf8'));
  const browser = await chromium.launch({headless: true});
@@ -75,9 +79,14 @@ const {chromium} = require(process.env.PAYMENTER_BACKUPS_PLAYWRIGHT);
 @unittest.skipUnless(os.environ.get('PHP_BINARY') and os.environ.get('PAYMENTER_TEST_APP'),
                      'PHP_BINARY and PAYMENTER_TEST_APP required')
 class StaffSchedule(unittest.TestCase):
+    def setUp(self):
+        self.node = browser_node(self)
+
     def test_first_load_and_poll_localize_schedule_weekday_and_time(self):
         app = Path(os.environ['PAYMENTER_TEST_APP'])
         with tempfile.TemporaryDirectory(prefix='panel-schedule-') as scratch:
             rendered = subprocess.run([os.environ['PHP_BINARY'], '-r', PHP, str(app), str(ROOT), scratch], capture_output=True, text=True, check=True)
-            result = subprocess.run([os.environ['NODE_BINARY'], '-e', JS], input=json.dumps({'rows': json.loads(rendered.stdout), 'livewire': str(app/'vendor/livewire/livewire/dist/livewire.js')}), capture_output=True, text=True)
+            rows = json.loads(rendered.stdout)
+            self.assertEqual(rows[3], 'Weekly, Sunday at 03:00 UTC|Daily at 02:00 UTC')
+            result = subprocess.run([self.node, '-e', JS], input=json.dumps({'rows': rows, 'livewire': str(app/'vendor/livewire/livewire/dist/livewire.js')}), capture_output=True, text=True)
             self.assertEqual(result.returncode, 0, result.stdout+result.stderr)

@@ -5,6 +5,8 @@ from pathlib import Path
 import subprocess
 import unittest
 
+from panel_browser import browser_node
+
 ROOT = Path(__file__).resolve().parents[1]
 PROGRAM = r'''
 require $argv[1].'/vendor/autoload.php';
@@ -31,6 +33,9 @@ echo json_encode($result, JSON_THROW_ON_ERROR);
 
 
 class CreateActions(unittest.TestCase):
+    def setUp(self):
+        self.node = browser_node(self)
+
     @unittest.skipUnless(os.environ.get('PHP_BINARY') and os.environ.get('PAYMENTER_TEST_APP'),
                          'PHP_BINARY and PAYMENTER_TEST_APP required')
     def test_cancel_precedes_create_and_blocked_dialog_has_only_close(self):
@@ -43,7 +48,7 @@ class CreateActions(unittest.TestCase):
         self.assertEqual(rows[1]['labels'], ['Close'])
         app = Path(os.environ['PAYMENTER_TEST_APP'])
         script = r'''const fs = require('node:fs');
-const { chromium } = require(process.env.PAYMENTER_BACKUPS_PLAYWRIGHT);
+const { chromium } = require(process.env.PAYMENTER_BACKUPS_PLAYWRIGHT || 'playwright');
 (async () => {
  const input = JSON.parse(fs.readFileSync(0, 'utf8'));
  const browser = await chromium.launch({headless:true});
@@ -58,7 +63,7 @@ const { chromium } = require(process.env.PAYMENTER_BACKUPS_PLAYWRIGHT);
   if (Math.abs(create.right-(footer.x+footer.width))>1) throw new Error('Create must be right aligned');
  } finally { await browser.close(); }
 })().catch(e=>{console.error(e);process.exitCode=1;});'''
-        browser = subprocess.run([os.environ['NODE_BINARY'], '-e', script],
+        browser = subprocess.run([self.node, '-e', script],
             input=json.dumps({'row': rows[0], 'css': str(app/'vendor/filament/filament/dist/theme.css')}),
             capture_output=True, text=True)
         self.assertEqual(browser.returncode, 0, browser.stdout+browser.stderr)
