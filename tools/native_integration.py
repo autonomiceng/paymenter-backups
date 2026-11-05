@@ -280,6 +280,27 @@ def legacy_configuration_fixture(work, app, php, checker):
     return legacy_configuration_check(legacy_cli)
 
 
+def panel_regressions(app, php, work):
+    """Run installed-framework tests with explicit prerequisites; skips fail native CI."""
+    node = shutil.which(os.environ.get('NODE_BINARY') or 'node')
+    if not node:
+        raise RuntimeError('Node required for native panel regressions')
+    environment = child_environment()
+    environment.update(PHP_BINARY=str(php), PAYMENTER_TEST_APP=str(app), TMPDIR=str(work),
+                       NODE_BINARY=str(pathlib.Path(node).resolve()))
+    for key in ('PAYMENTER_BACKUPS_PLAYWRIGHT', 'PLAYWRIGHT_BROWSERS_PATH', 'XDG_CACHE_HOME', 'HOME'):
+        if os.environ.get(key):
+            environment[key] = os.environ[key]
+    program = ("import sys, unittest; "
+               "suite = unittest.defaultTestLoader.discover('tests', pattern='test_panel_*.py'); "
+               "result = unittest.TextTestRunner(verbosity=2).run(suite); "
+               "sys.exit(not result.wasSuccessful() or not result.testsRun or bool(result.skipped))")
+    result = subprocess.run([sys.executable, '-W', 'error::ResourceWarning', '-c', program],
+                            cwd=ROOT, env=environment, capture_output=True, text=True, timeout=60)
+    if result.returncode:
+        raise RuntimeError('native panel regressions failed or skipped:\n' + result.stdout + result.stderr)
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--release', required=True)
@@ -325,6 +346,7 @@ def main():
     try:
         app = fetch(work / 'app', args.archive or workbase / 'paymenter-v1.5.9.tar.gz')
         original = hashes(app)
+        panel_regressions(app, args.php, work)
         private = work / 'private'
         private.mkdir(mode=0o700)
         with maria(work) as (sock, db_port):

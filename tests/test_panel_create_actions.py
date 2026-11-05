@@ -31,6 +31,8 @@ echo json_encode($result, JSON_THROW_ON_ERROR);
 
 
 class CreateActions(unittest.TestCase):
+    @unittest.skipUnless(os.environ.get('PHP_BINARY') and os.environ.get('PAYMENTER_TEST_APP'),
+                         'PHP_BINARY and PAYMENTER_TEST_APP required')
     def test_cancel_precedes_create_and_blocked_dialog_has_only_close(self):
         result = subprocess.run(
             [os.environ['PHP_BINARY'], '-r', PROGRAM,

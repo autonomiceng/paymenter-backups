@@ -19,7 +19,7 @@ private root and fake credentials created by `tools/native_integration.py` or
 | First v2 save | Save on 0.3 rows | `Settings::fromLegacy()` view; writes `settings_version=2` and every v2 key | `tests/integration/settings_migration.php` against the shared vectors |
 | Malformed rows | Save | Defaults written and named in a warning; malformed guard JSON refused | Native `check`; contract test `repair` |
 | S3 keys | Storage, Upload to S3, key fields | `Runtime::saveCredentials()` after settings and `init`; `{"clear":true}` to remove | Native `check`: incomplete pair writes nothing, canaries cleared, encrypted at rest, settings-only save keeps keys, removal keeps the site password; contract test `credentials`, `modals` |
-| Site password | Full backup requirements, Site password (HTTP Basic) | Same Save; origin taken on the server from Paymenter's https URL | Native `check`: browser origin ignored, http refused, removal over http, unreadable store kept; contract test `basic_states` |
+| Historical site password | Not rendered in Settings; compatibility path only | Existing credentials retain server-bound origin validation and removal | Native `check`: section absent, browser origin ignored, http refused, removal over http, unreadable store kept; contract test `basic_states` |
 | Recovery key | Storage and Setup: Show, Download, I saved it, Create a new recovery key, Discard | `Runtime::encryptionKey()`, `revealRecoveryKey($fingerprint)` (render only; full granted identity), `recoveryKeyUrl()` | Native `check`: Save offers the key, key only in the dialog partial, confirmation needs the checkbox and activates the key; isolated page/bridge tests refuse replaced or disappeared granted keys |
 | Native lifecycle | Extensions editor | No Backups setting fields; enable/disable and uninstall stay native | Forged settings Save preserves configuration, version, credentials and private bytes |
 | Public folder repair | Backups settings | Damaged list requires complete replacement and explicit confirmation | Ordinary Save and invalid replacement preserve state; confirmed nonempty and empty lists repair; concurrent changes refuse |
@@ -77,9 +77,9 @@ storage or encryption choice would hang a valid client-only interaction.
   saves a file, "I saved it" needs the checkbox; afterwards Setup no longer
   lists the key. Replace a pending key while its confirmation is open: the
   original confirmation must refuse and never activate the replacement.
-* Full backup requirements: detected jobs with their current and replacement
-  lines, detected drivers with the `.env` change, the confirmation, and the
-  collapsed Site password section.
+* Full backup checks and Full backups need: detected jobs with their current and
+  replacement lines, detected drivers with the `.env` change, and confirmations.
+  Settings has no Site password section.
 * Create backup: one callout naming what's missing, one info line, disabled
   types not selectable, "See what's needed" opens Setup. Missing, unconfirmed
   or invalid archive keys and an unavailable encryption tool explain why

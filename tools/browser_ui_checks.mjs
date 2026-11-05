@@ -117,7 +117,7 @@ async function save(page) {
   // Browser input min/required checks are also covered by native attributes. Disable only
   // the HTML gate here to exercise server validation and prove persistence stays atomic.
   await page.locator('form').evaluateAll(forms => forms.forEach(form => form.noValidate = true));
-  return livewire(page, () => page.getByRole('button', {name: /^Save (settings|and finish setup)$/}).click());
+  return livewire(page, () => page.getByRole('button', {name: /^Save( and finish setup)?$/}).click());
 }
 async function snapshot() {
   const {stdout} = await run('mariadb', ['--no-defaults', '--socket=' + metadata.socket, '-uroot', '-N', '-B', 'paymenter_fixture', '-e',
@@ -226,11 +226,13 @@ try {
       const text = await setup.innerText();
       assert.doesNotMatch(text, /need \d+ (items|changes)/, 'Setup counts items instead of naming them');
       assert.match(text, /schedule:run|\/usr\/local\/bin\/php \/opt\/paymenter\/scheduler\.php/, 'Setup does not give the cron line');
-      const groups = setup.locator('fieldset');
-      const full = groups.filter({has:page.locator('legend').filter({hasText:/^Full backups$/})});
-      const database = groups.filter({has:page.locator('legend').filter({hasText:/^Database backups$/})});
-      assert.equal(await full.count(), 1); assert.equal(await database.count(), 1);
-      assert.match(await database.innerText(), /Ready|Not ready/);
+      const full = setup.locator('.backups-group-title').filter({hasText: /^Full backups only$/});
+      assert.equal(await full.count(), 1);
+      // Only blocked types get Setup groups; a ready database type lives in Checks.
+      const checks = page.locator('[id="checks"] .domains-trace-item');
+      const database = checks.filter({has: page.locator('.domains-trace-title').filter({hasText: /^Database backups$/})});
+      assert.equal(await database.count(), 1);
+      assert.match(await database.locator('.domains-trace-word').innerText(), /^(OK|Off|Waiting|Not ready)$/);
       assert.doesNotMatch(await database.innerText(), /maintenance|queue worker|No other program|Redis/i, 'Database readiness leaked full-only requirements');
       assert.equal(await page.getByRole('link', {name: 'Paymenter scheduler setup', exact: true}).count(), 0, 'External scheduler link returned');
       await shot(page, 'setup-readiness');
@@ -271,7 +273,7 @@ try {
     });
     await check('one Save and independent per-type schedule choices stay in browser state', async () => {
       await load(page, 'Settings'); const before = await snapshot();
-      assert.equal(await page.getByRole('button', {name: /^Save (settings|and finish setup)$/}).count(), 1);
+      assert.equal(await page.getByRole('button', {name: /^Save( and finish setup)?$/}).count(), 1);
       await selectedOption(page, field(page, 'full_schedule'), 'weekly');
       await visible(field(page, 'full_time'), true);
       await selectedOption(page, field(page, 'database_schedule'), 'hourly');
@@ -280,7 +282,7 @@ try {
       await selectedOption(page, field(page, 'database_every_hours'), '2'); await field(page, 'database_minute').fill('15');
       assert.equal(await field(page, 'full_schedule').inputValue(), 'weekly');
       await uploadToS3(page);
-      assert.equal(await page.getByRole('button', {name: /^Save (settings|and finish setup)$/}).count(), 1, 'S3 fields added another Save');
+      assert.equal(await page.getByRole('button', {name: /^Save( and finish setup)?$/}).count(), 1, 'S3 fields added another Save');
       await visible(page.locator('[id="s3KeysForm.access_key"]'), true);
       await unchanged(before); await shot(page, 'per-type-schedule-choices');
       await load(page, 'Settings');
@@ -330,19 +332,14 @@ try {
       assert(functionText && functionText.includes('"$@"'), 'Shell function argument quoting missing');
       return {commands: await commands.count(), clipboardVerified: true, actualKeyboardAndClickCopy: true};
     });
-    await check('help stays inline and site password purpose stays readable', async () => {
+    await check('help stays inline and the retired site password section stays absent', async () => {
       for (const viewport of [{width:1440,height:1000}, {width:390,height:844}]) {
         const client = await login(metadata.admin_email, viewport); await load(client, 'Settings');
         assert.equal(await client.getByRole('button', {name: /^Help for /}).count(), 0, 'A field still opens a help dialog');
         assert.equal(await client.getByLabel('Backup folder', {exact:true}).count(), 1);
         const heading = client.getByRole('heading', {name:'Site password (HTTP Basic)',exact:true});
-        if (!await heading.isVisible()) await client.getByRole('heading', {name:'Full backups need',exact:true}).click();
-        await heading.waitFor(); const section = client.locator('.fi-section').filter({has:heading}).last();
-        assert.match(await section.innerText(), /asks for a username and password[\s\S]*maintenance page/);
-        await shot(client, viewport.width < 640 ? 'mobile-site-password-collapsed' : 'desktop-site-password-collapsed');
-        await heading.click(); await client.waitForTimeout(300);
-        assert.match(await section.innerText(), /uses http:\/\/|Saved for|No site password saved/);
-        await shot(client, viewport.width < 640 ? 'mobile-site-password-expanded' : 'desktop-site-password-expanded');
+        assert.equal(await heading.count(), 0, 'Obsolete Site password section rendered');
+        await shot(client, viewport.width < 640 ? 'mobile-settings-inline-help' : 'desktop-settings-inline-help');
         await client.context().close();
       }
     });
@@ -354,7 +351,7 @@ try {
         await load(page, tab); await livewire(page, () => page.getByRole('button', {name: 'Create backup', exact: true}).first().click());
         const dialog = page.locator('.fi-modal.fi-modal-open'); await dialog.getByRole('heading', {name: 'Create backup', exact: true}).waitFor();
         await shot(page, 'create-from-' + tab.toLowerCase());
-        assert.match(await dialog.innerText(), /maintenance page|site pauses/i); assert.match(await dialog.innerText(), /stays online/i);
+        assert.match(await dialog.innerText(), /stays online/i);
         await closeDialog(page);
       }
     });
@@ -485,13 +482,11 @@ try {
       assert.equal(await page.getByText('Keys saved.', {exact: true}).isVisible(), false, 'Keys remain configured after removal');
       // Turn uploads off again so later phases start from local storage.
       await load(page, 'Settings'); await checked(page, field(page, 'upload_s3'), false); await visible(field(page, 's3_bucket'), false); await save(page);
-      // The fixture address is plain http: no site password form is offered, and the reason is shown.
+      // Online capture retired the Site password section for every application URL.
       await load(page, 'Settings');
       const heading = page.getByRole('heading', {name:'Site password (HTTP Basic)',exact:true});
-      if (!await heading.isVisible()) await page.getByRole('heading', {name:'Full backups need',exact:true}).click();
-      await heading.click();
-      assert.match(await page.locator('main').innerText(), /Your App URL uses http:\/\/\. A site password can only be sent over https:\/\//);
-      assert.equal(await page.locator('[id="siteAccessForm.username"]').count(), 0, 'Site password form offered over http');
+      assert.equal(await heading.count(), 0, 'Obsolete Site password section rendered');
+      assert.equal(await page.locator('[id="siteAccessForm.username"]').count(), 0, 'Obsolete Site password form rendered');
     });
   }
   if (phase === 'secrets' || phase === 'recovery' || phase === 'all') {

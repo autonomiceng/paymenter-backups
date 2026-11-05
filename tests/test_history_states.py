@@ -1,9 +1,12 @@
 """Running, failed, upload-failed and waiting backups read right in the list and in Details."""
+import html
 import json
 import os
 import pathlib
+import shlex
 import shutil
 import subprocess
+import sys
 import unittest
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -63,6 +66,13 @@ class HistoryStates(unittest.TestCase):
         restore = ' '.join(text for text, _ in details['sections']['Restore'].values())
         self.assertIn('paymenter_backups export good --output /new/folder', restore)
 
+    def test_restore_command_quotes_the_journal_run_id(self):
+        run_id = "backup id; $(printf unsafe)'"
+        _, _, details = self.render([run(run_id)], details=run_id)
+        restore = ' '.join(text for text, _ in details['sections']['Restore'].values())
+        command = html.unescape(restore.split('paymenter_backups export ', 1)[1]).removesuffix('Copy')
+        self.assertEqual(shlex.split(command), [run_id, '--output', '/new/folder'])
+
     def test_backup_from_an_earlier_version_says_not_recorded(self):
         _, _, details = self.render([run('old', finished_at=None)], details='old')
         self.assertEqual(details['sections']['Backup']['Finished'], ['Not recorded', []])
@@ -90,6 +100,17 @@ class HistoryStates(unittest.TestCase):
         row = rows['request-r1']
         self.assertEqual((row['status_label'], row['origin']), ('Waiting', 'Schedule'))
         self.assertEqual(row['detail'], 'A Paymenter cron job was still running. Tries again next minute.')
+
+    def test_core_lane_without_native_environment_skips_instead_of_crashing(self):
+        environment = {key: value for key, value in os.environ.items()
+                       if key not in ('PHP_BINARY', 'PAYMENTER_TEST_APP')}
+        result = subprocess.run(
+            [sys.executable, '-m', 'unittest',
+             'test_panel_create_actions.CreateActions.test_cancel_precedes_create_and_blocked_dialog_has_only_close',
+             'test_panel_poll_times.PollTimes.test_staff_times_survive_repeated_poll_morphs_and_changed_instants'],
+            cwd=ROOT / 'tests', env=environment, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('skipped=2', result.stderr)
 
 
 if __name__ == '__main__':
