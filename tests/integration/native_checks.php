@@ -317,23 +317,23 @@ if ($mode === 'upload') {
     check($after['full_schedule'] === 'off' && $after['retention_keep_database'] === '4' && json_decode($after['full_weekdays'], true) === [0, 6]
         && json_decode($after['job_lock_paths'], true) === ['/fixture/a.lock', '/fixture/b.lock'] && $after['settings_version'] === '2', 'page settings not persisted in engine form: ' . json_encode(array_intersect_key($after, array_flip($changedKeys))));
     check(array_diff_key($after, array_flip($changedKeys)) === array_diff_key($before, array_flip($changedKeys)), 'page save changed unrelated rows');
-    // Shared rows render labels and values separately, without a text colon.
+    // The Checks rail renders each installation check as a marked step: its name, then one state word.
     $installation = new DOMDocument;
     $installation->loadHTML(Livewire\Livewire::test($page)->html(), LIBXML_NOERROR | LIBXML_NOWARNING | LIBXML_NONET);
     $installationXPath = new DOMXPath($installation);
     $installationRows = [];
-    foreach ($installationXPath->query('//*[contains(concat(" ", normalize-space(@class), " "), " domains-row ")]') as $row) {
-        $labels = $installationXPath->query('.//*[@role="term"]', $row);
-        $values = $installationXPath->query('.//*[@role="definition"]', $row);
-        if ($labels->length === 1 && $values->length === 1) {
-            $label = trim(preg_replace('/\s+/', ' ', $labels->item(0)->textContent));
-            $installationRows[$label][] = trim($values->item(0)->textContent);
+    foreach ($installationXPath->query('//*[contains(concat(" ", normalize-space(@class), " "), " domains-trace-item ")]') as $row) {
+        $titles = $installationXPath->query('.//*[contains(@class, "domains-trace-title")]', $row);
+        $words = $installationXPath->query('.//*[contains(@class, "domains-trace-word")]', $row);
+        if ($titles->length === 1 && $words->length === 1) {
+            $installationRows[trim(preg_replace('/\s+/', ' ', $titles->item(0)->textContent))][] = trim($words->item(0)->textContent);
         }
     }
-    foreach (Paymenter\Extensions\Others\Backups\Messages::INSTALLATION_CHECKS as $label) {
+    foreach (Paymenter\Extensions\Others\Backups\Messages::INSTALLATION_CHECKS as $key => $label) {
         $values = $installationRows[$label] ?? [];
-        check(count($values) === 1, 'Installation row not rendered exactly once: ' . $label);
-        check(preg_match('/^(Ready|Pending|Missing)(?:\.|$)/', $values[0]) === 1, 'Installation row has no status: ' . $label);
+        // This server shows only when it needs attention.
+        check(count($values) === 1 || ($key === 'local_storage' && $values === []), 'Installation check not rendered exactly once: ' . $label);
+        check($values === [] || in_array($values[0], $key === 'scheduler' ? ['OK', 'Off', 'Missing', 'Not running'] : ['OK', 'Off', 'Missing'], true), 'Installation check has no state word: ' . $label);
     }
     check($after['local_byte_budget'] === $before['local_byte_budget'], 'unchanged byte limit rewritten');
     // Space settings are entered in GiB and stored in bytes.
@@ -599,7 +599,7 @@ if ($mode === 'upload') {
             if ($component instanceof Filament\Schemas\Components\Callout && $component->isVisible()) {
                 $state['callouts']++;
                 $state['text'] .= $component->getHeading() . ' ' . $component->getDescription();
-            } elseif ($component instanceof Filament\Forms\Components\Radio) {
+            } elseif ($component instanceof Filament\Forms\Components\Select) {
                 foreach ($component->getOptions() as $value => $label) { if ($component->isOptionDisabled($value, $label)) { $state['disabled'][] = $value; } }
                 $state['selected'] = $component->getState();
             }
@@ -641,16 +641,16 @@ if ($mode === 'upload') {
     }
     $queuedView = Livewire\Livewire::test($page);
     $queuedText = $text($queuedView);
-    check(str_contains($queuedText, 'Queued') && str_contains($queuedText, 'Waiting for Paymenter\'s scheduled tasks.'), 'queued backup or scheduler wait line not shown');
-    check(substr_count($queuedText, 'Waiting for Paymenter\'s scheduled tasks.') === 1
-        && preg_match('/<a\\b[^>]*href="([^"]+)"[^>]*>the Backups tab<\\/a>/', $queuedView->html(), $schedulerLink)
-        && str_contains($schedulerLink[1], 'tab=backups') && str_contains($schedulerLink[1], '#setup'),
+    check(str_contains($queuedText, 'Queued') && str_contains($queuedText, 'Waits for the cron job.'), 'queued backup or scheduler wait line not shown');
+    check(substr_count($queuedText, 'Waits for the cron job.') === 1
+        && preg_match('/<a\\b[^>]*href="([^"]+)"[^>]*>See Checks<\\/a>/', $queuedView->html(), $schedulerLink)
+        && str_contains($schedulerLink[1], 'tab=backups') && str_contains($schedulerLink[1], '#checks'),
         'queued backup does not show one linked scheduler wait line');
     // Phones stack history rows. Long commands keep words whole and scroll inside their block, not the page.
     check(str_contains($queue->html(), 'fi-ta-table-stacked-on-mobile') && str_contains($queue->html(), 'overflow-wrap: normal; overflow-x: auto'), 'mobile history or command scrolling missing');
     // Without a recent cron check-in the page never promises a start time.
     foreach (['within a minute', 'under a minute'] as $promise) { check(!str_contains($queue->html(), $promise), 'unsupported backup-start timing promise: ' . $promise); }
-    check(str_contains($queuedText, 'Full backup requirements') && str_contains($queuedText, 'paymenter_backups() {') && str_contains($queuedText, '/usr/bin/flock -n'), 'settings or help guidance missing');
+    check(str_contains($queuedText, 'Full backups need') && str_contains($queuedText, 'paymenter_backups() {') && str_contains($queuedText, '/usr/bin/flock -n'), 'settings or help guidance missing');
     // Never a count of setup items.
     check(!preg_match('/need \d+ (items|changes)/', $queuedText), 'setup counts items instead of naming them');
     check(!file_exists($base . '/storage/framework/down') && !glob($root . '/runs/*/journal.json'), 'FPM started capture');
@@ -752,7 +752,7 @@ if ($mode === 'upload') {
     Illuminate\Support\Facades\Auth::login($admin);
     Filament\Facades\Filament::setCurrentPanel(Filament\Facades\Filament::getPanel('admin'));
     $page = Livewire\Livewire::test(Paymenter\Extensions\Others\Backups\Admin\Pages\Backups::class);
-    check(!str_contains($page->html(), 'To see details, run these as the site user') && str_contains($page->html(), 'Backup history'), 'restricted native admin status unavailable');
+    check(!str_contains($page->html(), 'To see details, run these as the site user') && str_contains($page->html(), 'Search backup ID'), 'restricted native admin status unavailable');
     try {
         // A PHP alias to the same executable remains valid under the restrictive policy.
         $record->settings()->where('key', 'php')->update(['value' => $argv[3]]);

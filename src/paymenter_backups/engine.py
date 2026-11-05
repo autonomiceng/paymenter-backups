@@ -620,7 +620,8 @@ def capture(state, envelope, scheduled=False, request_id=None, envelope_loader=N
             complete = output / (run_id + ".tar.gz")
             os.replace(temporary, complete)
             atomic_json(output / (run_id + ".manifest.json"), manifest)
-            journal.update({"phase": "complete", "local_complete": True,
+            # Optional: journals from earlier versions have no finish time.
+            journal.update({"phase": "complete", "local_complete": True, "finished_at": time.time(),
                             "capture_complete": True, "manifest": manifest,
                             "archive_path": str(complete), "manifest_path": str(output / (run_id + ".manifest.json"))})
             # The bytes were fully checked above while this run lock was held.
@@ -644,6 +645,7 @@ def capture(state, envelope, scheduled=False, request_id=None, envelope_loader=N
                 raise
             journal["error"] = error.code if isinstance(error, BackupError) else "capture-failed"
             journal["phase"] = "failed"
+            journal["finished_at"] = time.time()
             try:
                 if payload.exists() and not payload.is_symlink():
                     shutil.rmtree(payload)

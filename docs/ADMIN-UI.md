@@ -25,7 +25,7 @@ plain copies after use. Never attach them to tickets or commit them to a reposit
 | --- | --- | --- |
 | First-time administrator | What do I need to change on this server? | Setup, per backup type: each blocker named with its exact fix (cron line, `.env` keys, service to stop) and one action. Never a count. |
 | Returning administrator | Are my backups fine, and when is the next one? | Last full and last database backup, next of each, last upload to S3, cron job check-in, then history. |
-| Administrator under pressure | Can I get a copy now? | A row-level Download button on every verified backup; Download from S3 for copies only in S3. |
+| Administrator under pressure | Can I get a copy now? | A row-level Download button on every verified backup; Get from S3 for copies only in S3. |
 | Administrator cleaning up | Can I remove this one safely? | A Delete preview that names what it removes and refuses when it would remove the last verified backup. |
 | Administrator losing the server | Can I still restore from S3? | A recovery key flow that shows, downloads and confirms the key before encrypted uploads start. |
 
@@ -34,13 +34,21 @@ plain copies after use. Never attach them to tickets or commit them to a reposit
 One page, three native tabs: Backups, Settings and Help. "Create backup" is
 the only header action. Detail content caps at Filament's SixExtraLarge width.
 
-Backups joins Setup, current alerts and Overview into one sheet. Facts use a
+Backups shows Setup needed (only while something blocks), current alerts,
+Schedule and Storage in one sheet, with a Checks rail beside it. Facts use a
 label, value and optional action row. Setup keeps every blocker, exact command
-and existing recovery-key action. Cleanup sits beside Space used; Test storage
-sits beside Storage test. The history table has its own surface below the sheet.
+and existing recovery-key action. Run cleanup sits on the Keep row; Test storage
+on the This server row. The history table has its own surface below the sheet.
+Details is a dialog in the same sheet style: What went wrong (failed only),
+Backup with Started, Finished and Took ("Not recorded" for backups made before
+finish times were recorded), Location, Check, Restore (the export command in a
+one-line box) and Keep, which says what cleanup does on this server and in S3,
+each under its own policy. Create backup picks the type with a select.
 
-Settings is one form in one sheet, with one Save settings button (mod+s).
-Schedule groups sit side by side on wide screens and stack below 768 px.
+Settings is one form in one sheet, with one Save button (mod+s): Schedule,
+This server, S3, Cleanup, Full backups need and Advanced, with Full backup
+checks beside it. Schedule groups sit side by side on wide screens and stack
+below 768 px.
 Fields, conditional visibility, validation and secret-handling flows stay native.
 Help joins its collapsible sections into a sheet with padded prose and commands.
 
@@ -130,7 +138,7 @@ Write for a hosting administrator who knows backups but not this engine. Use
 the industry words: cron job, binary, data directory, retention, maintenance
 mode, access key ID, secret access key, endpoint, path-style addressing, folder
 in bucket, recovery key, site password (HTTP Basic). Fixed action names: Upload
-to S3, Download from S3, Delete old backups now, Verify, Create backup.
+to S3, Get from S3, Run cleanup, Verify, Create backup.
 
 Each sentence does one job. Never repeat an explanation in a description,
 helper and status line. Don't describe the interface ("click X to Y"). Errors
@@ -232,7 +240,7 @@ These rules bind the page to the engine. The engine stays authoritative.
    link opened by a server action, outside SPA navigation.
 8. **Safe artifact resolution, verified downloads, per-copy delete.** Unchanged
    from 0.3: see [ARCHITECTURE.md](ARCHITECTURE.md). Download needs a recorded
-   verification; S3-only copies use Download from S3 first; Delete previews the
+   verification; S3-only copies use Get from S3 first; Delete previews the
    selected location and requires a verified survivor in each place.
 
 ## Accessibility and states
@@ -243,8 +251,8 @@ mode. The page adds:
 * Commands are escaped Filament `Text`. Over HTTPS they copy their exact text
   by click, Enter or Space. Over HTTP Help says that copying needs HTTPS and the
   text stays selectable.
-* Every destructive action uses a Filament confirmation with a danger button
-  that repeats the action name.
+* Every destructive action asks first, with a danger button that repeats the
+  action name (Delete backup, Run cleanup).
 * Loading: Filament button spinners. The table polls every 5 seconds only while
   a task is queued or running, and never while a dialog is open.
 * Download links and the recovery key download are Filament SPA exceptions, so
@@ -253,8 +261,8 @@ mode. The page adds:
   `backups::page` view. Filament 5 returns only the `action-modals` partial when
   an action mounts; without this view a confirmation opened from Settings would
   stay hidden inside the Backups tab.
-* "Delete old backups now" stays in the Overview header, disabled with the
-  tooltip "Nothing to delete", so the header does not jump.
+* Run cleanup stays on the Keep row, disabled with the tooltip "Nothing to
+  delete", so the row does not jump.
 * Empty history: "No backups yet" with Create backup once a type is ready.
 * Engine unavailable: a danger callout "Backups can't start" with the reason and
   the offline overview command.

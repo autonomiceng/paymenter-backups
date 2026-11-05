@@ -14,12 +14,12 @@ private root and fake credentials created by `tools/native_integration.py` or
 | Workflow | Page control | Engine call and durable result | Isolated test |
 | --- | --- | --- | --- |
 | Setup readiness | Backups tab, Setup: per type, named items with fixes | `overview` `configuration.readiness[mode]`, capture `admission[mode]`, `checks` | Native `check`: Create dialog names blockers once, never counts; `admin_contracts.php field_help`: deep-link targets |
-| Status | Overview, Backup history | `overview`: runs, requests, `last_good`, `schedules`, `storage` | Native `ui-history render` |
-| Edit settings | Settings, one Save settings | Rules, then `config check`, then changed native rows through Eloquent (audited), then `init` with row rollback | Native `check`: invalid values, GiB conversion, weekly days, no storage place, billing-window save, row diff, audit, credential digest; contract test `validation`, `baseline` |
-| First v2 save | Save settings on 0.3 rows | `Settings::fromLegacy()` view; writes `settings_version=2` and every v2 key | `tests/integration/settings_migration.php` against the shared vectors |
-| Malformed rows | Save settings | Defaults written and named in a warning; malformed guard JSON refused | Native `check`; contract test `repair` |
+| Status | Backups tab: status line, Schedule, Storage, Checks, history | `overview`: runs, requests, `last_good`, `schedules`, `storage` | Native `ui-history render` |
+| Edit settings | Settings, one Save | Rules, then `config check`, then changed native rows through Eloquent (audited), then `init` with row rollback | Native `check`: invalid values, GiB conversion, weekly days, no storage place, billing-window save, row diff, audit, credential digest; contract test `validation`, `baseline` |
+| First v2 save | Save on 0.3 rows | `Settings::fromLegacy()` view; writes `settings_version=2` and every v2 key | `tests/integration/settings_migration.php` against the shared vectors |
+| Malformed rows | Save | Defaults written and named in a warning; malformed guard JSON refused | Native `check`; contract test `repair` |
 | S3 keys | Storage, Upload to S3, key fields | `Runtime::saveCredentials()` after settings and `init`; `{"clear":true}` to remove | Native `check`: incomplete pair writes nothing, canaries cleared, encrypted at rest, settings-only save keeps keys, removal keeps the site password; contract test `credentials`, `modals` |
-| Site password | Full backup requirements, Site password (HTTP Basic) | Same Save; origin taken on the server from Paymenter's https URL | Native `check`: browser origin ignored, http refused, removal over http, unreadable store kept; contract test `basic_states` |
+| Historical site password | Not rendered in Settings; compatibility path only | Existing credentials retain server-bound origin validation and removal | Native `check`: section absent, browser origin ignored, http refused, removal over http, unreadable store kept; contract test `basic_states` |
 | Recovery key | Storage and Setup: Show, Download, I saved it, Create a new recovery key, Discard | `Runtime::encryptionKey()`, `revealRecoveryKey($fingerprint)` (render only; full granted identity), `recoveryKeyUrl()` | Native `check`: Save offers the key, key only in the dialog partial, confirmation needs the checkbox and activates the key; isolated page/bridge tests refuse replaced or disappeared granted keys |
 | Native lifecycle | Extensions editor | No Backups setting fields; enable/disable and uninstall stay native | Forged settings Save preserves configuration, version, credentials and private bytes |
 | Public folder repair | Backups settings | Damaged list requires complete replacement and explicit confirmation | Ordinary Save and invalid replacement preserve state; confirmed nonempty and empty lists repair; concurrent changes refuse |
@@ -29,12 +29,13 @@ private root and fake credentials created by `tools/native_integration.py` or
 | Download | Row Download link | Panel-authenticated route, `artifact-stream` | Native `ui-history download`; contract test `download_anchor` |
 | Verify | Row Verify or More actions, Verify | Queued `verify` | Native `ui-history verifyFirst` |
 | Upload to S3 | More actions, Upload to S3 | Queued `deliver` | S3 protocol unit tests |
-| Download from S3 | Row action for S3-only backups | Queued `retrieve` | Contract test `download_anchor`; S3 fixture retrieval |
+| Get from S3 | Row action for S3-only backups | Queued `retrieve` | Contract test `download_anchor`; S3 fixture retrieval |
 | Delete | More actions, Delete, preview | `delete ID --location` preview; queued `delete` | Native `ui-history delete`, `delete-refused`; contract test `delete_gate` |
-| Storage test | Overview, Test storage; Setup item | Queued `destination-test`; `result_verified` decides "Passed" | Native `check` spools it |
-| Delete old backups now | Overview header, disabled with nothing to delete | Queued `retention` with `execute` | Native `check`: disabled with nothing to delete; `ui-history retention` |
+| Storage test | This server row, Test storage; Setup item | Queued `destination-test`; `result_verified` decides "Passed" | Native `check` spools it |
+| Run cleanup | Keep row, disabled with nothing to delete | Queued `retention` with `execute` | Native `check`: disabled with nothing to delete; `ui-history retention` |
 | First save | Save and finish setup with no field changed | `config check`, then `init`; rows unchanged | Contract test `first_use` |
 | Recovery, export, restore | Help, Command line and Restoring | CLI only | `test_cli`, restore drill |
+| Run states and details | History rows and Details: running, failed, Upload failed, waiting, Took, Not recorded | `overview` runs with `finished_at` (null on older runs) | `test_history_states` through the history fixture; `test_run_finish_time` on the engine |
 
 The native `check` and contract-test phases exercise engine readiness items,
 `config check` for version 2 keys, billing-window waits, and recovery-key state.
@@ -76,9 +77,9 @@ storage or encryption choice would hang a valid client-only interaction.
   saves a file, "I saved it" needs the checkbox; afterwards Setup no longer
   lists the key. Replace a pending key while its confirmation is open: the
   original confirmation must refuse and never activate the replacement.
-* Full backup requirements: detected jobs with their current and replacement
-  lines, detected drivers with the `.env` change, the confirmation, and the
-  collapsed Site password section.
+* Full backup checks and Full backups need: detected jobs with their current and
+  replacement lines, detected drivers with the `.env` change, and confirmations.
+  Settings has no Site password section.
 * Create backup: one callout naming what's missing, one info line, disabled
   types not selectable, "See what's needed" opens Setup. Missing, unconfirmed
   or invalid archive keys and an unavailable encryption tool explain why

@@ -86,9 +86,9 @@ trait LoadsOverview
     private function moment(?float $timestamp): string|\Illuminate\Support\HtmlString
     {
         if ($timestamp === null) { return '—'; }
-        return new \Illuminate\Support\HtmlString(view('backups::partials.moment', [
+        return new \Illuminate\Support\HtmlString(trim(view('backups::partials.moment', [
             'instant' => CarbonImmutable::createFromTimestamp((int) $timestamp, 'UTC'),
-        ])->render());
+        ])->render()));
     }
 
     private function ago(?float $timestamp): string

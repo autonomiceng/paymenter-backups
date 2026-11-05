@@ -240,7 +240,7 @@ class Backups extends Page implements HasTable
                 Text::make('flock lets a full backup pause this job while it copies. Database backups work without it.'),
                 Text::make('Copying needs HTTPS. Over HTTP, select the text to copy it.')->visible(fn () => !request()->isSecure()),
             ])),
-            Sheet::section('Full backups: what has to be true')->id('full-backups')->collapsible()->schema(Sheet::contentRows([
+            Sheet::section('What full backups need')->id('full-backups')->collapsible()->schema(Sheet::contentRows([
                 Text::make('A full backup waits for running cron jobs, holds their lock files, and copies the database and files. The site stays online. If extension files change during a scheduled copy, it retries at the next full backup time.'),
                 Text::make('A cron job without the required lock can keep writing during the backup. The database and files in the backup could then be from different times.'),
                 $bullets([

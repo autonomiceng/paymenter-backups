@@ -6,16 +6,19 @@ use Filament\Actions\ActionGroup;
 use Filament\Forms\Components\Radio;
 use Filament\Infolists\Components\TextEntry;
 use Filament\Notifications\Notification;
+use Filament\Schemas\Components\Actions;
 use Filament\Schemas\Components\Callout;
-use Filament\Schemas\Components\Grid;
+use Filament\Schemas\Components\Group;
 use Filament\Schemas\Components\Text;
+use Filament\Support\Enums\Alignment;
 use Filament\Support\Enums\FontFamily;
 use Filament\Support\Enums\Size;
 use Filament\Tables\Columns\TextColumn;
 use Filament\Tables\Table;
 use Illuminate\Pagination\LengthAwarePaginator;
 use Paymenter\Extensions\Others\Backups\Messages;
-use Paymenter\Extensions\Others\Backups\Admin\Support\{HistorySearch, StatusTone};
+use Illuminate\Support\HtmlString;
+use Paymenter\Extensions\Others\Backups\Admin\Support\{HistorySearch, Sheet, StatusTone};
 use Paymenter\Extensions\Others\Backups\Runtime;
 
 trait BuildsHistoryTable
@@ -37,8 +40,10 @@ trait BuildsHistoryTable
         $started = [];
         $scheduled = $this->scheduledRequests();
         $uploads = $this->uploadsToS3();
+        $running = false;
         foreach ($this->overview()['runs'] as $run) {
             if ($run['request_id']) { $started[$run['request_id']] = true; }
+            $running = $running || $run['status'] === 'running';
         }
         foreach ($this->overview()['requests'] as $request) {
             if ($request['action'] !== 'run' || isset($started[$request['request_id']]) || $request['result_run_id']) { continue; }
@@ -47,14 +52,14 @@ trait BuildsHistoryTable
             [$label, $color] = $active || in_array($request['status'], ['expired', 'skipped'], true) ? Messages::taskStatus($request['status']) : ['Didn\'t start', 'danger'];
             $schedulerFresh = $this->schedulerFresh();
             $detail = match ($request['status']) {
-                'pending' => $schedulerFresh ? 'Starts within a minute.' : $this->schedulerWaitLine(),
-                'deferred' => $schedulerFresh ? 'Retrying soon. ' . Messages::error($request['error']) : $this->schedulerWaitLine(),
+                'pending' => $schedulerFresh ? ($running ? 'Starts after the running backup.' : 'Starts within a minute.') : $this->schedulerWaitLine(),
+                'deferred' => $schedulerFresh ? Messages::error($request['error']) : $this->schedulerWaitLine(),
                 'launching' => 'Starting.', 'running' => 'Running.',
                 'expired' => 'Expired: Paymenter\'s cron job didn\'t run in time.',
                 default => Messages::error($request['error']),
             };
             $rows[] = ['__key' => 'request-' . $request['request_id'], 'kind' => 'request', 'request_id' => $request['request_id'],
-                'created_at' => $request['created_at'], 'type' => Messages::type($request['mode'] ?: ($this->configuration()['mode'] ?? null)), 'origin' => $request['scheduled'] ? 'Scheduled' : 'Manual',
+                'created_at' => $request['created_at'], 'type' => Messages::type($request['mode'] ?: ($this->configuration()['mode'] ?? null)), 'origin' => $request['scheduled'] ? 'Schedule' : 'Staff',
                 'size' => null, 'size_label' => '—', 'status_label' => $label, 'status_color' => $color, 'detail' => $detail, 'location' => '—',
                 'cancel_request' => in_array($request['status'], ['pending', 'deferred'], true) ? $request['request_id'] : null,
                 'run_id' => null, 'run' => null];
@@ -62,7 +67,7 @@ trait BuildsHistoryTable
         foreach ($this->overview()['runs'] as $run) {
             if ($run['status'] === 'deleted' && !$showDeleted) { continue; }
             [$label, $color] = Messages::runStatus($run);
-            $detail = Messages::runDetail($run + ['maintenance' => $this->overview()['maintenance'] ?? false]);
+            $detail = Messages::runDetail($run + ['maintenance' => $this->overview()['maintenance'] ?? false, 'uploads' => $uploads]);
             $cancel = null;
             $tasks = $this->tasksFor($run['run_id']);
             $active = array_values(array_filter($tasks, static fn ($task) => in_array($task['status'], self::ACTIVE, true)));
@@ -81,10 +86,14 @@ trait BuildsHistoryTable
                 }
                 if ($latest && $latest['status'] === 'failed') { $detail = 'The last deletion didn\'t finish. ' . Messages::error($latest['error']); }
             }
-            $origin = $run['request_id'] && isset($scheduled[$run['request_id']]) ? ($scheduled[$run['request_id']] ? 'Scheduled' : 'Manual') : null;
+            // "Settings" in an upload failure's next step links to the S3 settings.
+            if ($run['remote'] === 'failed' && is_string($detail) && str_contains($detail, ' in Settings,')) {
+                $detail = new HtmlString(str_replace(' in Settings,', ' in <a class="underline" href="' . e($this->settingsUrl('s3')) . '">Settings</a>,', e($detail)));
+            }
+            $origin = $run['request_id'] && isset($scheduled[$run['request_id']]) ? ($scheduled[$run['request_id']] ? 'Schedule' : 'Staff') : null;
             $rows[] = ['__key' => $run['run_id'], 'kind' => 'run', 'request_id' => null, 'created_at' => $run['created_at'],
                 'type' => Messages::type($run['mode']), 'origin' => $origin, 'size' => $run['size'], 'size_label' => Messages::bytes($run['size']), 'status_label' => $label, 'status_color' => $color,
-                'detail' => $detail, 'location' => Messages::location($run, $uploads), 'cancel_request' => $cancel,
+                'detail' => $detail, 'location' => Messages::location($run), 'cancel_request' => $cancel,
                 'run_id' => $run['run_id'], 'run' => $run];
         }
         usort($rows, static fn ($a, $b) => ($b['created_at'] ?? 0) <=> ($a['created_at'] ?? 0));
@@ -93,7 +102,7 @@ trait BuildsHistoryTable
 
     private function schedulerWaitLine(): \Illuminate\Support\HtmlString
     {
-        $url = static::getUrl(['tab' => 'backups']) . '#setup';
+        $url = static::getUrl(['tab' => 'backups']) . '#checks';
         return Messages::schedulerWaitLine($url);
     }
 
@@ -107,7 +116,7 @@ trait BuildsHistoryTable
         $isRun = static fn (array $record) => $record['kind'] === 'run';
         $inS3 = static fn (array $record) => in_array($record['run']['remote'] ?? null, ['delivered', 'present'], true);
         return $table
-            ->heading('Backup history')
+            ->description(fn () => $this->hasActiveWork() ? 'Updates every 5 seconds while a backup runs' : null)
             ->records(function (int|string $page, int|string $recordsPerPage, ?string $search) {
                 $rows = HistorySearch::filter($this->historyRows($this->showDeleted), $search);
                 $perPage = max(1, (int) $recordsPerPage);
@@ -115,9 +124,11 @@ trait BuildsHistoryTable
                 return new LengthAwarePaginator(array_slice($rows, ($page - 1) * $perPage, $perPage), count($rows), $perPage, $page);
             })
             ->paginated([25, 50, 100])->defaultPaginationPageOption(25)
-            ->searchable()->searchPlaceholder('Search backup ID, type, status or location')
+            ->searchable()->searchPlaceholder('Search backup ID')
+            ->recordClasses(fn (array $record) => ($record['run']['status'] ?? null) === 'running' ? 'backups-row-running' : null)
             ->columnManagerTriggerAction(fn (Action $action) => $action->label('Columns')->button())
-            ->extraAttributes(['class' => 'beco-own-table'])
+            // Merge, so the skin's shared table class set for every table stays.
+            ->extraAttributes(['class' => 'beco-own-table backups-history'], merge: true)
             // No polling while a dialog is open: it would re-render the dialog, including a shown recovery key.
             ->poll(fn () => $this->hasActiveWork() && !$this->mountedActions ? '5s' : null)
             // Below sm each row stacks, so long status details and both row actions get the full width.
@@ -128,26 +139,30 @@ trait BuildsHistoryTable
                     ->action(function () { $this->showDeleted = !$this->showDeleted; $this->resetPage(); }),
             ])
             ->columns([
-                TextColumn::make('created_at')->label('Created')
-                    ->formatStateUsing(fn ($state) => $this->moment($state))
-                    ->description(fn (array $record) => $this->ago($record['created_at'])),
+                TextColumn::make('created_at')->label('Started')
+                    ->formatStateUsing(fn ($state) => $this->moment($state)),
                 // Below md these move to Details so the table stays readable.
-                TextColumn::make('type')->label('Type')->description(fn (array $record) => $record['origin'])->visibleFrom('md')->toggleable(),
-                TextColumn::make('size_label')->label('Size')->alignEnd()->extraCellAttributes(['class' => 'tabular-nums'])->visibleFrom('md')->toggleable(),
+                TextColumn::make('type')->label('Type')->visibleFrom('md')->toggleable(),
                 TextColumn::make('status_label')->label('Status')->badge()->color(fn (array $record) => $record['status_color'])
-                    ->extraCellAttributes(fn (array $record) => ['data-beco-tone' => StatusTone::forLabel($record['status_label'])])
-                    ->description(fn (array $record) => $record['detail'])->wrap()->toggleable(),
-                TextColumn::make('location')->label('Stored on')->visibleFrom('lg')->toggleable(),
+                    ->extraCellAttributes(fn (array $record) => ['data-beco-tone' => StatusTone::forLabel($record['status_label'])])->toggleable(),
+                TextColumn::make('detail')->label('Note')->wrap()->toggleable(),
+                TextColumn::make('size_label')->label('Size')->alignEnd()->extraCellAttributes(['class' => 'tabular-nums'])->visibleFrom('md')->toggleable(),
+                TextColumn::make('location')->label('Location')->visibleFrom('lg')->toggleable(),
+                TextColumn::make('origin')->label('Started by')->toggleable(isToggledHiddenByDefault: true),
             ])
             ->recordActions([
                 Action::make('download')->label('Download')->icon('ri-download-2-line')->button()->color('gray')
                     ->url(fn (array $record) => static::downloadUrl($record['run_id']))
                     ->visible(fn (array $record) => $isRun($record) && $record['run']['download'] === 'ready'),
-                Action::make('prepareDownload')->label('Download from S3')->icon('ri-download-cloud-2-line')->button()->color('gray')
+                Action::make('prepareDownload')->label('Get from S3')->icon('ri-download-cloud-2-line')->button()->color('gray')
                     ->visible(fn (array $record) => $isRun($record) && $record['run']['download'] === 'retrieve'
                         && !$this->activeRequest('retrieve', $record['run_id']))
-                    ->action(fn (array $record) => $this->queue('retrieve', ['run_id' => $record['run_id']], 'Download from S3 queued',
-                        'Downloading from S3 to this server. ' . $this->startLine() . ' Download appears here when it\'s ready and stays available for 24 hours.')),
+                    ->action(fn (array $record) => $this->queue('retrieve', ['run_id' => $record['run_id']], 'Get from S3 queued',
+                        'Copying it from S3 to this server. ' . $this->startLine() . ' Download appears here when it\'s ready and stays available for 24 hours.')),
+                Action::make('retryUpload')->label('Upload to S3')->icon('ri-upload-cloud-2-line')->button()->color('gray')
+                    ->visible(fn (array $record) => $isRun($record) && ($record['run']['remote'] ?? null) === 'failed' && $record['run']['status'] === 'ready'
+                        && $this->uploadsToS3() && !$this->activeRequest('deliver', $record['run_id']))
+                    ->action(fn (array $record) => $this->queue('deliver', ['run_id' => $record['run_id']], 'Upload to S3 queued')),
                 Action::make('verifyFirst')->label('Verify')->icon('ri-shield-check-line')->button()->color('gray')
                     ->tooltip('Checks the backup against its checksums.')
                     ->visible(fn (array $record) => $isRun($record) && in_array($record['run']['status'], ['ready', 'damaged'], true)
@@ -160,8 +175,11 @@ trait BuildsHistoryTable
                     ->action(fn (array $record) => $this->callCancel($record['cancel_request'])),
                 ActionGroup::make([
                     Action::make('details')->label('Details')->icon('ri-information-line')
-                        ->modalHeading('Backup details')->modalSubmitAction(false)->modalCancelActionLabel('Close')
-                        ->schema(fn (array $record) => $this->detailsSchema($record)),
+                        ->modalHeading(fn (array $record) => $isRun($record) ? Messages::mode($record['run']['mode']) : 'Queued backup')
+                        ->modalDescription(fn (array $record) => $this->detailsLine($record))
+                        ->modalWidth('2xl')->modalSubmitAction(false)->modalCancelActionLabel('Close')
+                        ->extraModalWindowAttributes(['class' => 'backups-details'])
+                        ->schema(fn (array $record) => [Sheet::make($this->detailsSchema($record))]),
                     Action::make('verify')->label('Verify')->icon('ri-shield-check-line')
                         ->visible(fn (array $record) => $isRun($record) && $record['run']['status'] === 'ready'
                             && ($record['run']['download'] === 'ready' || (!$record['run']['local'] && $inS3($record)))
@@ -169,7 +187,7 @@ trait BuildsHistoryTable
                         ->action(fn (array $record) => $this->queue('verify', ['run_id' => $record['run_id']], 'Verification queued')),
                     Action::make('copy')->label('Upload to S3')->icon('ri-upload-cloud-2-line')
                         ->visible(fn (array $record) => $isRun($record) && $record['run']['status'] === 'ready' && !$inS3($record)
-                            && $this->uploadsToS3() && !$this->activeRequest('deliver', $record['run_id']))
+                            && $record['run']['remote'] !== 'failed' && $this->uploadsToS3() && !$this->activeRequest('deliver', $record['run_id']))
                         ->action(fn (array $record) => $this->queue('deliver', ['run_id' => $record['run_id']], 'Upload to S3 queued')),
                     Action::make('cancelTask')->label(fn (array $record) => 'Cancel ' . strtolower($this->pendingTaskLabel($record)))->icon('ri-close-circle-line')
                         ->visible(fn (array $record) => $isRun($record) && $record['cancel_request'] !== null)
@@ -179,13 +197,18 @@ trait BuildsHistoryTable
                     Action::make('delete')->label('Delete')->icon('ri-delete-bin-line')->color('danger')
                         ->visible(fn (array $record) => $isRun($record) && in_array($record['run']['status'], ['ready', 'damaged', 'delete-interrupted'], true)
                             && !$this->activeRequest('delete', $record['run_id']))
-                        ->requiresConfirmation()
-                        ->modalHeading(fn (array $record) => new \Illuminate\Support\HtmlString('Delete the ' . e(strtolower(Messages::mode($record['run']['mode']))) . ' from ' . $this->moment($record['created_at']) . '?'))
+                        // A plain form dialog, not Filament's centered confirmation with its warning icon.
+                        ->modalWidth('lg')->modalAlignment(Alignment::Start)->modalFooterActionsAlignment(Alignment::End)
+                        ->modalHeading('Delete this backup?')
                         ->modalDescription('This can\'t be undone.')
                         ->fillForm(fn (array $record) => ['location' => $this->defaultDeletionLocation($record)])
                         ->schema(fn (array $record) => [
+                            Group::make(Sheet::rows([
+                                TextEntry::make('delete_backup')->label('Backup')->state(new HtmlString(e(Messages::type($record['run']['mode']) . ', ') . $this->moment($record['created_at']))),
+                                TextEntry::make('delete_size')->label('Size')->state(Messages::bytes($record['run']['size'])),
+                            ]))->extraAttributes(['class' => 'backups-facts']),
                             // A choice appears only when the backup is in more than one place.
-                            Radio::make('location')->label('Delete from')->required()->live()
+                            Radio::make('location')->label('Delete from')->inline()->required()->live()
                                 ->options($places = array_filter([
                                     'all' => $record['run']['local'] && $inS3($record) ? 'This server and S3' : null,
                                     'local' => $record['run']['local'] ? 'This server' : null,
@@ -193,11 +216,14 @@ trait BuildsHistoryTable
                                 ]))
                                 ->visible(count($places) > 1)
                                 ->rule('in:all,local,s3'),
-                            Callout::make(fn () => $this->deletePreview($record['run_id'], $this->currentDeletionLocation($record))['refusal'] ? 'Can\'t delete' : 'What will be deleted')->warning()
-                                ->footer(fn () => [$this->bullets($this->deleteLines($record['run_id'], $this->currentDeletionLocation($record)))]),
+                            Callout::make('Can\'t delete')->danger()
+                                ->footer(fn () => [$this->bullets($this->deleteLines($record['run_id'], $this->currentDeletionLocation($record)))])
+                                ->visible(fn () => (bool) $this->deletePreview($record['run_id'], $this->currentDeletionLocation($record))['refusal']),
+                            Group::make(fn () => [$this->bullets($this->deleteLines($record['run_id'], $this->currentDeletionLocation($record)))])
+                                ->hidden(fn () => (bool) $this->deletePreview($record['run_id'], $this->currentDeletionLocation($record))['refusal']),
                         ])
                         ->modalSubmitAction(fn (Action $action, array $record) => $this->deletePreview($record['run_id'], $this->currentDeletionLocation($record))['refusal'] ? false : $action)
-                        ->modalSubmitActionLabel('Delete')
+                        ->modalSubmitActionLabel('Delete backup')->modalCancelActionLabel('Keep')
                         ->action(fn (array $record, array $data) => $this->queue('delete', ['run_id' => $record['run_id'], 'location' => $data['location'] ?? $this->defaultDeletionLocation($record), 'execute' => true], 'Deletion queued')),
                 ])->label('More actions')->icon('ri-more-2-fill')->color('gray')->tooltip('More actions'),
             ])
@@ -259,40 +285,132 @@ trait BuildsHistoryTable
         $preview = $this->deletePreview($runId, $location);
         if ($preview['refusal']) { return [Messages::error($preview['refusal'])]; }
         $lines = [];
-        if ($preview['local_copy']) { $lines[] = 'The backup file on this server.'; }
-        if ($preview['remote_copy']) { $lines[] = 'The backup in S3 bucket ' . $preview['remote_copy']['bucket'] . '. If bucket versioning is on, old versions stay.'; }
-        $lines[] = 'Another verified backup must remain in each place; otherwise nothing is deleted.';
+        if ($preview['local_copy']) { $lines[] = 'The file on this server.'; }
+        if ($preview['remote_copy']) { $lines[] = 'The copy in S3 bucket ' . $preview['remote_copy']['bucket'] . '. If versioning is on, old versions stay.'; }
+        $lines[] = 'Another verified backup stays in each place. If none would, nothing is deleted.';
         return $lines;
+    }
+
+    /** The status line under a backup's title. */
+    private function detailsLine(array $record): HtmlString
+    {
+        $run = $record['run'];
+        if ($run === null) { return Sheet::headLine($record['status_color'], $record['status_label'], $record['detail']); }
+        $took = $this->took($run);
+        $line = match (true) {
+            $record['status_label'] === 'Verified' && $run['verified_at'] => new HtmlString(e($run['verification_source'] === 'capture' ? 'Checked when it was made, ' : 'Checked ') . $this->moment($run['verified_at']) . '.'),
+            $run['status'] === 'failed' && $took !== null => 'Stopped after ' . $took . '.',
+            default => $record['detail'],
+        };
+        return Sheet::headLine($record['status_color'], $record['status_label'], $line);
+    }
+
+    /** "41 seconds" between start and finish, or null when the finish wasn't recorded. */
+    /** What cleanup does to this backup in each place it is stored. S3 has its own policy per type. */
+    private function keepRows(array $run): array
+    {
+        $values = $this->formValues();
+        $kind = $run['mode'] === 'full-quiesced' ? 'full' : 'database';
+        $type = strtolower(Messages::type($run['mode']));
+        $below = static fn (?string $text) => $text === null ? [] : [Text::make($text)];
+        $rows = [];
+        // Off only stops the automatic run: Run cleanup still applies each place's rule below.
+        if (!($values['automatic_retention'] ?? true)) {
+            $rows[] = Sheet::row(TextEntry::make('d_keep')->label('Cleanup')->state('Automatic cleanup is off')
+                ->belowContent($below('The rules below apply only when you run cleanup.')),
+                [$this->link('detailsKeep', 'Change', $this->settingsUrl('cleanup'))]);
+        }
+        $local = (int) ($values['retention_keep_' . $kind] ?? 0);
+        if ($run['local']) {
+            $rows[] = Sheet::row(TextEntry::make('d_keep_local')->label('This server')->state('Deleted after ' . $local . ' newer ' . $type . ' backups')
+                ->belowContent($below('Or delete it yourself from the row menu.')),
+                [$this->link('detailsKeepLocal', 'Change', $this->settingsUrl('storage'))]);
+        }
+        if (in_array($run['remote'], ['delivered', 'present'], true)) {
+            $policy = $values['s3_retention_policy_' . $kind] ?? 'local-count';
+            $state = match ($policy) {
+                'count' => 'Deleted after ' . (int) ($values['s3_retention_keep_' . $kind] ?? 0) . ' newer ' . $type . ' backups',
+                'age' => 'Deleted ' . (int) ($values['s3_retention_days_' . $kind] ?? 0) . ' days after it was made',
+                'keep-all' => 'Kept. Cleanup never deletes it',
+                default => 'Deleted after ' . $local . ' newer ' . $type . ' backups',
+            };
+            $rows[] = Sheet::row(TextEntry::make('d_keep_s3')->label('S3')->state($state)
+                ->belowContent($below(($policy === 'keep-all' ? '' : 'The newest backup in S3 is always kept. ') . 'Bucket lifecycle rules can also delete it.')),
+                [$this->link('detailsKeepS3', 'Change', $this->settingsUrl('s3'))]);
+        }
+        return $rows;
+    }
+
+    private function took(array $run): ?string
+    {
+        if (($run['finished_at'] ?? null) === null || $run['created_at'] === null) { return null; }
+        return Messages::duration($run['finished_at'] - $run['created_at']);
     }
 
     private function detailsSchema(array $record): array
     {
         if ($record['kind'] !== 'run') {
-            return [
+            return [Sheet::section('Backup')->schema(Sheet::rows([
                 TextEntry::make('d_task')->label('Task ID')->state($record['request_id'])->fontFamily(FontFamily::Mono)->copyable(request()->isSecure()),
-                TextEntry::make('d_status')->label('Status')->state($record['status_label'] . '. ' . $record['detail']),
-            ];
+                TextEntry::make('d_type')->label('Type')->state($record['type']),
+                TextEntry::make('d_origin')->label('Started by')->state($record['origin']),
+                TextEntry::make('d_created')->label('Queued')->state($this->moment($record['created_at'])),
+            ]))];
         }
         $run = $record['run'];
         $code = $run['error'] ?? $run['verification_error'] ?? $run['delivery_error'] ?? $run['retention_error'] ?? null;
+        [$reason, $next] = Messages::reasonAndNext($code);
+        $action = $code ? (Messages::readinessItem($code, [])['action'] ?? null) : null;
+        $stopped = in_array($run['status'], ['failed', 'interrupted', 'attention'], true);
+        $took = $this->took($run);
         $format = Messages::remoteFormat($run['remote_format'] ?? null, $run['key_short'] ?? null);
+        $s3 = match (true) {
+            in_array($run['remote'], ['delivered', 'present'], true) => ['Uploaded', trim(($format ?? '') . (($run['ciphertext_size'] ?? null) !== null ? ', ' . Messages::bytes($run['ciphertext_size']) : '') . '.'
+                . ($run['remote_checked_at'] ? ' Checked ' . $this->ago($run['remote_checked_at']) . '.' : ''), ' .')],
+            $run['remote'] === 'failed' => ['Upload failed', Messages::error($run['delivery_error'] ?: 's3-delivery-failed')],
+            $run['remote'] !== 'none' => [Messages::location($run), Messages::runDetail($run)],
+            $this->uploadsToS3() => ['Not uploaded yet', null],
+            default => ['Off', 'Optional. Add a bucket to keep a copy off this server.'],
+        };
+        $below = static fn (?string $text) => $text ? [Text::make($text)] : [];
         return [
-            TextEntry::make('d_id')->label('Backup ID')->state($run['run_id'])->fontFamily(FontFamily::Mono)
-                ->copyable(request()->isSecure())->copyMessage('Copied'),
-            Grid::make(2)->schema([
-                TextEntry::make('d_created')->label('Created')->state($this->moment($run['created_at'])),
-                TextEntry::make('d_type')->label('Type')->state(Messages::mode($run['mode']) . ($record['origin'] ? ', ' . strtolower($record['origin']) : '')),
-                TextEntry::make('d_size')->label('Size')->state(Messages::bytes($run['size'])),
-                TextEntry::make('d_location')->label('Stored on')->state($record['location']),
-                TextEntry::make('d_remote_format')->label('S3 copy')->state($format . (($run['ciphertext_size'] ?? null) !== null ? ', ' . Messages::bytes($run['ciphertext_size']) : ''))->visible($format !== null),
-                TextEntry::make('d_verified')->label('Last verified')->state($run['verified_at'] ? $this->moment($run['verified_at']) : 'Not verified yet')
-                    ->belowContent($run['verified_at'] && $run['verification_source'] === 'capture' ? [Text::make('At creation')] : []),
-                TextEntry::make('d_status')->label('Status')->state($record['status_label']),
-                TextEntry::make('d_retrieved')->label('Downloaded copy kept until')->state(fn () => $this->moment($run['local_download_until'] ?? null))
+            Sheet::section('What went wrong')->schema([
+                Sheet::row(TextEntry::make('d_reason')->label('Reason')->state($reason)),
+                Sheet::row(TextEntry::make('d_next')->label('Next step')->state($next)->visible($next !== null),
+                    $action && $action['kind'] === 'settings' ? [$this->link('detailsFix', $action['label'], $this->settingsUrl($action['target'] ?? 'settings'))] : []),
+                Sheet::row(TextEntry::make('d_code')->label('Error code')->state($code)->fontFamily(FontFamily::Mono)->belowContent($below('For support and the command line.'))),
+            ])->visible($code !== null),
+            Sheet::section('Backup')->schema(Sheet::rows([
+                TextEntry::make('d_id')->label('Backup ID')->state($run['run_id'])->fontFamily(FontFamily::Mono)
+                    ->copyable(request()->isSecure())->copyMessage('Copied'),
+                TextEntry::make('d_type')->label('Type')->state(Messages::type($run['mode'])),
+                TextEntry::make('d_origin')->label('Started by')->state($record['origin'] ?? 'Not recorded'),
+                TextEntry::make('d_created')->label('Started')->state($this->moment($run['created_at'])),
+                TextEntry::make('d_finished')->label($stopped ? 'Stopped' : 'Finished')
+                    ->state(($run['finished_at'] ?? null) !== null ? $this->moment($run['finished_at']) : 'Not recorded')
+                    ->belowContent($below($took !== null && !$stopped ? 'Took ' . $took : null))
+                    ->visible($run['status'] !== 'running'),
+                TextEntry::make('d_size')->label('Size')->state($run['size'] === null && $stopped ? 'None' : Messages::bytes($run['size']))
+                    ->belowContent($below($run['size'] === null && $stopped ? 'Nothing was kept.' : null)),
+            ])),
+            Sheet::section('Location')->schema(Sheet::rows([
+                TextEntry::make('d_local')->label('This server')->state($run['local'] ? 'Stored' : 'Not stored')
+                    ->belowContent($below($run['local'] ? 'Not encrypted. It holds customer data, .env and APP_KEY, so keep downloads private.' : null)),
+                TextEntry::make('d_retrieved')->label('Copy from S3 kept until')->state(fn () => $this->moment($run['local_download_until'] ?? null))
                     ->visible((bool) ($run['local_download_until'] ?? null)),
-            ]),
-            TextEntry::make('d_detail')->label('Details')->state($record['detail'])->visible((bool) $record['detail']),
-            TextEntry::make('d_code')->label('Error code')->state($code)->fontFamily(FontFamily::Mono)->visible((bool) $code),
+                TextEntry::make('d_s3')->label('S3')->state($s3[0])->belowContent($below($s3[1])),
+            ]))->visible(!$stopped),
+            Sheet::section('Check')->schema(Sheet::rows([
+                TextEntry::make('d_verified')->label('Last verified')->state($run['verified_at'] ? $this->moment($run['verified_at']) : 'Not verified yet')
+                    ->belowContent($below($run['verified_at'] && $run['verification_source'] === 'capture'
+                        ? 'When it was made. Verify checks the file against its checksums again.' : 'Verify checks the file against its checksums.')),
+            ]))->visible($run['status'] === 'ready' || $run['status'] === 'damaged'),
+            Sheet::section('Restore')->schema(Sheet::contentRows([
+                Text::make('Restore into a new folder and a new database, never over the running site. As the site user, this copies the backup out:'),
+                $this->command('paymenter_backups export ' . self::shell($run['run_id']) . ' --output /new/folder'),
+                Actions::make([$this->link('detailsRestoreSteps', 'Full restore steps', static::getUrl(['tab' => 'help']) . '#restoring')]),
+            ]))->visible($run['status'] === 'ready'),
+            Sheet::section('Keep')->schema(fn () => $this->keepRows($run))->visible($run['status'] === 'ready'),
         ];
     }
 }

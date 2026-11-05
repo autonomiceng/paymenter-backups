@@ -14,6 +14,8 @@ use Filament\Schemas\Components\Text;
 use Filament\Schemas\Schema;
 use Filament\Support\Enums\FontWeight;
 use Filament\Support\Enums\Size;
+use Illuminate\Contracts\Support\Htmlable;
+use Illuminate\Support\HtmlString;
 use Paymenter\Extensions\Others\Backups\Messages;
 use Paymenter\Extensions\Others\Backups\Admin\Support\Sheet;
 
@@ -64,12 +66,12 @@ trait BuildsPageContent
                 ->persistTabInQueryString('tab')
                 ->tabs([
                     Tab::make('Backups')->id('backups')->schema([
-                        Sheet::make([
-                            $this->installationSection(),
+                        Sheet::split([
                             $this->setupSection(),
                             ...$this->alertCallouts(),
-                            $this->overviewSection(),
-                        ]),
+                            $this->scheduleSection(),
+                            $this->storageSection(),
+                        ], [$this->checksSection()]),
                         EmbeddedTable::make(),
                     ]),
                     Tab::make('Settings')->id('settings')->schema([
@@ -80,40 +82,193 @@ trait BuildsPageContent
         ]);
     }
 
+    /** One line under the title: how backups are doing, then the next thing to know. */
+    public function getSubheading(): string|Htmlable|null
+    {
+        $this->overview();
+        if ($this->overviewError !== null) { return Sheet::headLine('danger', 'Backups can\'t start', 'See below.'); }
+        foreach ($this->overview()['runs'] as $run) {
+            if ($run['status'] === 'running') {
+                return Sheet::headLine('info', Messages::mode($run['mode']) . ' running', 'Started ' . $this->ago($run['created_at']) . '. The site stays online.');
+            }
+        }
+        if (!$this->initialized()) { return Sheet::headLine('warning', 'Setup needed', 'Save your settings to finish setup.'); }
+        if (!$this->schedulerFresh()) {
+            $fix = ' <a class="underline" href="#setup">See the fix</a>';
+            return Sheet::headLine('warning', 'Backups waiting', new HtmlString(e($this->lastTick()
+                ? 'Paymenter\'s cron job stopped ' . $this->ago($this->lastTick()) . '.' : 'Paymenter\'s cron job hasn\'t run yet.') . $fix));
+        }
+        if ($this->nothingCanStart()) {
+            return Sheet::headLine('warning', 'Setup needed', ($this->blockers('database-online')[0]['title'] ?? 'Finish setup') . '. See Checks.');
+        }
+        $newest = null;
+        foreach ($this->overview()['runs'] as $run) {
+            if ($run['status'] !== 'deleted' && ($newest === null || $run['created_at'] > $newest['created_at'])) { $newest = $run; }
+        }
+        if ($newest !== null && in_array($newest['status'], ['failed', 'interrupted', 'attention', 'damaged'], true)) {
+            return Sheet::headLine('danger', 'Last backup failed', new HtmlString(e(Messages::mode($newest['mode']) . ' from ') . $this->moment($newest['created_at']) . '. Its Details say why.'));
+        }
+        $good = array_filter([$this->lastGood('full-quiesced'), $this->lastGood('database-online')]);
+        if (!$good) { return Sheet::headLine('gray', 'No backups yet', 'Create a backup or turn on a schedule.'); }
+        $last = max(array_map(static fn ($run) => $run['created_at'], $good));
+        return Sheet::headLine('success', 'Backups OK', new HtmlString('Last backup ' . $this->moment($last) . '.'));
+    }
+
+    /** Every blocker with its exact fix. Only Paymenter's cron job missing gets its own title. */
     private function setupSection(): Section
     {
-        return Sheet::section('Setup')->id('setup')
+        $cronOnly = function () {
+            $items = array_merge(...array_values($this->setupGroups()));
+            return $items && !array_filter($items, static fn ($item) => !in_array($item['code'], self::CRON_CODES, true));
+        };
+        return Sheet::section(fn () => $cronOnly() ? 'Fix the cron job' : 'Setup needed')->id('setup')
             ->schema(function () {
                 $groups = $this->setupGroups();
-                $blocks = [];
-                if ($groups['all']) {
-                    $blocks[] = Group::make([Text::make('All backups')->weight(FontWeight::SemiBold), ...(array_map(fn ($item) => $this->setupItem($item, 'setupAll'), $groups['all']))]);
-                }
+                $blocks = array_map(fn ($item) => $this->setupItem($item, 'setupAll'), $groups['all']);
                 foreach (self::KIND_LABELS as $mode => $label) {
-                    [, , $line] = $this->typeStatus($mode);
-                    $blocks[] = Group::make([
-                        Sheet::row(TextEntry::make('setup_' . self::KINDS[$mode])->label($label)->state($line)),
-                        ...array_map(fn ($item) => $this->setupItem($item, 'setup' . ucfirst(self::KINDS[$mode])), $groups[$mode]),
-                    ]);
+                    if (!$groups[$mode]) { continue; }
+                    $blocks[] = Group::make([Text::make($label . ' only')->weight(FontWeight::SemiBold)->extraAttributes(['class' => 'backups-group-title']),
+                        ...array_map(fn ($item) => $this->setupItem($item, 'setup' . ucfirst(self::KINDS[$mode])), $groups[$mode])]);
                 }
                 return $blocks;
             })
             ->visible(fn () => $this->setupOpen());
     }
 
-    private function installationSection(): Section
+    /** "Weekly, Sunday at 03:00 UTC" from the saved schedule, in its own time zone. */
+    private function scheduleSentence(string $mode): string
     {
-        return Sheet::section(Messages::INSTALLATION_TITLE)->schema(function () {
-            $checks = $this->configuration()['installation']['checks'] ?? [];
-            $rows = [];
-            foreach (array_keys(Messages::INSTALLATION_CHECKS) as $key) {
-                $check = $checks[$key] ?? ['state' => 'missing', 'code' => 'engine-unavailable'];
-                $label = Messages::INSTALLATION_CHECKS[$key];
-                $rows[] = Sheet::row(TextEntry::make('installation_' . $key)->label($label)
-                    ->state(substr(Messages::installationCheck($key, $check), strlen($label) + 2)));
-            }
-            return $rows;
-        })->visible(fn () => isset($this->configuration()['installation']));
+        $values = $this->formValues();
+        $kind = self::KINDS[$mode];
+        $frequency = $values[$kind . '_schedule'] ?? 'off';
+        $zone = ' ' . ($values['schedule_timezone'] ?? 'UTC');
+        $days = array_map(static fn ($day) => Messages::WEEKDAYS[$day] ?? '', (array) ($values[$kind . '_weekdays'] ?? []));
+        return match ($frequency) {
+            'hourly' => ((int) ($values['database_every_hours'] ?? 1) === 1 ? 'Every hour' : 'Every ' . (int) $values['database_every_hours'] . ' hours')
+                . ' at :' . str_pad((string) (int) ($values['database_minute'] ?? 0), 2, '0', STR_PAD_LEFT) . $zone,
+            'daily' => 'Daily at ' . ($values[$kind . '_time'] ?? '') . $zone,
+            'weekly' => 'Weekly, ' . implode(', ', $days) . ' at ' . ($values[$kind . '_time'] ?? '') . $zone,
+            default => 'Off',
+        };
+    }
+
+    private function scheduleSection(): Section
+    {
+        $next = function (string $mode) {
+            if (($this->scheduleFor($mode)['frequency'] ?? 'off') === 'off') { return [Text::make('Create these backups by hand, or turn on a schedule.')]; }
+            $at = $this->scheduleFor($mode)['next_at'] ?? null;
+            return [Text::make($at ? new HtmlString('Next ' . $this->moment($at) . ($this->schedulerFresh() ? '' : ', once the cron job runs')) : 'None in the next 8 days')];
+        };
+        $row = fn (string $mode) => Sheet::row(TextEntry::make('schedule_' . self::KINDS[$mode])->label(self::KIND_LABELS[$mode])
+            ->state(fn () => $this->scheduleSentence($mode))->belowContent(fn () => $next($mode)),
+            [$this->link('schedule' . ucfirst(self::KINDS[$mode]) . 'Change', 'Change', $this->settingsUrl('schedule'))]);
+        return Sheet::section('Schedule')->schema([$row('full-quiesced'), $row('database-online')]);
+    }
+
+    private function storageSection(): Section
+    {
+        $count = fn () => count(array_filter($this->overview()['runs'], static fn ($run) => $run['local']));
+        $plural = static fn (int $n, string $word) => $n . ' ' . $word . ($n === 1 ? '' : 's');
+        return Sheet::section('Storage')->schema([
+            Sheet::row(TextEntry::make('storage_local')->label('This server')->state(function () {
+                if (!($this->storage()['keep_local'] ?? true)) { return 'Off'; }
+                $space = $this->configuration()['space'] ?? null;
+                if (!$space || $space['used'] === null) { return 'Nothing stored yet'; }
+                return Messages::bytes($space['used']) . ' of ' . Messages::bytes($space['budget']) . ' used' . (($space['state'] ?? null) === 'full' ? '. Full.' : '');
+            })->belowContent(fn () => [Text::make(($this->storage()['keep_local'] ?? true)
+                ? $plural($count(), 'backup') : 'Each backup is deleted here once its S3 copy is verified.')]),
+                [$this->testStorageAction()->button()->outlined()->size(Size::Small)]),
+            Sheet::row(TextEntry::make('storage_s3')->label('S3')->state(fn () => $this->uploadsToS3() ? ($this->storage()['s3_bucket'] ?: 'No bucket') : 'Off')
+                ->belowContent(fn () => [Text::make($this->s3Sentence())]),
+                [$this->link('storageS3', 'Set up S3', $this->settingsUrl('s3'))->label(fn () => $this->uploadsToS3() ? 'Change' : 'Set up S3')]),
+            Sheet::row(TextEntry::make('storage_keep')->label('Keep')->state(function () {
+                $values = $this->formValues();
+                return 'Newest ' . (int) ($values['retention_keep_full'] ?? 0) . ' full and ' . (int) ($values['retention_keep_database'] ?? 0) . ' database backups';
+            })->belowContent(fn () => [Text::make(($this->formValues()['automatic_retention'] ?? true) ? 'Cleanup runs after each backup.' : 'Automatic cleanup is off.')]),
+                [$this->applyRetentionAction()->button()->outlined()->size(Size::Small)]),
+        ]);
+    }
+
+    /** What the S3 copy needs, or when it was last made. */
+    private function s3Sentence(): string|HtmlString
+    {
+        if (!$this->uploadsToS3()) { return 'Optional. Add a bucket to keep a copy off this server.'; }
+        if (!$this->savedS3Keys()) { return 'Keys missing. Uploads start once keys are saved in Settings.'; }
+        $pending = (int) ($this->overview()['s3_pending']['count'] ?? 0);
+        $parts = [];
+        if ($this->encryption()['enabled'] ?? false) {
+            $parts[] = $this->pendingKeyShort() !== null ? 'Encrypted once the recovery key is saved.' : 'Encrypted.';
+        } else {
+            $parts[] = 'Not encrypted.';
+        }
+        $run = $this->run($this->overview()['last_good']['s3'] ?? null);
+        if ($run) {
+            $parts[] = 'Last upload ' . $this->moment($run['created_at']) . e($run['remote_checked_at'] ? ', checked ' . $this->ago($run['remote_checked_at']) . '.' : '.');
+        }
+        if ($pending) { $parts[] = e($pending . ($pending === 1 ? ' backup' : ' backups') . ' not uploaded yet.'); }
+        return new HtmlString(implode(' ', $parts));
+    }
+
+    private function checksSection(): Section
+    {
+        return Sheet::section(Messages::INSTALLATION_TITLE)->id('checks')
+            ->afterHeader([Text::make(function () {
+                $steps = $this->checkSteps();
+                return count(array_filter($steps, static fn ($step) => $step['color'] === 'success')) . ' of ' . count($steps) . ' OK';
+            })->color('gray')])
+            ->schema(fn () => [Sheet::steps($this->checkSteps(), false)]);
+    }
+
+    /** The rail: each check with a state word and, unless it's fine, why and what to do. */
+    private function checkSteps(): array
+    {
+        $fix = ' <a class="underline" href="#setup">See the fix</a>';
+        $last = $this->lastTick();
+        $steps = [match (true) {
+            $last === null => ['label' => 'Cron job', 'color' => 'warning', 'value' => 'Not running', 'detail' => new HtmlString('It hasn\'t run yet.' . $fix)],
+            $this->schedulerFresh() => ['label' => 'Cron job', 'color' => 'success', 'value' => 'OK', 'detail' => 'Last run ' . $this->ago($last)],
+            default => ['label' => 'Cron job', 'color' => 'warning', 'value' => 'Not running', 'detail' => new HtmlString(e('Last run ' . $this->ago($last) . '.') . $fix)],
+        }];
+        if ($this->overviewError !== null) { return $steps; }
+        foreach (['full-quiesced', 'database-online'] as $mode) { $steps[] = ['label' => self::KIND_LABELS[$mode]] + $this->typeCheck($mode); }
+        $test = $this->latestRequest('destination-test');
+        $steps[] = ['label' => 'Storage test'] + match ($this->storageTestState()) {
+            'passed' => ['color' => 'success', 'value' => 'OK', 'detail' => new HtmlString('Passed ' . $this->moment($test['finished_at'] ?? null))],
+            'stale' => ['color' => 'warning', 'value' => 'Test again', 'detail' => 'Settings changed since the last test.'],
+            'failed' => ['color' => 'danger', 'value' => 'Failed', 'detail' => Messages::error($test['error'] ?? null)],
+            'queued' => ['color' => 'info', 'value' => 'Queued', 'detail' => null],
+            default => ['color' => 'gray', 'value' => 'Not tested', 'detail' => 'Use Test storage beside This server.'],
+        };
+        $checks = $this->configuration()['installation']['checks'] ?? [];
+        foreach (['observer', 'tools', 'private_state', 'local_storage', 'offsite'] as $key) {
+            if (!isset($checks[$key])) { continue; }
+            [$word, $color, $next] = Messages::installationState($key, $checks[$key]);
+            if ($key === 'local_storage' && $color === 'success') { continue; }
+            if ($key === 'offsite' && $color === 'success' && ($short = $this->keyInfo()['short'])) { $next = 'Uploads encrypted with recovery key ' . $short; }
+            $steps[] = ['label' => Messages::INSTALLATION_CHECKS[$key], 'color' => $color, 'value' => $word, 'detail' => $color === 'success' && $key !== 'offsite' ? null : $next];
+        }
+        if ($this->uploadsToS3() && !$this->savedS3Keys()) {
+            $steps[] = ['label' => 'S3 access keys', 'color' => 'danger', 'value' => 'Missing', 'detail' => new HtmlString('Uploads to S3 can\'t start. <a class="underline" href="' . e($this->settingsUrl('s3')) . '">Add keys in Settings</a>')];
+        }
+        if ($this->pendingKeyShort() !== null) {
+            $steps[] = ['label' => 'Recovery key', 'color' => 'warning', 'value' => 'Not saved', 'detail' => new HtmlString('Uploads start after you save it outside this server.' . $fix)];
+        }
+        return $steps;
+    }
+
+    /** A backup type's state for the rail. */
+    private function typeCheck(string $mode): array
+    {
+        [, $color] = $this->typeStatus($mode);
+        $blockers = $this->blockers($mode);
+        if ($blockers) {
+            return ['color' => $color, 'value' => 'Not ready', 'detail' => implode('. ', array_unique(array_map(static fn ($item) => $item['title'], $blockers))) . '.'];
+        }
+        if ($color === 'info') {
+            $waiting = array_values(array_filter($this->readiness($mode)['items'], static fn ($item) => in_array($item['code'], self::TRANSIENT, true)));
+            return ['color' => 'info', 'value' => 'Waiting', 'detail' => $waiting ? Messages::error($waiting[0]['code']) : null];
+        }
+        return $color === 'gray' ? ['color' => 'gray', 'value' => 'Off', 'detail' => 'No schedule.'] : ['color' => 'success', 'value' => 'OK', 'detail' => null];
     }
 
     /** Transient conditions, one callout each. */
@@ -131,7 +286,7 @@ trait BuildsPageContent
                 ->visible(fn () => (bool) ($this->overview()['job_wait_overdue'] ?? false)),
             Callout::make('Backups in S3 aren\'t encrypted')->info()
                 ->description('Save settings to turn on encryption for new uploads. Backups already in S3 stay as they are.')
-                ->actions([$this->link('alertEncryption', 'Go to Storage settings', $this->settingsUrl('storage'))])
+                ->actions([$this->link('alertEncryption', 'Go to S3 settings', $this->settingsUrl('s3'))])
                 ->visible(fn () => $this->overviewError === null && $this->settingsVersion() < 2 && $this->uploadsToS3()
                     && !($this->encryption()['enabled'] ?? true)),
             Callout::make(fn () => $pending() . ($pending() === 1 ? ' backup isn\'t' : ' backups aren\'t') . ' uploaded to S3 yet')->warning()
@@ -139,7 +294,7 @@ trait BuildsPageContent
                 ->visible(fn () => $pending() > 0),
             Callout::make('Backup space is full')->danger()
                 ->description(fn () => 'Backups on this server reached the ' . Messages::bytes($this->configuration()['space']['budget'] ?? null) . ' limit. New backups stop until you delete old ones or raise the limit.')
-                ->actions([$this->link('alertSpace', 'Go to Storage settings', $this->settingsUrl('storage'))])
+                ->actions([$this->link('alertSpace', 'Change space limit', $this->settingsUrl('storage'))])
                 ->visible(fn () => ($this->configuration()['space']['state'] ?? null) === 'full'),
             Callout::make('The site is in maintenance mode')->info()
                 ->description('Queued tasks wait until it\'s back online.')
@@ -184,76 +339,5 @@ trait BuildsPageContent
             return $current !== null && ($test['result_destination_id'] ?? null) === $current ? 'passed' : 'stale';
         }
         return in_array($test['status'], self::ACTIVE, true) ? 'queued' : $test['status'];
-    }
-
-    private function overviewSection(): Section
-    {
-        $next = function (string $mode) {
-            $schedule = $this->scheduleFor($mode);
-            if (($schedule['frequency'] ?? 'off') === 'off') { return 'Off'; }
-            return ($schedule['next_at'] ?? null) ? $this->moment($schedule['next_at']) : 'None in the next 8 days';
-        };
-        return Sheet::section('Overview')
-            ->schema(Sheet::rows([
-                    TextEntry::make('overview_last_full')->label('Last full backup')
-                        ->state(fn () => ($run = $this->lastGood('full-quiesced')) ? $this->moment($run['created_at']) : 'None yet'),
-                    TextEntry::make('overview_last_database')->label('Last database backup')
-                        ->state(fn () => ($run = $this->lastGood('database-online')) ? $this->moment($run['created_at']) : 'None yet'),
-                    TextEntry::make('overview_next_full')->label('Next full backup')->state(fn () => $next('full-quiesced')),
-                    TextEntry::make('overview_next_database')->label('Next database backup')->state(fn () => $next('database-online')),
-                    TextEntry::make('overview_last_s3')->label('Last upload to S3')->state(function () {
-                        $run = $this->run($this->overview()['last_good']['s3'] ?? null);
-                        if (!$run) { return 'None yet'; }
-                        return $this->moment($run['created_at']);
-                    })->belowContent(function () {
-                        $run = $this->run($this->overview()['last_good']['s3'] ?? null);
-                        return $run ? [Text::make($run['remote_checked_at'] ? 'Checked ' . $this->ago($run['remote_checked_at']) : 'Not checked yet')] : [];
-                    })->visible(fn () => $this->uploadsToS3()),
-                    TextEntry::make('overview_storage')->label('Stored on')->state(function () {
-                        $storage = $this->storage();
-                        if (!($this->configuration()['valid'] ?? false)) { return 'Fix your settings to see this'; }
-                        $places = [];
-                        if ($storage['keep_local'] ?? true) { $places[] = 'This server'; }
-                        if ($storage['upload_s3'] ?? false) { $places[] = 'S3 (' . ($storage['s3_bucket'] ?: 'no bucket') . ')' . ($this->savedS3Keys() ? '' : ', keys missing'); }
-                        return implode(', ', $places) ?: 'This server';
-                    }),
-                    TextEntry::make('overview_encryption')->label('S3 encryption')->state(function () {
-                        if (!($this->encryption()['enabled'] ?? false)) { return 'Off'; }
-                        $key = $this->keyInfo();
-                        return match ($this->keyState()) {
-                            'none' => 'On, no recovery key yet',
-                            'pending' => 'On, recovery key ' . ($this->pendingKeyShort() ?? '') . ' not confirmed',
-                            default => 'On, recovery key ' . $key['short'] . ($this->pendingKeyShort() !== null ? '; new key ' . $this->pendingKeyShort() . ' not confirmed' : ''),
-                        };
-                    })->visible(fn () => $this->uploadsToS3()),
-                    TextEntry::make('overview_space')->label('Space used')->state(function () {
-                        $space = $this->configuration()['space'] ?? null;
-                        if (!$space || $space['used'] === null) { return 'Nothing stored yet'; }
-                        $count = count(array_filter($this->overview()['runs'], static fn ($run) => $run['local']));
-                        $used = Messages::bytes($space['used']) . ' of ' . Messages::bytes($space['budget']);
-                        if (($space['state'] ?? null) === 'full') { return $used . '. Full.'; }
-                        return $used . ($count === 0 ? ' (no backups stored here)' : ', ' . $count . ' ' . ($count === 1 ? 'backup' : 'backups'));
-                    }),
-                    TextEntry::make('overview_scheduler')->label('Cron job')->state(function () {
-                        $last = $this->lastTick();
-                        if (!$last) { return 'Never ran'; }
-                        return $this->schedulerFresh() ? 'Ran ' . $this->ago($last) : 'Not running (last run ' . $this->ago($last) . ')';
-                    })->color(fn () => $this->schedulerFresh() ? null : 'warning'),
-                    TextEntry::make('overview_test')->label('Storage test')->state(function () {
-                        $test = $this->latestRequest('destination-test');
-                        return match ($this->storageTestState()) {
-                            'none' => 'Not tested',
-                            'passed' => 'OK ' . $this->ago($test['finished_at']),
-                            'stale' => 'Settings changed since the last test',
-                            'failed' => 'Failed ' . $this->ago($test['finished_at']) . '. ' . Messages::error($test['error']),
-                            'cancelled' => 'Last test cancelled',
-                            'expired' => 'Last test expired before it ran',
-                            default => 'Queued',
-                        };
-                    })->color(fn () => $this->storageTestState() === 'failed' ? 'danger' : null),
-            ], [
-                'overview_space' => [$this->applyRetentionAction()],
-                'overview_test' => [$this->testStorageAction()],
-            ]));
     }
 }
