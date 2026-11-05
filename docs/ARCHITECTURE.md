@@ -493,6 +493,10 @@ before shell parsing, preserves literal backslashes and refuses an unescaped
 `%` because cron would turn the remainder into stdin. Shell and systemd parsing
 remain separate from this cron preprocessing. Discovery parser version 4
 invalidates older cached interpretations and requires rediscovery.
+Help preserves the first matching guarded scheduler from inventory order. Its
+queue command uses the first coordinated crontab worker with a verified private
+lock, otherwise the private `queue.lock` fallback. Later matches never replace
+either choice. These display suggestions do not authorize capture.
 No scheduler, failed/incomplete discovery, unsupported/uncoordinated jobs,
 continuous workers, unsafe/missing locks and explicit-list mismatch refuse.
 Empty v2 job_lock_paths derives the verified union; nonempty lists must match.

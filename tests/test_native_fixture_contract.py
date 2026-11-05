@@ -66,6 +66,49 @@ class NativePanelEnvironmentTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, 'Node required'):
             self.environment(NODE_BINARY=str(self.work / 'missing-node'))
 
+    def test_panel_discovery_imports_checkout_package_without_parent_pythonpath(self):
+        (self.work / 'src').symlink_to(ROOT / 'src', target_is_directory=True)
+        tests = self.work / 'tests'
+        tests.mkdir()
+        (tests / 'test_panel_import.py').write_text('''import os
+import unittest
+from paymenter_backups.common import State
+
+class PackageImport(unittest.TestCase):
+    def test_package_is_available_without_parent_configuration(self):
+        self.assertEqual(State.__module__, 'paymenter_backups.common')
+        self.assertNotIn('DB_PASSWORD', os.environ)
+        self.assertNotIn('APP_ENV', os.environ)
+''')
+        parent = {'PATH': str(self.bin), 'PYTHONPATH': '/fixture/parent-pythonpath',
+                  'DB_PASSWORD': 'synthetic-parent-only', 'APP_ENV': 'production'}
+        with patch.dict(os.environ, parent, clear=True), \
+             patch.object(native_integration, 'ROOT', self.work):
+            native_integration.panel_regressions(self.work / 'app', '/fixture/php', self.work)
+
+    def test_optional_panel_browsers_skip_when_node_module_or_chromium_is_missing(self):
+        cases = [
+            {'NODE_BINARY': str(self.work / 'missing-node')},
+            {'PAYMENTER_BACKUPS_PLAYWRIGHT': str(self.work / 'missing-playwright')},
+            {'PLAYWRIGHT_BROWSERS_PATH': str(self.work / 'missing-browsers')},
+            {'NODE_BINARY': None, 'PATH': ''},
+        ]
+        for changes in cases:
+            with self.subTest(changes=changes):
+                environment = dict(os.environ, PYTHONPATH=str(ROOT / 'src'))
+                for key, value in changes.items():
+                    if value is None:
+                        environment.pop(key, None)
+                    else:
+                        environment[key] = value
+                result = subprocess.run(
+                    [sys.executable, '-m', 'unittest',
+                     'test_panel_create_actions.CreateActions',
+                     'test_panel_schedule.StaffSchedule', 'test_panel_poll_times.PollTimes'],
+                    cwd=ROOT / 'tests', env=environment, capture_output=True, text=True)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIn('skipped=3', result.stderr)
+
 
 if __name__ == '__main__':
     unittest.main()

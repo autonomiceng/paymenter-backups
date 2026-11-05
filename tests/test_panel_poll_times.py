@@ -1,11 +1,15 @@
-"""Render the native time partial and morph it with Paymenter's bundled Alpine."""
+"""Render the native time partial and morph it with Paymenter's bundled Alpine.
+
+Set PAYMENTER_BACKUPS_PLAYWRIGHT to the installed Playwright module path.
+"""
 import json
 import os
 from pathlib import Path
-import shutil
 import subprocess
 import tempfile
 import unittest
+
+from panel_browser import browser_node
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -63,15 +67,7 @@ const { chromium } = require(process.env.PAYMENTER_BACKUPS_PLAYWRIGHT || 'playwr
                      'PHP_BINARY and PAYMENTER_TEST_APP required')
 class PollTimes(unittest.TestCase):
     def setUp(self):
-        node = shutil.which(os.environ.get('NODE_BINARY', 'node'))
-        if not node:
-            self.skipTest('Node required')
-        probe = subprocess.run([node, '-e',
-                                "const p = require(process.env.PAYMENTER_BACKUPS_PLAYWRIGHT || 'playwright'); "
-                                "if (!require('node:fs').existsSync(p.chromium.executablePath())) process.exit(1)"],
-                               capture_output=True, text=True)
-        if probe.returncode:
-            self.skipTest('Playwright and its Chromium browser required')
+        self.node = browser_node(self)
 
     def test_staff_times_survive_repeated_poll_morphs_and_changed_instants(self):
         app = Path(os.environ['PAYMENTER_TEST_APP'])
@@ -81,7 +77,7 @@ class PollTimes(unittest.TestCase):
                  str(ROOT / 'extension/Backups/resources/views/partials/moment.blade.php'), scratch],
                 capture_output=True, text=True, check=True)
             result = subprocess.run(
-                [os.environ.get('NODE_BINARY', 'node'), '-e', JS],
+                [self.node, '-e', JS],
                 input=json.dumps({'rows': json.loads(rendered.stdout),
                                  'livewire': str(app / 'vendor/livewire/livewire/dist/livewire.js')}),
                 capture_output=True, text=True)

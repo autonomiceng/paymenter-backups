@@ -178,6 +178,17 @@ trait BuildsHistoryTable
                         ->modalHeading(fn (array $record) => $isRun($record) ? Messages::mode($record['run']['mode']) : 'Queued backup')
                         ->modalDescription(fn (array $record) => $this->detailsLine($record))
                         ->modalWidth('2xl')->modalSubmitAction(false)->modalCancelActionLabel('Close')
+                        ->extraAttributes(['x-on:click.capture' => 'close()'])
+                        ->extraModalFooterActions(fn (array $record) => [
+                            Action::make('detailsVerify')->label('Verify')->icon('ri-shield-check-line')->color('gray')
+                                ->visible($isRun($record) && $record['run']['status'] === 'ready'
+                                    && ($record['run']['download'] === 'ready' || (!$record['run']['local'] && $inS3($record)))
+                                    && !$this->activeRequest('verify', $record['run_id']))
+                                ->action(fn () => $this->queue('verify', ['run_id' => $record['run_id']], 'Verification queued')),
+                            Action::make('detailsDownload')->label('Download')->icon('ri-download-2-line')->color('gray')
+                                ->visible($isRun($record) && $record['run']['download'] === 'ready')
+                                ->url($isRun($record) ? static::downloadUrl($record['run_id']) : null),
+                        ])
                         ->extraModalWindowAttributes(['class' => 'backups-details'])
                         ->schema(fn (array $record) => [Sheet::make($this->detailsSchema($record))]),
                     Action::make('verify')->label('Verify')->icon('ri-shield-check-line')
@@ -382,7 +393,10 @@ trait BuildsHistoryTable
             ])->visible($code !== null),
             Sheet::section('Backup')->schema(Sheet::rows([
                 TextEntry::make('d_id')->label('Backup ID')->state($run['run_id'])->fontFamily(FontFamily::Mono)
-                    ->copyable(request()->isSecure())->copyMessage('Copied'),
+                    ->copyable(request()->isSecure())->copyMessage('Copied')
+                    ->suffixAction(Action::make('copyBackupId')->label('Copy')->icon('ri-file-copy-line')
+                        ->visible(request()->isSecure())
+                        ->alpineClickHandler('window.navigator.clipboard.writeText(' . \Illuminate\Support\Js::from($run['run_id']) . ')')),
                 TextEntry::make('d_type')->label('Type')->state(Messages::type($run['mode'])),
                 TextEntry::make('d_origin')->label('Started by')->state($record['origin'] ?? 'Not recorded'),
                 TextEntry::make('d_created')->label('Started')->state($this->moment($run['created_at'])),

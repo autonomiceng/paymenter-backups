@@ -87,6 +87,8 @@ trait BuildsReadiness
             foreach ($this->readiness($mode)['items'] as $item) {
                 if (($item['code'] ?? null) === 'installation-not-initialized' && !$this->initialized()) { continue; }
                 if (in_array($item['code'], self::CRON_CODES, true)) { $cronCodes[$item['code']] = true; continue; }
+                // Ordinary admission waits belong in Checks, not the setup checklist.
+                if (in_array($item['code'], self::TRANSIENT, true)) { continue; }
                 if (!$cronFresh && in_array($item['code'], self::CRON_QUIET, true)) { continue; }
                 $engineStorageTest = $engineStorageTest || $item['code'] === 'storage-untested';
                 $rendered = $render($item);

@@ -893,7 +893,9 @@ PHP;
             finally { libxml_clear_errors(); libxml_use_internal_errors($previousErrors); }
             $lines = [];
             foreach ((new DOMXPath($document))->query('//*[@data-backups-command]') as $node) {
-                $line = trim($node->textContent);
+                $valueNode = $node->getElementsByTagName('span')->item(0);
+                testCheck($valueNode !== null, 'Cron command has no value span');
+                $line = trim($valueNode->textContent);
                 if (str_starts_with($line, '* * * * * ')) { $lines[] = $line; }
             }
             testCheck(count($lines) >= 2, 'Uninitialized page did not render fallback cron suggestions');
@@ -955,7 +957,7 @@ PYTHON;
             $valueNode = $node->getElementsByTagName('span')->item(0);
             testCheck($valueNode !== null && $valueNode->textContent === $passphrase,
                         'Recovery key display changed imported passphrase bytes');
-            testCheck($valueNode->getAttribute('style') === 'white-space: pre', 'Recovery key display collapses significant whitespace or splits words');
+            testCheck($valueNode->getAttribute('style') === 'min-width: 0; overflow-x: auto; white-space: pre', 'Recovery key display collapses significant whitespace or splits words');
             testCheck($node->getAttribute('role') === 'button' && $node->getAttribute('tabindex') === '0', 'Recovery key Copy is inaccessible');
             testCheck($node->getAttribute('x-on:keydown.enter.prevent') === '$el.click()'
                         && $node->getAttribute('x-on:keydown.space.prevent') === '$el.click()', 'Recovery key keyboard Copy diverges from click');

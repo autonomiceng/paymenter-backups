@@ -21,6 +21,10 @@ namespace Filament\Forms\Components { class Radio extends \Filament\Schemas\Comp
 namespace Filament\Support\Enums { enum FontFamily { case Mono; } enum Size { case Small; } enum Alignment { case Start; case End; } }
 namespace Illuminate\Contracts\Support { interface Htmlable { public function toHtml(); } }
 namespace Illuminate\Support {
+    // Schema traversal records the clipboard handler without executing it.
+    class Js {
+        public static function from($value): string { return json_encode($value, JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_AMP | JSON_HEX_QUOT | JSON_THROW_ON_ERROR); }
+    }
     class HtmlString implements \Illuminate\Contracts\Support\Htmlable {
         public function __construct(private string $html = '') {}
         public function toHtml() { return $this->html; }

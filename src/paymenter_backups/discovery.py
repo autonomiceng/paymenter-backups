@@ -51,20 +51,26 @@ def cron_command(line):
 
 
 def suggestions(state, envelope, inventory=None):
+    """Keep the first guarded scheduler and first verified crontab queue worker."""
     php = envelope.get('tools', {}).get('php') or '/usr/bin/php'
     prefix = '* * * * * /usr/bin/flock -n '
     suffix = ' ' + cron_quote(php) + ' ' + cron_quote(str(state.app / 'artisan'))
     scheduler = prefix + cron_quote(str(state.root / 'scheduler.lock')) + suffix + ' schedule:run >/dev/null 2>&1'
+    queue = prefix + cron_quote(str(state.root / 'queue.lock')) + suffix + ' queue:work --stop-when-empty --max-time=50 >/dev/null 2>&1'
+    scheduler_selected = queue_selected = False
     for item in (inventory or {}).get('items', []):
         try:
             parsed = parse(item['command'], state.app, cron=False)
         except (BackupError, KeyError):
             continue
-        if guarded_command(parsed['command']):
+        if not scheduler_selected and guarded_command(parsed['command']):
             scheduler = '* * * * * ' + ' '.join(cron_quote(word) for word in shlex.split(parsed['command'])) + ' >/dev/null 2>&1'
-            break
-    return {'scheduler': scheduler,
-            'queue': prefix + cron_quote(str(state.root / 'queue.lock')) + suffix + ' queue:work --stop-when-empty --max-time=50 >/dev/null 2>&1'}
+            scheduler_selected = True
+        if (not queue_selected and item.get('source') == 'crontab' and parsed['kind'] == 'queue-worker'
+                and parsed['coordination'] == 'coordinated' and lock_safe(parsed['lock'])):
+            queue = '* * * * * ' + ' '.join(cron_quote(word) for word in shlex.split(parsed['command'])) + ' >/dev/null 2>&1'
+            queue_selected = True
+    return {'scheduler': scheduler, 'queue': queue}
 
 
 def guarded_command(command):

@@ -86,7 +86,7 @@ trait BuildsSettingsForm
 
                 Sheet::section('Schedule')->id('schedule')->description('A new or changed schedule starts at its next time.')->schema(Sheet::contentRows([
                     Grid::make(['default' => 1, 'md' => 2])->schema([
-                        Group::make()->columns(1)->schema([
+                        Group::make()->columns(1)->extraAttributes(['style' => 'align-content: start; align-self: start; min-width: 0'])->schema([
                             Text::make('Full backups')->weight(FontWeight::SemiBold)->columnSpanFull(),
                             Text::make('The database and all Paymenter files, except logs, cache and sessions. Cron jobs pause while it copies. The site stays online.'),
                             Select::make('full_schedule')->label('Frequency')->options(Settings::SELECTS['full_schedule'])->required()->selectablePlaceholder(false),
@@ -97,7 +97,7 @@ trait BuildsSettingsForm
                                 Actions::make([$this->link('scheduleFullSetup', 'See what\'s needed', static::getUrl(['tab' => 'backups']) . '#setup')]),
                             ])->verticallyAlignCenter()->visible(fn () => $this->initialized() && $this->overviewError === null && $this->blockers('full-quiesced') !== []),
                         ]),
-                        Group::make()->columns(1)->schema([
+                        Group::make()->columns(1)->extraAttributes(['style' => 'align-content: start; align-self: start; min-width: 0'])->schema([
                             Text::make('Database backups')->weight(FontWeight::SemiBold)->columnSpanFull(),
                             Text::make('The database only. The site stays online. To restore, you also need Paymenter\'s files.'),
                             Select::make('database_schedule')->label('Frequency')->options(Settings::SELECTS['database_schedule'])->required()->selectablePlaceholder(false),
@@ -254,7 +254,7 @@ trait BuildsSettingsForm
         $rows = [];
         $row = function (string $tone, string $title, array $lines = []) {
             $icon = match ($tone) { 'success' => 'ri-checkbox-circle-line', 'gray' => 'ri-question-line', default => 'ri-error-warning-line' };
-            return Flex::make([Icon::make($icon)->color($tone)->grow(false), Group::make([Text::make($title), ...$lines])->grow()])->verticallyAlignStart();
+            return Flex::make([Icon::make($icon)->color($tone)->grow(false), Group::make([Text::make($title), ...$lines])->grow()->extraAttributes(['style' => 'min-width: 0'])])->verticallyAlignStart();
         };
         if (!is_array($jobs)) {
             $rows[] = $row('gray', 'Cron jobs haven\'t been checked yet. The check runs from Paymenter\'s cron job.');
@@ -274,7 +274,7 @@ trait BuildsSettingsForm
                 $kind = ($job['kind'] ?? null) === 'queue-worker' ? 'Queue worker' : 'Cron job';
                 $hasScheduler = $hasScheduler || ($job['kind'] ?? null) === 'scheduler';
                 $source = ($job['source'] ?? null) === 'systemd' ? ' (systemd ' . ($job['label'] ?? 'unit') . ')' : '';
-                $command = filled($job['command'] ?? null) ? [Text::make((string) $job['command'])->fontFamily(FontFamily::Mono)->extraAttributes(['tabindex' => '0', 'style' => 'overflow-wrap: normal; overflow-x: auto; max-width: 100%; white-space: nowrap'])] : [];
+                $command = filled($job['command'] ?? null) ? [Text::make((string) $job['command'])->fontFamily(FontFamily::Mono)->extraAttributes(['tabindex' => '0', 'style' => 'display: block; min-width: 0; width: 100%; overflow-wrap: normal; overflow-x: auto; max-width: 100%; white-space: nowrap'])] : [];
                 $fix = $kind === 'Queue worker' ? $this->queueLine() : $this->schedulerLine();
                 $systemd = ($job['source'] ?? null) === 'systemd' && filled($job['label'] ?? null);
                 $rows[] = match ($job['coordination'] ?? null) {
