@@ -55,7 +55,7 @@ namespace {
         public array $fixture;
         private function overview(): array { return $this->fixture; }
         private function configuration(): array { return []; }
-        private function formValues(): array { return ['retention_keep_full' => 7, 'retention_keep_database' => 24]; }
+        private function formValues(): array { return ($this->fixture['settings'] ?? []) + ['retention_keep_full' => 7, 'retention_keep_database' => 24]; }
         private function uploadsToS3(): bool { return $this->fixture['uploads'] ?? true; }
         private function schedulerFresh(): bool { return true; }
         private function tasksFor(string $id): array { return []; }
@@ -103,7 +103,9 @@ namespace {
     $table = $page->table(new \Filament\Tables\Table);
     $records = $table->options['records'][0];
     $result = $records($input['page'] ?? 1, $input['perPage'] ?? 25, $input['search'] ?? null);
-    $output = ['page' => $result, 'paging' => $table->options['paginated'][0]];
+    // Linked notes are HTML; tests read their markup.
+    $plain = array_map(static fn ($row) => array_map(static fn ($value) => $value instanceof \Illuminate\Contracts\Support\Htmlable ? $value->toHtml() : $value, $row), $result->items);
+    $output = ['page' => new \Illuminate\Pagination\LengthAwarePaginator($plain, $result->total, $result->perPage, $result->currentPage), 'paging' => $table->options['paginated'][0]];
     $output['classes'] = array_map($table->options['recordClasses'][0] ?? static fn () => null, $result->items);
     if (isset($input['details'])) {
         $record = array_values(array_filter($result->items, static fn ($row) => $row['__key'] === $input['details']))[0];

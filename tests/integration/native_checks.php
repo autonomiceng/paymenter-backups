@@ -599,7 +599,7 @@ if ($mode === 'upload') {
             if ($component instanceof Filament\Schemas\Components\Callout && $component->isVisible()) {
                 $state['callouts']++;
                 $state['text'] .= $component->getHeading() . ' ' . $component->getDescription();
-            } elseif ($component instanceof Filament\Forms\Components\Radio) {
+            } elseif ($component instanceof Filament\Forms\Components\Select) {
                 foreach ($component->getOptions() as $value => $label) { if ($component->isOptionDisabled($value, $label)) { $state['disabled'][] = $value; } }
                 $state['selected'] = $component->getState();
             }

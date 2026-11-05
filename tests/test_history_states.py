@@ -20,8 +20,8 @@ def run(run_id, **changes):
 
 @unittest.skipUnless(PHP, 'PHP CLI required')
 class HistoryStates(unittest.TestCase):
-    def render(self, runs, requests=(), details=None, uploads=True):
-        overview = dict(runs=runs, requests=list(requests), uploads=uploads)
+    def render(self, runs, requests=(), details=None, uploads=True, settings=None):
+        overview = dict(runs=runs, requests=list(requests), uploads=uploads, settings=settings or {})
         result = subprocess.run([PHP, str(ROOT / 'tests/fixtures/history-table.php'), str(ROOT)],
                                 input=json.dumps(dict(overview=overview, details=details)),
                                 text=True, capture_output=True, timeout=5)
@@ -39,7 +39,8 @@ class HistoryStates(unittest.TestCase):
     def test_upload_failed_says_where_it_is_and_what_to_do(self):
         rows, classes, details = self.render([run('kept', remote='failed', delivery_error='s3-delivery-failed')], details='kept')
         self.assertEqual((rows['kept']['status_label'], rows['kept']['status_color']), ('Upload failed', 'warning'))
-        self.assertEqual(rows['kept']['detail'], 'Kept on this server. Check the S3 keys in Settings, then retry.')
+        self.assertEqual(rows['kept']['detail'], 'Kept on this server. Check the S3 keys in '
+                         '<a class="underline" href="/admin/backups?tab=settings#s3">Settings</a>, then retry.')
         self.assertIsNone(classes['kept'])
         self.assertEqual(details['sections']['Location']['S3'][0], 'Upload failed')
 
@@ -65,6 +66,19 @@ class HistoryStates(unittest.TestCase):
     def test_backup_from_an_earlier_version_says_not_recorded(self):
         _, _, details = self.render([run('old', finished_at=None)], details='old')
         self.assertEqual(details['sections']['Backup']['Finished'], ['Not recorded', []])
+
+    def test_keep_says_what_cleanup_does_in_each_place(self):
+        s3_only = run('away', local=False, remote='present', remote_checked_at=None)
+        _, _, details = self.render([s3_only], details='away', settings=dict(s3_retention_policy_database='keep-all'))
+        self.assertEqual(list(details['sections']['Keep']), ['S3'])
+        self.assertEqual(details['sections']['Keep']['S3'][0], 'Kept. Cleanup never deletes it')
+        both = run('both', remote='present', remote_checked_at=None)
+        _, _, details = self.render([both], details='both', settings=dict(s3_retention_policy_database='age', s3_retention_days_database=90))
+        keep = details['sections']['Keep']
+        self.assertEqual(keep['This server'][0], 'Deleted after 24 newer database backups')
+        self.assertEqual(keep['S3'][0], 'Deleted 90 days after it was made')
+        _, _, details = self.render([both], details='both', settings=dict(automatic_retention=False))
+        self.assertEqual(details['sections']['Keep']['Cleanup'][0], 'Kept until you run cleanup')
 
     def test_waiting_request_names_the_reason(self):
         waiting = dict(request_id='r1', action='run', status='deferred', error='job-lock-busy', created_at=2000.0,

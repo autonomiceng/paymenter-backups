@@ -86,6 +86,10 @@ trait BuildsHistoryTable
                 }
                 if ($latest && $latest['status'] === 'failed') { $detail = 'The last deletion didn\'t finish. ' . Messages::error($latest['error']); }
             }
+            // "Settings" in an upload failure's next step links to the S3 settings.
+            if ($run['remote'] === 'failed' && is_string($detail) && str_contains($detail, ' in Settings,')) {
+                $detail = new HtmlString(str_replace(' in Settings,', ' in <a class="underline" href="' . e($this->settingsUrl('s3')) . '">Settings</a>,', e($detail)));
+            }
             $origin = $run['request_id'] && isset($scheduled[$run['request_id']]) ? ($scheduled[$run['request_id']] ? 'Schedule' : 'Staff') : null;
             $rows[] = ['__key' => $run['run_id'], 'kind' => 'run', 'request_id' => null, 'created_at' => $run['created_at'],
                 'type' => Messages::type($run['mode']), 'origin' => $origin, 'size' => $run['size'], 'size_label' => Messages::bytes($run['size']), 'status_label' => $label, 'status_color' => $color,
@@ -124,7 +128,7 @@ trait BuildsHistoryTable
             ->recordClasses(fn (array $record) => ($record['run']['status'] ?? null) === 'running' ? 'backups-row-running' : null)
             ->columnManagerTriggerAction(fn (Action $action) => $action->label('Columns')->button())
             // Merge, so the skin's shared table class set for every table stays.
-            ->extraAttributes(['class' => 'beco-own-table'], merge: true)
+            ->extraAttributes(['class' => 'beco-own-table backups-history'], merge: true)
             // No polling while a dialog is open: it would re-render the dialog, including a shown recovery key.
             ->poll(fn () => $this->hasActiveWork() && !$this->mountedActions ? '5s' : null)
             // Below sm each row stacks, so long status details and both row actions get the full width.
@@ -302,6 +306,40 @@ trait BuildsHistoryTable
     }
 
     /** "41 seconds" between start and finish, or null when the finish wasn't recorded. */
+    /** What cleanup does to this backup in each place it is stored. S3 has its own policy per type. */
+    private function keepRows(array $run): array
+    {
+        $values = $this->formValues();
+        $kind = $run['mode'] === 'full-quiesced' ? 'full' : 'database';
+        $type = strtolower(Messages::type($run['mode']));
+        $below = static fn (?string $text) => $text === null ? [] : [Text::make($text)];
+        if (!($values['automatic_retention'] ?? true)) {
+            return [Sheet::row(TextEntry::make('d_keep')->label('Cleanup')->state('Kept until you run cleanup')
+                ->belowContent($below('Automatic cleanup is off. Or delete it yourself from the row menu.')),
+                [$this->link('detailsKeep', 'Change', $this->settingsUrl('cleanup'))])];
+        }
+        $local = (int) ($values['retention_keep_' . $kind] ?? 0);
+        $rows = [];
+        if ($run['local']) {
+            $rows[] = Sheet::row(TextEntry::make('d_keep_local')->label('This server')->state('Deleted after ' . $local . ' newer ' . $type . ' backups')
+                ->belowContent($below('Or delete it yourself from the row menu.')),
+                [$this->link('detailsKeepLocal', 'Change', $this->settingsUrl('storage'))]);
+        }
+        if (in_array($run['remote'], ['delivered', 'present'], true)) {
+            $policy = $values['s3_retention_policy_' . $kind] ?? 'local-count';
+            $state = match ($policy) {
+                'count' => 'Deleted after ' . (int) ($values['s3_retention_keep_' . $kind] ?? 0) . ' newer ' . $type . ' backups',
+                'age' => 'Deleted ' . (int) ($values['s3_retention_days_' . $kind] ?? 0) . ' days after it was made',
+                'keep-all' => 'Kept. Cleanup never deletes it',
+                default => 'Deleted after ' . $local . ' newer ' . $type . ' backups',
+            };
+            $rows[] = Sheet::row(TextEntry::make('d_keep_s3')->label('S3')->state($state)
+                ->belowContent($below(($policy === 'keep-all' ? '' : 'The newest backup in S3 is always kept. ') . 'Bucket lifecycle rules can also delete it.')),
+                [$this->link('detailsKeepS3', 'Change', $this->settingsUrl('s3'))]);
+        }
+        return $rows;
+    }
+
     private function took(array $run): ?string
     {
         if (($run['finished_at'] ?? null) === null || $run['created_at'] === null) { return null; }
@@ -371,11 +409,7 @@ trait BuildsHistoryTable
                 $this->command('paymenter_backups export ' . $run['run_id'] . ' --output /new/folder'),
                 Actions::make([$this->link('detailsRestoreSteps', 'Full restore steps', static::getUrl(['tab' => 'help']) . '#restoring')]),
             ]))->visible($run['status'] === 'ready'),
-            Sheet::section('Keep')->schema([Sheet::row(
-                TextEntry::make('d_keep')->label('Cleanup')->state(fn () => 'Deletes it after ' . (int) ($this->formValues()[$run['mode'] === 'full-quiesced' ? 'retention_keep_full' : 'retention_keep_database'] ?? 0)
-                    . ' newer ' . strtolower(Messages::type($run['mode'])) . ' backups')
-                    ->belowContent($below('Or delete it yourself from the row menu.')),
-                [$this->link('detailsKeep', 'Change', $this->settingsUrl('cleanup'))])])->visible($run['status'] === 'ready'),
+            Sheet::section('Keep')->schema(fn () => $this->keepRows($run))->visible($run['status'] === 'ready'),
         ];
     }
 }

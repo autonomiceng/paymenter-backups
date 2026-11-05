@@ -42,7 +42,8 @@ on the This server row. The history table has its own surface below the sheet.
 Details is a dialog in the same sheet style: What went wrong (failed only),
 Backup with Started, Finished and Took ("Not recorded" for backups made before
 finish times were recorded), Location, Check, Restore (the export command in a
-one-line box) and Keep.
+one-line box) and Keep, which says what cleanup does on this server and in S3,
+each under its own policy. Create backup picks the type with a select.
 
 Settings is one form in one sheet, with one Save button (mod+s): Schedule,
 This server, S3, Cleanup, Full backups need and Advanced, with Full backup

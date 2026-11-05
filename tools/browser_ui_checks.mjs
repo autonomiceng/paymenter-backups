@@ -190,10 +190,10 @@ async function uploadToS3(page) {
 }
 async function submitDatabaseBackup(page) {
   const dialog = page.locator('.fi-modal.fi-modal-open');
-  const database = dialog.locator('input[type=radio][value="database-online"]');
-  assert.equal(await database.isEnabled(), true, 'Database backup must be admissible');
-  if (!await database.isChecked()) await livewire(page, () => database.check());
-  assert.equal(await database.isChecked(), true, 'Manual captures must explicitly select Database');
+  const type = dialog.locator('select[id$=".mode"]');
+  assert.equal(await type.locator('option[value="database-online"]').isEnabled(), true, 'Database backup must be admissible');
+  if (await type.inputValue() !== 'database-online') await livewire(page, () => type.selectOption('database-online'));
+  assert.equal(await type.inputValue(), 'database-online', 'Manual captures must explicitly select Database');
   await livewire(page, () => dialog.getByRole('button', {name: 'Create backup', exact: true}).click());
 }
 async function findRow(page, runId) {

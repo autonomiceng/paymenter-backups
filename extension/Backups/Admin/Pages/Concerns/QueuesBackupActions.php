@@ -2,11 +2,12 @@
 namespace Paymenter\Extensions\Others\Backups\Admin\Pages\Concerns;
 
 use Filament\Actions\Action;
-use Filament\Forms\Components\Radio;
+use Filament\Forms\Components\Select;
 use Filament\Notifications\Notification;
 use Filament\Schemas\Components\Callout;
 use Filament\Schemas\Components\Text;
 use Filament\Schemas\Components\Utilities\Get;
+use Filament\Support\Enums\Alignment;
 use Illuminate\Support\Facades\Auth;
 use Paymenter\Extensions\Others\Backups\Messages;
 use Paymenter\Extensions\Others\Backups\Runtime;
@@ -83,12 +84,12 @@ trait QueuesBackupActions
             'database-online' => 'The database only. The site stays online.',
         ];
         return Action::make($name)->label('Create backup')->icon('ri-add-line')
-            ->modalHeading('Create backup')->modalWidth('lg')
+            ->modalHeading('Create backup')->modalWidth('lg')->modalFooterActionsAlignment(Alignment::End)
             ->fillForm(fn () => ['mode' => $this->preferredMode()])
             ->schema([
-                Radio::make('mode')->hiddenLabel()->required()->live()
+                Select::make('mode')->label('Type')->required()->live()->selectablePlaceholder(false)
                     ->options(Messages::MODES)
-                    ->descriptions(fn () => array_map(fn ($mode) => $base[$mode] . ($this->blockers($mode) !== [] ? ' Not ready yet.' : ''), array_combine(array_keys($base), array_keys($base))))
+                    ->helperText(fn (Get $get) => isset($base[$get('mode')]) ? $base[$get('mode')] . ($this->blockers($get('mode')) !== [] ? ' Not ready yet.' : '') : null)
                     // A type that cannot start is shown but not selectable; the callout says why.
                     ->disableOptionWhen(fn (string $value) => !$this->nothingCanStart() && $this->blockers($value) !== []),
                 Callout::make($blockedTitle)->warning()
