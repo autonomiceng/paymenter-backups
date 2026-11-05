@@ -135,21 +135,35 @@ trait BuildsPageContent
             ->visible(fn () => $this->setupOpen());
     }
 
-    /** "Weekly, Sunday at 03:00 UTC" from the saved schedule, in its own time zone. */
-    private function scheduleSentence(string $mode): string
+    /** Saved recurrence in the staff timezone, anchored to the next scheduled instant. */
+    private function scheduleSentence(string $mode): string|HtmlString
     {
         $values = $this->formValues();
         $kind = self::KINDS[$mode];
         $frequency = $values[$kind . '_schedule'] ?? 'off';
         $zone = ' ' . ($values['schedule_timezone'] ?? 'UTC');
         $days = array_map(static fn ($day) => Messages::WEEKDAYS[$day] ?? '', (array) ($values[$kind . '_weekdays'] ?? []));
-        return match ($frequency) {
+        $fallback = match ($frequency) {
             'hourly' => ((int) ($values['database_every_hours'] ?? 1) === 1 ? 'Every hour' : 'Every ' . (int) $values['database_every_hours'] . ' hours')
                 . ' at :' . str_pad((string) (int) ($values['database_minute'] ?? 0), 2, '0', STR_PAD_LEFT) . $zone,
             'daily' => 'Daily at ' . ($values[$kind . '_time'] ?? '') . $zone,
             'weekly' => 'Weekly, ' . implode(', ', $days) . ' at ' . ($values[$kind . '_time'] ?? '') . $zone,
             default => 'Off',
         };
+        if ($frequency === 'off') { return $fallback; }
+        $at = $this->scheduleFor($mode)['next_at'] ?? null;
+        if ($at === null) { return $fallback; }
+        $instant = \Carbon\CarbonImmutable::createFromTimestamp((int) $at, trim($zone));
+        $instants = [$instant->toIso8601String()];
+        if ($frequency === 'weekly') {
+            $monday = $instant->startOfWeek(\Carbon\CarbonInterface::MONDAY);
+            $instants = array_map(static fn ($day) => $monday->addDays((int) $day)
+                ->setTimeFromTimeString($values[$kind . '_time'])->toIso8601String(), (array) $values[$kind . '_weekdays']);
+        }
+        return new HtmlString(trim(view('backups::partials.schedule', [
+            'fallback' => $fallback, 'frequency' => $frequency, 'instants' => $instants,
+            'every' => (int) ($values['database_every_hours'] ?? 1),
+        ])->render()));
     }
 
     private function scheduleSection(): Section

@@ -1,4 +1,7 @@
-"""Render the native time partial and morph it with Paymenter's bundled Alpine."""
+"""Render the native time partial and morph it with Paymenter's bundled Alpine.
+
+Set PAYMENTER_BACKUPS_PLAYWRIGHT to the installed Playwright module path.
+"""
 import json
 import os
 from pathlib import Path
