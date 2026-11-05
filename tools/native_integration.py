@@ -282,9 +282,13 @@ def legacy_configuration_fixture(work, app, php, checker):
 
 def panel_regressions(app, php, work):
     """Run installed-framework tests with explicit prerequisites; skips fail native CI."""
+    node = shutil.which(os.environ.get('NODE_BINARY') or 'node')
+    if not node:
+        raise RuntimeError('Node required for native panel regressions')
     environment = child_environment()
-    environment.update(PHP_BINARY=str(php), PAYMENTER_TEST_APP=str(app), TMPDIR=str(work))
-    for key in ('NODE_BINARY', 'PAYMENTER_BACKUPS_PLAYWRIGHT'):
+    environment.update(PHP_BINARY=str(php), PAYMENTER_TEST_APP=str(app), TMPDIR=str(work),
+                       NODE_BINARY=str(pathlib.Path(node).resolve()))
+    for key in ('PAYMENTER_BACKUPS_PLAYWRIGHT', 'PLAYWRIGHT_BROWSERS_PATH', 'XDG_CACHE_HOME', 'HOME'):
         if os.environ.get(key):
             environment[key] = os.environ[key]
     program = ("import sys, unittest; "

@@ -332,19 +332,14 @@ try {
       assert(functionText && functionText.includes('"$@"'), 'Shell function argument quoting missing');
       return {commands: await commands.count(), clipboardVerified: true, actualKeyboardAndClickCopy: true};
     });
-    await check('help stays inline and site password purpose stays readable', async () => {
+    await check('help stays inline and the retired site password section stays absent', async () => {
       for (const viewport of [{width:1440,height:1000}, {width:390,height:844}]) {
         const client = await login(metadata.admin_email, viewport); await load(client, 'Settings');
         assert.equal(await client.getByRole('button', {name: /^Help for /}).count(), 0, 'A field still opens a help dialog');
         assert.equal(await client.getByLabel('Backup folder', {exact:true}).count(), 1);
         const heading = client.getByRole('heading', {name:'Site password (HTTP Basic)',exact:true});
-        if (!await heading.isVisible()) await client.getByRole('heading', {name:'Full backups need',exact:true}).click();
-        await heading.waitFor(); const section = client.locator('.fi-section').filter({has:heading}).last();
-        assert.match(await section.innerText(), /asks for a username and password[\s\S]*maintenance page/);
-        await shot(client, viewport.width < 640 ? 'mobile-site-password-collapsed' : 'desktop-site-password-collapsed');
-        await heading.click(); await client.waitForTimeout(300);
-        assert.match(await section.innerText(), /uses http:\/\/|Saved for|No site password saved/);
-        await shot(client, viewport.width < 640 ? 'mobile-site-password-expanded' : 'desktop-site-password-expanded');
+        assert.equal(await heading.count(), 0, 'Obsolete Site password section rendered');
+        await shot(client, viewport.width < 640 ? 'mobile-settings-inline-help' : 'desktop-settings-inline-help');
         await client.context().close();
       }
     });
@@ -356,7 +351,7 @@ try {
         await load(page, tab); await livewire(page, () => page.getByRole('button', {name: 'Create backup', exact: true}).first().click());
         const dialog = page.locator('.fi-modal.fi-modal-open'); await dialog.getByRole('heading', {name: 'Create backup', exact: true}).waitFor();
         await shot(page, 'create-from-' + tab.toLowerCase());
-        assert.match(await dialog.innerText(), /maintenance page|site pauses/i); assert.match(await dialog.innerText(), /stays online/i);
+        assert.match(await dialog.innerText(), /stays online/i);
         await closeDialog(page);
       }
     });
@@ -487,13 +482,11 @@ try {
       assert.equal(await page.getByText('Keys saved.', {exact: true}).isVisible(), false, 'Keys remain configured after removal');
       // Turn uploads off again so later phases start from local storage.
       await load(page, 'Settings'); await checked(page, field(page, 'upload_s3'), false); await visible(field(page, 's3_bucket'), false); await save(page);
-      // The fixture address is plain http: no site password form is offered, and the reason is shown.
+      // Online capture retired the Site password section for every application URL.
       await load(page, 'Settings');
       const heading = page.getByRole('heading', {name:'Site password (HTTP Basic)',exact:true});
-      if (!await heading.isVisible()) await page.getByRole('heading', {name:'Full backups need',exact:true}).click();
-      await heading.click();
-      assert.match(await page.locator('main').innerText(), /Your App URL uses http:\/\/\. A site password can only be sent over https:\/\//);
-      assert.equal(await page.locator('[id="siteAccessForm.username"]').count(), 0, 'Site password form offered over http');
+      assert.equal(await heading.count(), 0, 'Obsolete Site password section rendered');
+      assert.equal(await page.locator('[id="siteAccessForm.username"]').count(), 0, 'Obsolete Site password form rendered');
     });
   }
   if (phase === 'secrets' || phase === 'recovery' || phase === 'all') {
