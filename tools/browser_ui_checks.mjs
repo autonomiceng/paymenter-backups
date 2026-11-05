@@ -308,11 +308,12 @@ try {
         assert.match(await page.locator('main').innerText(), /Copying needs HTTPS/);
         for (const command of await commands.all()) {
           assert.equal(await command.getAttribute('role'), null, 'HTTP offers a broken copy button');
-          const expected = (await command.textContent()).trim();
-          const selected = await command.evaluate(code => {
+          const value = command.locator('span').first();
+          const expected = await value.textContent();
+          const selected = await value.evaluate(code => {
             const range = document.createRange(); range.selectNodeContents(code);
             const selection = window.getSelection(); selection.removeAllRanges(); selection.addRange(range);
-            return selection.toString().trim();
+            return selection.toString();
           });
           assert.equal(selected, expected, 'Manual selection changed command text');
         }
@@ -322,7 +323,7 @@ try {
       assert(await page.evaluate(() => isSecureContext && typeof navigator.clipboard?.readText === 'function'), 'Secure clipboard API unavailable');
       await page.context().grantPermissions(['clipboard-read', 'clipboard-write'], {origin: new URL(page.url()).origin});
       for (let index = 0; index < await commands.count(); index++) {
-        const command = commands.nth(index); const expected = (await command.textContent()).trim();
+        const command = commands.nth(index); const expected = await command.locator('span').first().textContent();
         await command.focus(); await page.keyboard.press(index % 2 ? 'Space' : 'Enter');
         assert.equal(await page.evaluate(() => navigator.clipboard.readText()), expected, 'Actual keyboard clipboard changed command text');
         await command.click(); assert.equal(await page.evaluate(() => navigator.clipboard.readText()), expected, 'Actual click clipboard changed command text');
@@ -512,7 +513,7 @@ try {
       await dialog.getByRole('heading', {name: 'Show the recovery key?', exact:true}).waitFor();
       await livewire(page, () => dialog.getByRole('button', {name:'Show key', exact:true}).click());
       dialog = page.locator('.fi-modal.fi-modal-open'); await dialog.getByRole('heading', {name:'Recovery key',exact:true}).waitFor();
-      const secret = (await dialog.locator('[data-backups-command]').innerText()).trim(); assert.match(secret, /^[a-f0-9]{64}$/);
+      const secret = await dialog.locator('[data-backups-command] span').first().textContent(); assert.match(secret, /^[a-f0-9]{64}$/);
       const downloading = page.waitForEvent('download'); void downloading.catch(() => {});
       await livewire(page, () => dialog.getByRole('button', {name:'Download recovery key',exact:true}).click());
       const download = await downloading; assert.equal(await download.failure(), null);

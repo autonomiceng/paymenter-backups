@@ -86,6 +86,27 @@ class CommandBlockWrap(unittest.TestCase):
         self.assertEqual(declarations(style)['overflow-x'], 'auto')
         self.assertIn("'tabindex' => '0'", line[1])
 
+    def test_native_scrolling_check_matches_rendered_command_markup(self):
+        rendered = self.render()
+        source = (ROOT / 'tests/integration/native_checks.php').read_text()
+        check = re.search(r"check\(([^\n]+), 'mobile history or command scrolling missing'\);", source)
+        self.assertIsNotNone(check, 'native command scrolling check not found')
+        needles = re.findall(r"str_contains\(\$queue->html\(\), '([^']+)'\)", check[1])
+        self.assertEqual(len(needles), 2)
+        # History stacking is unrelated; exercise the exact command assertion
+        # against the real BuildsCommands output, without booting a database.
+        markup = 'fi-ta-table-stacked-on-mobile ' + rendered['html']
+        self.assertTrue(all(needle in markup for needle in needles),
+                        f'Native check strings {needles!r} do not match rendered markup {markup!r}')
+
+    def test_recovery_contract_matches_rendered_command_span_style(self):
+        rendered = self.render()
+        source = (ROOT / 'tests/integration/admin_contracts.php').read_text()
+        style = re.search(r"\$valueNode->getAttribute\('style'\) === '([^']+)'", source)
+        self.assertIsNotNone(style, 'recovery command span style check not found')
+        self.assertTrue(rendered['html'].startswith(f'<span style="{style[1]}">'),
+                        f'Recovery check style {style[1]!r} does not match rendered markup {rendered["html"]!r}')
+
 
 if __name__ == '__main__':
     unittest.main()
