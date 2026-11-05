@@ -286,6 +286,8 @@ def panel_regressions(app, php, work):
     if not node:
         raise RuntimeError('Node required for native panel regressions')
     environment = child_environment()
+    # Match core CI's src layout without inheriting the parent's Python path.
+    environment['PYTHONPATH'] = str(ROOT / 'src')
     environment.update(PHP_BINARY=str(php), PAYMENTER_TEST_APP=str(app), TMPDIR=str(work),
                        NODE_BINARY=str(pathlib.Path(node).resolve()))
     for key in ('PAYMENTER_BACKUPS_PLAYWRIGHT', 'PLAYWRIGHT_BROWSERS_PATH', 'XDG_CACHE_HOME', 'HOME'):

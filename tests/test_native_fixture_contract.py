@@ -66,6 +66,26 @@ class NativePanelEnvironmentTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, 'Node required'):
             self.environment(NODE_BINARY=str(self.work / 'missing-node'))
 
+    def test_panel_discovery_imports_checkout_package_without_parent_pythonpath(self):
+        (self.work / 'src').symlink_to(ROOT / 'src', target_is_directory=True)
+        tests = self.work / 'tests'
+        tests.mkdir()
+        (tests / 'test_panel_import.py').write_text('''import os
+import unittest
+from paymenter_backups.common import State
+
+class PackageImport(unittest.TestCase):
+    def test_package_is_available_without_parent_configuration(self):
+        self.assertEqual(State.__module__, 'paymenter_backups.common')
+        self.assertNotIn('DB_PASSWORD', os.environ)
+        self.assertNotIn('APP_ENV', os.environ)
+''')
+        parent = {'PATH': str(self.bin), 'PYTHONPATH': '/fixture/parent-pythonpath',
+                  'DB_PASSWORD': 'synthetic-parent-only', 'APP_ENV': 'production'}
+        with patch.dict(os.environ, parent, clear=True), \
+             patch.object(native_integration, 'ROOT', self.work):
+            native_integration.panel_regressions(self.work / 'app', '/fixture/php', self.work)
+
 
 if __name__ == '__main__':
     unittest.main()
