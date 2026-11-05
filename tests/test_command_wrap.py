@@ -78,12 +78,14 @@ class CommandBlockWrap(unittest.TestCase):
 
     def test_detected_job_command_wraps_in_the_diagnostics_rail(self):
         source = (ROOT / 'extension/Backups/Admin/Pages/Concerns/BuildsSettingsForm.php').read_text()
-        line = re.search(r"Text::make\(\(string\) \$job\['command'\]\).*?->extraAttributes\(\[(.*?)\]\)", source)
+        # ui-r15: whitespace and wrapping live on the inner mono span, so the template's indentation stays out.
+        line = re.search(r"Text::make\(new \\Illuminate\\Support\\HtmlString\('<span style=\"([^\"]*)\">' \. e\(\(string\) \$job\['command'\]\).*?->extraAttributes\(\[(.*?)\]\)", source, re.S)
         self.assertIsNotNone(line, 'detected job command row not found')
-        style = re.search(r"'style' => '([^']*)'", line[1])[1]
-        self.assertEqual(declarations(style)['overflow-wrap'], 'anywhere')
-        self.assertEqual(declarations(style)['white-space'], 'pre-wrap')
-        self.assertIn("'tabindex' => '0'", line[1])
+        self.assertEqual(declarations(line[1])['overflow-wrap'], 'anywhere')
+        self.assertEqual(declarations(line[1])['white-space'], 'pre-wrap')
+        self.assertIn('monospace', declarations(line[1])['font-family'])
+        self.assertNotIn('white-space', re.search(r"'style' => '([^']*)'", line[2])[1])
+        self.assertIn("'tabindex' => '0'", line[2])
 
     def test_native_scrolling_check_matches_rendered_command_markup(self):
         rendered = self.render()
