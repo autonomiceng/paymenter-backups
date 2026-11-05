@@ -87,6 +87,8 @@ if ($input['case'] === 'health') {
 '''
 
 
+@unittest.skipUnless(os.environ.get('PHP_BINARY') and os.environ.get('PAYMENTER_TEST_APP'),
+                     'PHP_BINARY and PAYMENTER_TEST_APP required')
 class ClickReview(unittest.TestCase):
     def page(self, case, **input):
         result = subprocess.run([os.environ['PHP_BINARY'], '-r', PHP, os.environ['PAYMENTER_TEST_APP'], str(ROOT)], input=json.dumps({'case': case, **input}), capture_output=True, text=True)

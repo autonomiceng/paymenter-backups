@@ -72,6 +72,8 @@ const {chromium} = require(process.env.PAYMENTER_BACKUPS_PLAYWRIGHT);
 '''
 
 
+@unittest.skipUnless(os.environ.get('PHP_BINARY') and os.environ.get('PAYMENTER_TEST_APP'),
+                     'PHP_BINARY and PAYMENTER_TEST_APP required')
 class StaffSchedule(unittest.TestCase):
     def test_first_load_and_poll_localize_schedule_weekday_and_time(self):
         app = Path(os.environ['PAYMENTER_TEST_APP'])

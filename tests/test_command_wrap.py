@@ -71,8 +71,9 @@ class CommandBlockWrap(unittest.TestCase):
         self.assertTrue(attributes['data-backups-command'])
         self.assertFalse(splits_words([attributes['style'], span[1]], attributes['class']), attributes)
         self.assertEqual(declarations(span[1])['white-space'], 'pre')
-        self.assertEqual(declarations(attributes['style'])['overflow-x'], 'auto')
-        # Scrolled content stays reachable from the keyboard.
+        # The command scrolls inside the frame so the Copy word stays visible.
+        self.assertEqual(declarations(span[1])['overflow-x'], 'auto')
+        # The native copyable wrapper stays reachable from the keyboard.
         self.assertEqual(attributes['tabindex'], '0')
 
     def test_detected_job_command_keeps_words_whole_and_scrolls(self):

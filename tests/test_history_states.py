@@ -102,15 +102,21 @@ class HistoryStates(unittest.TestCase):
         self.assertEqual(row['detail'], 'A Paymenter cron job was still running. Tries again next minute.')
 
     def test_core_lane_without_native_environment_skips_instead_of_crashing(self):
-        environment = {key: value for key, value in os.environ.items()
-                       if key not in ('PHP_BINARY', 'PAYMENTER_TEST_APP')}
-        result = subprocess.run(
-            [sys.executable, '-m', 'unittest',
-             'test_panel_create_actions.CreateActions.test_cancel_precedes_create_and_blocked_dialog_has_only_close',
-             'test_panel_poll_times.PollTimes.test_staff_times_survive_repeated_poll_morphs_and_changed_instants'],
-            cwd=ROOT / 'tests', env=environment, capture_output=True, text=True)
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn('skipped=2', result.stderr)
+        for missing in (('PHP_BINARY',), ('PAYMENTER_TEST_APP',),
+                        ('PHP_BINARY', 'PAYMENTER_TEST_APP')):
+            with self.subTest(missing=missing):
+                environment = dict(os.environ, PHP_BINARY='/fixture/php',
+                                   PAYMENTER_TEST_APP='/fixture/app', PYTHONPATH=str(ROOT / 'src'))
+                for key in missing:
+                    environment.pop(key)
+                result = subprocess.run(
+                    [sys.executable, '-m', 'unittest',
+                     'test_panel_create_actions.CreateActions.test_cancel_precedes_create_and_blocked_dialog_has_only_close',
+                     'test_panel_poll_times.PollTimes.test_staff_times_survive_repeated_poll_morphs_and_changed_instants',
+                     'test_panel_click_review.ClickReview', 'test_panel_schedule.StaffSchedule'],
+                    cwd=ROOT / 'tests', env=environment, capture_output=True, text=True)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIn('skipped=7', result.stderr)
 
 
 if __name__ == '__main__':
