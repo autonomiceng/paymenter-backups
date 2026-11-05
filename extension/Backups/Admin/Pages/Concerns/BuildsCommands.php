@@ -96,11 +96,11 @@ trait BuildsCommands
         // on the native Text wrapper would also show the template's indentation.
         // The Copy word is not copied: copyableState() sets the exact command.
         $copy = '<span class="backups-copy" aria-hidden="true" style="flex-shrink: 0; margin-left: auto; padding-left: 1rem; font-family: var(--font-sans, inherit); font-weight: 600; color: var(--primary-600)">Copy</span>';
-        return Text::make(static fn () => new \Illuminate\Support\HtmlString('<span style="min-width: 0; overflow-x: auto; white-space: pre">' . e($plain()) . '</span>' . (request()->isSecure() ? $copy : '')))->fontFamily(FontFamily::Mono)
+        return Text::make(static fn () => new \Illuminate\Support\HtmlString('<span style="display: block; flex: 1; min-width: 0; max-width: 100%; overflow-wrap: anywhere; white-space: pre-wrap">' . e($plain()) . '</span>' . (request()->isSecure() ? $copy : '')))->fontFamily(FontFamily::Mono)
             ->copyable(fn () => request()->isSecure())->copyableState($plain)->copyMessage('Copied')
             ->tooltip(fn () => request()->isSecure() ? 'Copy' : null)
-            // Keep command lines intact and scroll long paths inside the theme's input frame.
-            ->extraAttributes(['data-backups-command' => true, 'tabindex' => '0', 'class' => 'fi-input-wrp w-full px-4 py-2 backups-code', 'style' => 'display: flex; gap: 1rem; min-width: 0; width: 100%; overflow-wrap: normal; max-width: 100%']);
+            // Wrap long paths inside the frame while copying the exact original command.
+            ->extraAttributes(['data-backups-command' => true, 'tabindex' => '0', 'class' => 'fi-input-wrp w-full px-4 py-2 backups-code', 'style' => 'display: flex; align-items: flex-start; gap: 1rem; min-width: 0; width: 100%; overflow-wrap: anywhere; max-width: 100%']);
     }
 
     /** A bulleted list. Items are blocks so each bullet sits on the first line of a wrapped item. */
