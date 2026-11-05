@@ -55,6 +55,7 @@ def suggestions(state, envelope, inventory=None):
     prefix = '* * * * * /usr/bin/flock -n '
     suffix = ' ' + cron_quote(php) + ' ' + cron_quote(str(state.app / 'artisan'))
     scheduler = prefix + cron_quote(str(state.root / 'scheduler.lock')) + suffix + ' schedule:run >/dev/null 2>&1'
+    queue = prefix + cron_quote(str(state.root / 'queue.lock')) + suffix + ' queue:work --stop-when-empty --max-time=50 >/dev/null 2>&1'
     for item in (inventory or {}).get('items', []):
         try:
             parsed = parse(item['command'], state.app, cron=False)
@@ -62,9 +63,9 @@ def suggestions(state, envelope, inventory=None):
             continue
         if guarded_command(parsed['command']):
             scheduler = '* * * * * ' + ' '.join(cron_quote(word) for word in shlex.split(parsed['command'])) + ' >/dev/null 2>&1'
-            break
-    return {'scheduler': scheduler,
-            'queue': prefix + cron_quote(str(state.root / 'queue.lock')) + suffix + ' queue:work --stop-when-empty --max-time=50 >/dev/null 2>&1'}
+        if item.get('source') == 'crontab' and parsed['kind'] == 'queue-worker' and parsed['coordination'] == 'coordinated':
+            queue = '* * * * * ' + ' '.join(cron_quote(word) for word in shlex.split(parsed['command'])) + ' >/dev/null 2>&1'
+    return {'scheduler': scheduler, 'queue': queue}
 
 
 def guarded_command(command):
