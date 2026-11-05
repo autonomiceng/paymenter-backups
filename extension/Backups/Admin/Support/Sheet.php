@@ -66,14 +66,15 @@ final class Sheet
     }
 
     /**
-     * Marked steps, each {label, color, value?, detail?}: a list to screen readers, plain lines without a skin.
+     * Marked steps, each {label, color, value?, detail?, content?}: a list to screen readers, plain lines without a skin.
      * The trace joins steps with a line; checks stand alone.
      */
     public static function steps(array $steps, bool $trace = true): Group
     {
         return Group::make(array_map(static fn (array $step) => Group::make([
             Html::make(new HtmlString(view('backups::partials.step', $step)->render())),
-        ])->extraAttributes(['class' => 'domains-trace-item', 'role' => 'listitem', 'data-beco-tone' => StatusTone::forColor($step['color']) ?? 'off']), $steps))
+            ...($step['content'] ?? []),
+        ])->extraAttributes(['class' => 'domains-trace-item', 'role' => 'listitem', 'data-beco-tone' => StatusTone::forColor($step['color']) ?? 'off', 'style' => 'min-width: 0']), $steps))
             ->extraAttributes(['class' => 'domains-trace' . ($trace ? '' : ' backups-checks'), 'role' => 'list']);
     }
 }

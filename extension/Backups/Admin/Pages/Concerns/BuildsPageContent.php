@@ -244,7 +244,12 @@ trait BuildsPageContent
             default => ['label' => 'Cron job', 'color' => 'warning', 'value' => 'Not running', 'detail' => new HtmlString(e('Last run ' . $this->ago($last) . '.') . $fix)],
         }];
         if ($this->overviewError !== null) { return $steps; }
-        foreach (['full-quiesced', 'database-online'] as $mode) { $steps[] = ['label' => self::KIND_LABELS[$mode]] + $this->typeCheck($mode); }
+        foreach (['full-quiesced', 'database-online'] as $mode) {
+            $label = $mode === 'full-quiesced'
+                ? new HtmlString('<a class="underline" href="' . e($this->settingsUrl('full-backup-checks')) . '">' . e(self::KIND_LABELS[$mode]) . '</a>')
+                : self::KIND_LABELS[$mode];
+            $steps[] = ['label' => $label] + $this->typeCheck($mode);
+        }
         $test = $this->latestRequest('destination-test');
         $steps[] = ['label' => 'Storage test'] + match ($this->storageTestState()) {
             'passed' => ['color' => 'success', 'value' => 'OK', 'detail' => new HtmlString('Passed ' . $this->moment($test['finished_at'] ?? null))],

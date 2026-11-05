@@ -102,6 +102,18 @@ class HistoryStates(unittest.TestCase):
         self.assertEqual(row['detail'], 'A Paymenter cron job was still running. Tries again next minute.')
 
     def test_core_lane_without_native_environment_skips_instead_of_crashing(self):
+        program = """
+import json
+import sys
+import unittest
+
+suite = unittest.defaultTestLoader.loadTestsFromNames(sys.argv[1:])
+expected = suite.countTestCases()
+result = unittest.TextTestRunner(verbosity=2).run(suite)
+print(json.dumps({'expected': expected, 'run': result.testsRun,
+                  'skipped': [reason for _, reason in result.skipped]}))
+sys.exit(not result.wasSuccessful())
+"""
         for missing in (('PHP_BINARY',), ('PAYMENTER_TEST_APP',),
                         ('PHP_BINARY', 'PAYMENTER_TEST_APP')):
             with self.subTest(missing=missing):
@@ -110,13 +122,17 @@ class HistoryStates(unittest.TestCase):
                 for key in missing:
                     environment.pop(key)
                 result = subprocess.run(
-                    [sys.executable, '-m', 'unittest',
+                    [sys.executable, '-c', program,
                      'test_panel_create_actions.CreateActions.test_cancel_precedes_create_and_blocked_dialog_has_only_close',
                      'test_panel_poll_times.PollTimes.test_staff_times_survive_repeated_poll_morphs_and_changed_instants',
                      'test_panel_click_review.ClickReview', 'test_panel_schedule.StaffSchedule'],
                     cwd=ROOT / 'tests', env=environment, capture_output=True, text=True)
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-                self.assertIn('skipped=7', result.stderr)
+                summary = json.loads(result.stdout)
+                self.assertGreater(summary['expected'], 0)
+                self.assertEqual(summary['run'], summary['expected'])
+                self.assertEqual(summary['skipped'],
+                                 ['PHP_BINARY and PAYMENTER_TEST_APP required'] * summary['expected'])
 
 
 if __name__ == '__main__':
