@@ -178,7 +178,7 @@ trait BuildsHistoryTable
                         ->modalHeading(fn (array $record) => $isRun($record) ? Messages::mode($record['run']['mode']) : 'Queued backup')
                         ->modalDescription(fn (array $record) => $this->detailsLine($record))
                         ->modalWidth('2xl')->modalSubmitAction(false)->modalCancelActionLabel('Close')
-                        ->extraAttributes(['x-on:click' => 'close()'])
+                        ->extraAttributes(['x-on:click.capture' => 'close()'])
                         ->extraModalFooterActions(fn (array $record) => [
                             Action::make('detailsVerify')->label('Verify')->icon('ri-shield-check-line')->color('gray')
                                 ->visible($isRun($record) && $record['run']['status'] === 'ready'

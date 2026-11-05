@@ -1,4 +1,5 @@
 """Demo click regressions against the installed Filament schemas and engine API."""
+from html.parser import HTMLParser
 import json
 import os
 from pathlib import Path
@@ -13,6 +14,8 @@ ROOT = Path(__file__).resolve().parents[1]
 PHP = r'''
 require $argv[1].'/vendor/autoload.php';
 $app = new Illuminate\Foundation\Application($argv[1]);
+Illuminate\Support\Facades\Facade::setFacadeApplication($app);
+$app->bind(Filament\Support\Contracts\LoadingIndicator::class, Filament\Support\View\DefaultLoadingIndicator::class);
 $app->instance('config', new Illuminate\Config\Repository(['app' => ['locale' => 'en']]));
 $app->instance('translator', new Illuminate\Translation\Translator(new Illuminate\Translation\ArrayLoader, 'en'));
 $app->instance('request', Illuminate\Http\Request::create('https://fixture.invalid/admin/backups'));
@@ -52,12 +55,19 @@ if ($input['case'] === 'health') {
 } elseif ($input['case'] === 'details') {
     $run = ['run_id' => 'fixture-ready', 'status' => 'ready', 'mode' => 'database-online', 'created_at' => null, 'finished_at' => null, 'verified_at' => null,
             'remote' => 'none', 'local' => true, 'size' => 128, 'download' => 'ready'];
-    $record = ['kind' => 'run', 'run_id' => 'fixture-ready', 'run' => $run, 'origin' => 'Staff'];
-    $action = $page->table(Filament\Tables\Table::make($page))->getFlatRecordActions()['details']->record($record);
+    $record = ['__key' => 'fixture-ready', 'kind' => 'run', 'run_id' => 'fixture-ready', 'run' => $run, 'origin' => 'Staff'];
+    foreach ($page->table(Filament\Tables\Table::make($page))->getRecordActions() as $group) {
+        if ($group instanceof Filament\Actions\ActionGroup) {
+            foreach ($group->getActions() as $item) {
+                if ($item->getName() === 'details') $action = $item->record($record);
+            }
+        }
+    }
     $actions = $action->getExtraModalFooterActions();
     echo json_encode(['buttons' => array_values(array_map(fn ($a) => $a->getLabel(), $actions)),
         'url' => isset($actions['detailsDownload']) ? $actions['detailsDownload']->getUrl() : null,
-        'attributes' => $action->getExtraAttributes()]);
+        // Inline decoration avoids requiring an icon-pack provider in this isolated fixture.
+        'html' => $action->icon(new Illuminate\Support\HtmlString('<svg aria-hidden="true"></svg>'))->toHtml()]);
 } elseif ($input['case'] === 'settings') {
     $rows = Filament\Schemas\Schema::make($page)->components($call('detectedChecks'))->getComponents();
     $command = null;
@@ -107,7 +117,19 @@ class ClickReview(unittest.TestCase):
         result = self.page('details')
         self.assertIn('Verify', result['buttons'])
         self.assertIn('Download', result['buttons'])
-        self.assertIn('close', result['attributes'].get('x-on:click', ''))
+        class Item(HTMLParser):
+            attributes = None
+
+            def handle_starttag(self, tag, attrs):
+                attrs = dict(attrs)
+                if tag == 'button' and 'fi-ac-grouped-action' in attrs.get('class', '').split():
+                    self.attributes = attrs
+
+        item = Item()
+        item.feed(result['html'])
+        self.assertIsNotNone(item.attributes, result['html'])
+        self.assertEqual(item.attributes.get('x-on:click.capture'), 'close()')
+        self.assertIn("mountAction('details'", item.attributes.get('wire:click', ''))
 
     def test_settings_commands_can_shrink_and_schedule_columns_start_at_top(self):
         command = '/usr/bin/flock -n /fixture/paymenter-job-locks/scheduler.lock /usr/bin/php /app/artisan schedule:run'
