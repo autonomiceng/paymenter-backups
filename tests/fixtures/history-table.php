@@ -111,6 +111,8 @@ namespace {
     $plain = array_map(static fn ($row) => array_map(static fn ($value) => $value instanceof \Illuminate\Contracts\Support\Htmlable ? $value->toHtml() : $value, $row), $result->items);
     $output = ['page' => new \Illuminate\Pagination\LengthAwarePaginator($plain, $result->total, $result->perPage, $result->currentPage), 'paging' => $table->options['paginated'][0]];
     $output['classes'] = array_map($table->options['recordClasses'][0] ?? static fn () => null, $result->items);
+    // The smallest screen each column shows on; null shows everywhere.
+    $output['columns'] = array_map(static fn ($column) => ['name' => $column->args[0], 'from' => $column->options['visibleFrom'][0] ?? null], $table->options['columns'][0]);
     if (isset($input['details'])) {
         $record = array_values(array_filter($result->items, static fn ($row) => $row['__key'] === $input['details']))[0];
         $output['details'] = (fn () => ['line' => (string) $this->detailsLine($record), 'sections' => sections($this->detailsSchema($record))])->call($page);

@@ -23,15 +23,24 @@ def run(run_id, **changes):
 
 @unittest.skipUnless(PHP, 'PHP CLI required')
 class HistoryStates(unittest.TestCase):
-    def render(self, runs, requests=(), details=None, uploads=True, settings=None):
+    def output(self, runs, requests=(), details=None, uploads=True, settings=None):
         overview = dict(runs=runs, requests=list(requests), uploads=uploads, settings=settings or {})
         result = subprocess.run([PHP, str(ROOT / 'tests/fixtures/history-table.php'), str(ROOT)],
                                 input=json.dumps(dict(overview=overview, details=details)),
                                 text=True, capture_output=True, timeout=5)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        value = json.loads(result.stdout)
+        return json.loads(result.stdout)
+
+    def render(self, runs, requests=(), details=None, uploads=True, settings=None):
+        value = self.output(runs, requests, details, uploads, settings)
         rows = {row['__key']: row for row in value['page']['items']}
         return rows, dict(zip(rows, value['classes'])), value.get('details')
+
+    def test_phone_rows_keep_type_size_and_location(self):
+        # Staff tables scroll inside their card on phones, so a full and a database backup stay told apart.
+        columns = {column['name']: column['from'] for column in self.output([run('one')])['columns']}
+        self.assertEqual({name: columns[name] for name in ('type', 'size_label', 'location')},
+                         {'type': None, 'size_label': None, 'location': None})
 
     def test_running_backup_gets_its_note_and_row_edge(self):
         rows, classes, _ = self.render([run('busy', status='running', finished_at=None, local=False, size=None)])
