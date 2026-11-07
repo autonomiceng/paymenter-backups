@@ -273,7 +273,10 @@ trait BuildsSettingsForm
                 $kind = ($job['kind'] ?? null) === 'queue-worker' ? 'Queue worker' : 'Cron job';
                 $hasScheduler = $hasScheduler || ($job['kind'] ?? null) === 'scheduler';
                 $source = ($job['source'] ?? null) === 'systemd' ? ' (systemd ' . ($job['label'] ?? 'unit') . ')' : '';
-                $command = filled($job['command'] ?? null) ? [Text::make((string) $job['command'])->fontFamily(FontFamily::Mono)->extraAttributes(['tabindex' => '0', 'style' => 'display: block; min-width: 0; width: 100%; overflow-wrap: normal; overflow-x: auto; max-width: 100%; white-space: nowrap'])] : [];
+                // The line found now, in the same frame as the line to use. It wraps instead of scrolling so all of it shows,
+                // and keeps whitespace in its own span so the template's indentation stays out. Not copyable: it is the line to replace.
+                $command = filled($job['command'] ?? null) ? [Text::make(new \Illuminate\Support\HtmlString('<span style="min-width: 0; overflow-wrap: anywhere; white-space: pre-wrap; font-family: var(--mono-font-family, ui-monospace, monospace)">' . e((string) $job['command']) . '</span>'))->fontFamily(FontFamily::Mono)
+                    ->extraAttributes(['data-backups-found' => true, 'tabindex' => '0', 'class' => 'fi-input-wrp w-full px-4 py-2', 'style' => 'display: block; min-width: 0; width: 100%; max-width: 100%'])] : [];
                 $fix = $kind === 'Queue worker' ? $this->queueLine() : $this->schedulerLine();
                 $systemd = ($job['source'] ?? null) === 'systemd' && filled($job['label'] ?? null);
                 $rows[] = match ($job['coordination'] ?? null) {
