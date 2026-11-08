@@ -141,13 +141,13 @@ trait BuildsHistoryTable
             ->columns([
                 TextColumn::make('created_at')->label('Started')
                     ->formatStateUsing(fn ($state) => $this->moment($state)),
-                // Below md these move to Details so the table stays readable.
-                TextColumn::make('type')->label('Type')->visibleFrom('md')->toggleable(),
+                // Phones keep every column and scroll the table inside its card, so the kind of backup stays in view.
+                TextColumn::make('type')->label('Type')->toggleable(),
                 TextColumn::make('status_label')->label('Status')->badge()->color(fn (array $record) => $record['status_color'])
                     ->extraCellAttributes(fn (array $record) => ['data-beco-tone' => StatusTone::forLabel($record['status_label'])])->toggleable(),
                 TextColumn::make('detail')->label('Note')->wrap()->toggleable(),
-                TextColumn::make('size_label')->label('Size')->alignEnd()->extraCellAttributes(['class' => 'tabular-nums'])->visibleFrom('md')->toggleable(),
-                TextColumn::make('location')->label('Location')->visibleFrom('lg')->toggleable(),
+                TextColumn::make('size_label')->label('Size')->alignEnd()->extraCellAttributes(['class' => 'tabular-nums'])->toggleable(),
+                TextColumn::make('location')->label('Location')->toggleable(),
                 TextColumn::make('origin')->label('Started by')->toggleable(isToggledHiddenByDefault: true),
             ])
             ->recordActions([
