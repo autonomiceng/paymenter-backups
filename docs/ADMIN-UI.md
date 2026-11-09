@@ -70,9 +70,10 @@ Help is a set of collapsible sections with ids for deep links:
 `before-backups-run` and `advanced`. Setup items link to
 `?tab=settings#SECTION` or `?tab=help#SECTION`.
 
-Below 640 px the history table uses Filament's stacked-on-mobile layout. Type,
-Size and Stored on move to Details below 768 px (Stored on below 1024 px). The
-two schedule groups stack below 768 px. Commands scroll inside their block.
+On phones the history table keeps every column, including Type, Size and
+Location, and scrolls sideways inside its card; the page itself never scrolls
+sideways. The two schedule groups stack below 768 px. Commands scroll inside
+their block.
 
 ### Readiness
 

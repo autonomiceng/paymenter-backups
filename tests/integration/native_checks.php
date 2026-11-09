@@ -646,8 +646,10 @@ if ($mode === 'upload') {
         && preg_match('/<a\\b[^>]*href="([^"]+)"[^>]*>See Checks<\\/a>/', $queuedView->html(), $schedulerLink)
         && str_contains($schedulerLink[1], 'tab=backups') && str_contains($schedulerLink[1], '#checks'),
         'queued backup does not show one linked scheduler wait line');
-    // Phones stack history rows. Long commands keep words whole and scroll inside their block, not the page.
-    check(str_contains($queue->html(), 'fi-ta-table-stacked-on-mobile') && str_contains($queue->html(), '<span style="min-width: 0; overflow-x: auto; white-space: pre">'), 'mobile history or command scrolling missing');
+    // Phones keep history rows as rows; the table scrolls inside its card.
+    check(str_contains($queue->html(), 'backups-history') && !str_contains($queue->html(), 'fi-ta-table-stacked-on-mobile'), 'mobile history stacks instead of scrolling');
+    // Long commands keep words whole and scroll inside their block, not the page.
+    check(str_contains($queue->html(), '<span style="min-width: 0; overflow-x: auto; white-space: pre">'), 'command scrolling missing');
     // Without a recent cron check-in the page never promises a start time.
     foreach (['within a minute', 'under a minute'] as $promise) { check(!str_contains($queue->html(), $promise), 'unsupported backup-start timing promise: ' . $promise); }
     check(str_contains($queuedText, 'Full backups need') && str_contains($queuedText, 'paymenter_backups() {') && str_contains($queuedText, '/usr/bin/flock -n'), 'settings or help guidance missing');

@@ -111,6 +111,8 @@ namespace {
     $plain = array_map(static fn ($row) => array_map(static fn ($value) => $value instanceof \Illuminate\Contracts\Support\Htmlable ? $value->toHtml() : $value, $row), $result->items);
     $output = ['page' => new \Illuminate\Pagination\LengthAwarePaginator($plain, $result->total, $result->perPage, $result->currentPage), 'paging' => $table->options['paginated'][0]];
     $output['classes'] = array_map($table->options['recordClasses'][0] ?? static fn () => null, $result->items);
+    // Whether phones stack each row instead of scrolling the table inside its card.
+    $output['stacked'] = array_key_exists('stackedOnMobile', $table->options);
     // The smallest screen each column shows on; null shows everywhere.
     $output['columns'] = array_map(static fn ($column) => ['name' => $column->args[0], 'from' => $column->options['visibleFrom'][0] ?? null], $table->options['columns'][0]);
     if (isset($input['details'])) {
