@@ -330,15 +330,25 @@ def admin_contracts(release, php, workbase):
                                     cwd=ROOT, env=environment, capture_output=True, text=True, timeout=900)
             if result.returncode:
                 raise RuntimeError('admin contracts failed:\n' + result.stdout[-4000:] + result.stderr[-4000:])
-            return json.loads(result.stdout)
+            contracts = json.loads(result.stdout)
+            # The owner checks on shutdown that the contracts left the application source unchanged.
+            if stop_owner(owner):
+                raise RuntimeError('UI fixture for admin contracts failed on shutdown:\n' + log_path.read_text(errors='replace')[-4000:])
+            return contracts
         finally:
-            if owner.poll() is None:
-                owner.terminate()
-                try:
-                    owner.wait(timeout=60)
-                except subprocess.TimeoutExpired:
-                    owner.kill(); owner.wait()
+            stop_owner(owner)
             owner.stdout.close()
+
+
+def stop_owner(owner):
+    """Stop a fixture owner if it still runs and return its exit status."""
+    if owner.poll() is None:
+        owner.terminate()
+        try:
+            owner.wait(timeout=60)
+        except subprocess.TimeoutExpired:
+            owner.kill(); owner.wait()
+    return owner.returncode
 
 
 def main():

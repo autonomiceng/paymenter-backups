@@ -4,6 +4,7 @@ import json
 import pathlib
 import subprocess
 import sys
+import tempfile
 import unittest
 from unittest.mock import patch
 
@@ -217,3 +218,41 @@ class LegacyConfigurationChecks(fixtures.PrivateFixture):
         with self.assertRaisesRegex(RuntimeError, 'legacy v1 CLI configuration compatibility changed'):
             self.fixture()
         self.assert_v2_preserved()
+
+
+class AdminContractOwnerChecks(unittest.TestCase):
+    """The admin contract run fails when its fixture owner fails on shutdown."""
+    OWNER = """import json, os, pathlib, signal, sys, time
+stopped = []
+signal.signal(signal.SIGTERM, lambda *_: stopped.append(True))
+work = pathlib.Path(os.environ['TMPDIR'])
+(work / 'ui-fixture.json').write_text(json.dumps({'app': str(work)}))
+print(json.dumps({'ready': str(work / 'ui-fixture.json')}), flush=True)
+while not stopped:
+    time.sleep(0.05)
+sys.stderr.write('native core source changed during UI fixture')
+sys.exit(int(sys.argv[sys.argv.index('--release') + 1]))
+"""
+
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory(prefix='backups-admin-contracts-')
+        self.addCleanup(temporary.cleanup)
+        self.root = pathlib.Path(temporary.name) / 'root'
+        (self.root / 'tools').mkdir(parents=True)
+        (self.root / 'tests/integration').mkdir(parents=True)
+        (self.root / 'tools/native_ui_fixture.py').write_text(self.OWNER)
+        # Run with Python as the PHP binary, so the contract stand-in is a Python script.
+        (self.root / 'tests/integration/admin_contracts.php').write_text('print(\'{"permission_denied": true}\')\n')
+        self.workbase = pathlib.Path(temporary.name) / 'work'
+        self.workbase.mkdir(mode=0o700)
+
+    def run_contracts(self, owner_exit):
+        with patch.object(native_integration, 'ROOT', self.root):
+            return native_integration.admin_contracts(owner_exit, sys.executable, self.workbase)
+
+    def test_owner_shutdown_failure_fails_passing_contracts(self):
+        with self.assertRaisesRegex(RuntimeError, 'failed on shutdown:\n.*source changed'):
+            self.run_contracts('1')
+
+    def test_clean_owner_shutdown_returns_contract_results(self):
+        self.assertEqual(self.run_contracts('0'), {'permission_denied': True})
