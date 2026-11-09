@@ -1,6 +1,7 @@
 # Contributing
 
-Read [the architecture](docs/ARCHITECTURE.md) before changing execution,
+Read [the architecture](docs/ARCHITECTURE.md), [scheduling](docs/SCHEDULING.md)
+and [the administrator interface](docs/ADMIN-UI.md) before changing execution,
 configuration, maintenance, scheduling, storage, or recovery. Keep Paymenter
 application files, native schema, themes, and root Composer dependencies upstream.
 Use disposable fixtures with fake credentials. Keep private data and operational

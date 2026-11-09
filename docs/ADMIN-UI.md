@@ -216,7 +216,9 @@ These rules bind the page to the engine. The engine stays authoritative.
    (`visibleJs`), so choosing options never makes a round trip that clears
    typed secrets. If a response does clear typed secrets unsaved (for example
    a validation error), an inline note asks for them again, and a later Save
-   says the saved keys weren't changed.
+   says the saved keys weren't changed. The browser cannot send the site
+   password's address. Explicit removal of either the S3 keys or the site
+   password preserves the other under the shared credential flock.
 7. **The recovery key never enters Livewire state.** `Runtime::revealRecoveryKey($fingerprint)`
    is called only while rendering the confirmed "Recovery key" dialog and is
    cached for that request only. The key is in that dialog's HTML and nowhere
@@ -239,9 +241,193 @@ These rules bind the page to the engine. The engine stays authoritative.
    redirects an existing confirmation to the replacement key. Download uses `Runtime::recoveryKeyUrl()`, a fresh five-minute signed
    link opened by a server action, outside SPA navigation.
 8. **Safe artifact resolution, verified downloads, per-copy delete.** Unchanged
-   from 0.3: see [ARCHITECTURE.md](ARCHITECTURE.md). Download needs a recorded
+   from 0.3: see [ARCHITECTURE.md](ARCHITECTURE.md#artifact-resolution-download-and-per-backup-delete).
+   Download needs a recorded
    verification; S3-only copies use Get from S3 first; Delete previews the
    selected location and requires a verified survivor in each place.
+
+## Administrator page contracts
+
+`overview` is the page's only status source. It returns fixed codes, run and
+request IDs, timestamps, sizes, booleans, configured nonsecret settings,
+per-mode admission codes, the next schedule slot and the scheduler's last
+check-in. It never returns artifact or manifest paths, manifests, grants,
+process identities, request results, stderr or credentials; credentials appear
+only as saved/not saved. Every engine run of `tick --execute` writes a private
+`scheduler.json` check-in. `status` and `list` keep their 0.1 output.
+
+`observe` reads native settings without credentials or capture-tool probes and
+returns scheduler and copy-freshness incident codes. It never ticks, launches
+work, takes writer locks or changes journals. Full and database checks are
+separate, each with local and offsite checks for the selected storage policy.
+A full copy counts for database only through the runtime's durable satisfied
+request/coverage proof. Local copies require current archive/manifest identity;
+offsite freshness uses successful delivery receipts for the current destination
+and excludes copies already observed missing, damaged or unknown. This is not
+a new remote integrity scan or restore proof.
+
+Freshness expires after the next scheduled slot following the last usable
+snapshot (or the saved schedule epoch for a first copy), plus a recovery window.
+The window is at least 15 minutes, otherwise three capture attempts with their
+capture/compression and lock timeouts plus retry delays. Offsite adds the
+configured transport timeout/retry window and five minutes. Schedule Off skips
+freshness; a stopped scheduler matters only while a schedule is enabled. Its
+every-minute check-in gets a five-minute grace. Terminal failed/expired backup
+requests alert without waiting for freshness; deferred retries stay quiet until
+freshness expires. Direct failed CLI captures have no request retry and alert
+from their terminal journal. No new settings are introduced.
+
+Host cron invokes `backups:observe` independently of `schedule:run` and queue
+workers. It sends synchronous mail to Paymenter's system email address and
+respects the system mail disable switch. A private `incidents.json` ledger and
+observer-only lock serialize checks. One incident key per type/location stays
+open through subsequent failed slots/retries and closes after a healthy check;
+the next failure gets a new key. Mail transport failure retains an unsent
+incident for the next host check. A failed engine read preserves existing
+incidents and alerts on a later host check after a four-minute hold-off. This
+allows for command runtime so the next five-minute check can send mail. The
+observer does not restart unknown host processes or override recovery guards:
+the request runtime remains the recovery owner. See [INSTALL.md](INSTALL.md)
+for the independent host job and its monitoring limits.
+
+Settings saved on the page pass plain Laravel field rules that match the engine
+(positive integers stay positive, weekdays are 0 to 6 and required for an
+enabled weekly schedule, path lists are absolute, the S3 prefix has no empty,
+`.` or `..` parts or backslashes), then `config check`, which
+uses engine normalization and validation plus the backup-directory location
+rule without writing. `config validate` checks saved values against the same
+schema. Setup repairs and schedule Off remain saveable. Enabling or editing an
+enabled schedule requires installation readiness before any native publication:
+tools, private/local storage, discovered and recently running scheduler,
+recent independent observer check, per-type static capture prerequisites, and
+current destination/key test when uploads are selected. Safe local preparation
+precedes a refusal. Transient billing/lock waits remain runtime admission checks;
+this gate neither captures nor takes writer locks. The page passes changes and entered credential groups to
+`Runtime::saveConfiguration`, backed by CLI `config set`. The engine acquires
+`config.lock` then `tick.lock` with one ten-second acquisition deadline, or
+refuses `busy` before publication. It rereads and validates the authoritative
+native baseline under those locks. Only changed native rows are written through
+Eloquent; the internal Artisan writer inherits the owning lock descriptors and
+restores the authenticated page actor, with console auditing explicitly enabled.
+The resolved database connection travels to scrubbed children on private stdin.
+The same private handoff carries the parent's resolved framework store defaults,
+drivers, connection names and storage paths. The cold bridge applies this
+nonsecret whitelist after loading configuration, so readiness uses the running
+application's stores even when uncached config depends on environment overrides.
+Provider URLs, credentials and connection definitions are excluded. Detached
+workers and coordinated native writers preserve the snapshot on stdin. Native
+writers validate it without changing their operational store configuration. Direct
+CLI calls without a parent snapshot keep using cold configuration.
+The Python runtime passes only Laravel's fixed `DB_*` connection fields to
+Artisan during bootstrap, when extension discovery needs the database before
+the command can read stdin. Other inherited environment values stay scrubbed;
+database credentials are not written to files or command arguments. Historical maintenance captures used the same allowlist for Artisan. The billing
+guard runs inside Paymenter's ordinary scheduler process, not a scrubbed child.
+The browser cannot supply the baseline or actor. The writer returns persisted
+row receipts and a full native snapshot. Initialization, local storage preparation
+and privacy-policy publication remain beneath the same locks, including a first save with no edits.
+
+Before publishing entered secrets, a second native transaction locks every
+extension settings row, verifies the full snapshot, then invokes the cold
+`credentials-merge` bridge while the row locks remain held. A concurrent native
+editor therefore either precedes the snapshot comparison (`config-changed`) or
+waits until credential publication has finished. Schedule synchronization follows
+successful credential publication; rejected initialization/credential saves do
+not reset an unchanged schedule epoch or supersede its waiting requests.
+Worker, direct-command and storage reloads acquire `config.lock` around the whole
+native-settings/credential snapshot. Tick uses config-before-tick lock order.
+Standalone initialization also rereads settings and writes policy/schedule under
+these locks; direct Artisan saves use the same coordinator.
+
+A definite failure before credential commit compares and restores each unchanged
+published row under a database row lock. Concurrent updates remain, and formerly
+absent rows are deleted through audited Eloquent. Rollback failure or concurrent
+changes are explicit partial outcomes. Before publication, the coordinator
+snapshots the bytes and existence of `schedule.json`, `policy.json` and
+`configuration-advisory.json`. A definite rollback restores these exact snapshots
+and fsyncs their publication while both coordination locks remain held, including
+failures after schedule synchronization or intent removal. If concurrent native
+rows survive rollback, synchronization starts from the restored schedule snapshot
+and changes only affected epochs; privacy policy reflects the surviving rows.
+Waiting obligations from unchanged schedules retain their original epochs.
+A private, secret-free `config-save.json`
+intent exists before publication. If a child loses its receipt or times out
+across a possible commit, the engine keeps this intent and returns
+`outcome_unknown`; it never restores destination rows across an ambiguous
+credential commit. Credential-bearing loads refuse
+`config-save-outcome-unknown`, including already-locked tick reloads, and overview
+shows setup required. A subsequent complete Save must resubmit each credential
+group requested by that intent (or explicitly clear it), then removes/fsyncs the
+intent. Settings-only Save and `init` cannot clear an uncertain secret outcome.
+A rejected retry preserves the earlier intent even when the retry's own native
+rows roll back successfully. Only confirmed publication of every requested
+credential group, including explicit clearing, resolves that earlier uncertainty.
+Intent-removal fsync failure republishes the guard before reporting uncertainty;
+workers remain paused if rollback or repeated cleanup also fails.
+A successful credential commit followed by a setup/advisory failure keeps the
+coherent settings/keys and reports an explicit partial success.
+
+The short native writer/finalizer runs beneath an owned Linux supervisor group.
+The supervisor retains the inherited coordination descriptors, kills the PHP
+writer and its credential bridge descendants on timeout, and uses a
+parent-death signal to kill the whole group if the engine disappears. A retry
+cannot acquire released coordinator locks while an orphan credential child can
+still commit. Public output remains fixed codes and confirmed outcome flags.
+
+Settings-only `config check`, `init`, CLI settings updates and schedule updates
+use bridge `read-settings`, which never opens credentials.json or constructs an
+encrypter. The pure `credentials-check` validates submitted groups before any
+native publication. `credentials-merge` accepts `{s3: object|null, site: object|null}`;
+null/omitted groups preserve saved values, `{clear:true}` removes only that
+namespace, and missing session_token clears the previous token when replacing
+S3 keys. One credential flock covers decrypt/merge/encrypt/fsynced publication
+and preserves archive keys and other namespaces. Recovery-key creation remains
+a separately reported operation after the coordinated configuration save.
+The page refuses to change an initialized private root, because a new root
+would start a new identity without the saved keys and history. When the engine
+cannot start, only private root, document roots and Python/PHP pins can be
+repaired, without secret publication; an initialized root still uses the bounded
+configuration/tick locks. The Backups page is the sole web settings editor;
+the native Extensions page retains enable/disable and uninstall, exposes no
+Backups setting fields (only a read-only link to the Backups page, which is never
+stored), and its Save hook performs no configuration or private state work. CLI native writes validate against the internal `Settings::fields`
+schema independently of `getConfig()`.
+
+The private root is owned by the site user with mode 0700. Before the first
+installation identity is written, only Backups' `identity.lock` and
+`billing-guard.json` may already exist; each must be a regular owner-private
+file. Any other entry, including saved credentials or backup sets without an
+installation identity, remains an orphaned-state refusal.
+Administrator repair guidance uses the persisted nonempty private-root pin even
+when the installation marker cannot be inspected. Older installations left the
+default pin blank both before and after Save, so an inaccessible default cannot
+be distinguished from unused storage. Treat that ambiguity as requiring repair
+before replacement. A readable, searchable default without an installation marker
+retains first-use guidance. Overview, Save and save errors share this decision.
+When a saved directory cannot be identified as Backups data, the guidance asks
+the administrator to confirm its contents before restoring ownership and access.
+An identified saved directory keeps direct repair instructions.
+Malformed public-folder lists remain refusing until an administrator explicitly
+enters and confirms the complete list on Backups settings, including an
+intentional empty list. Bootstrap repair validates those folders before writing,
+compares the exact native row snapshot again under native row locks and, for an
+initialized root, configuration/tick locks. Fresh repair uses a native snapshot
+transaction before initialization. It preserves an initialized directory and identity, and publishes no
+secrets or settings-version adoption. Ordinary Save never repairs this guard
+from defaults. Until repair succeeds, exports still refuse unknown boundaries.
+Implicit default repairs for unrelated damaged settings are deferred until the
+next ordinary Save, so they cannot block a folder-list-only bootstrap repair.
+A saved private-root pin that is unusable because it is relative, contains
+dot segments or names a symlink is corrected through the standalone CLI,
+explicitly bound to the existing canonical private directory. State validates
+its application/owner/identity; the operator first verifies the known UUID with
+offline status. Config-set refuses a proposed root different from that bound
+directory. With that same canonical directory, correction preserves UUID and
+credentials and moves no private state. A guessed directory is not an identity
+proof; config-set can initialize fresh state when explicitly selected.
+
+Requests carry an optional numeric `actor` and, for `run`, an optional `mode`.
+A repeated identical waiting manual request returns the existing request.
 
 ## Accessibility and states
 
