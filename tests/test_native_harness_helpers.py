@@ -1,6 +1,7 @@
 """Capture-free harness helpers with real CLI initialization/schedule transitions."""
 import copy
 import json
+import os
 import pathlib
 import subprocess
 import sys
@@ -245,6 +246,13 @@ sys.exit(int(sys.argv[sys.argv.index('--release') + 1]))
         (self.root / 'tests/integration/admin_contracts.php').write_text('print(\'{"permission_denied": true}\')\n')
         self.workbase = pathlib.Path(temporary.name) / 'work'
         self.workbase.mkdir(mode=0o700)
+        self.node = pathlib.Path(temporary.name) / 'ci-node/node'
+        self.node.parent.mkdir()
+        self.node.write_text('#!/bin/sh\n')
+        self.node.chmod(0o700)
+        environment = patch.dict(os.environ, {'NODE_BINARY': str(self.node)})
+        environment.start()
+        self.addCleanup(environment.stop)
 
     def run_contracts(self, owner_exit):
         with patch.object(native_integration, 'ROOT', self.root):
@@ -256,3 +264,8 @@ sys.exit(int(sys.argv[sys.argv.index('--release') + 1]))
 
     def test_clean_owner_shutdown_returns_contract_results(self):
         self.assertEqual(self.run_contracts('0'), {'permission_denied': True})
+
+    def test_contracts_use_the_node_binary_that_ci_installs(self):
+        (self.root / 'tests/integration/admin_contracts.php').write_text(
+            'import json, os\nprint(json.dumps({"node": os.environ.get("NODE_BINARY")}))\n')
+        self.assertEqual(self.run_contracts('0'), {'node': str(self.node.resolve())})

@@ -326,8 +326,13 @@ def admin_contracts(release, php, workbase):
                 owner.wait(timeout=30)
                 raise RuntimeError('UI fixture for admin contracts did not start:\n' + log_path.read_text(errors='replace')[-4000:])
             app = json.loads(pathlib.Path(ready).read_text())['app']
+            # The recovery key Copy check runs the page's click handler in the Node that CI installs.
+            node = shutil.which(os.environ.get('NODE_BINARY') or 'node')
+            if not node:
+                raise RuntimeError('Node required for admin contracts')
+            contract_environment = dict(environment, NODE_BINARY=str(pathlib.Path(node).resolve()))
             result = subprocess.run([str(php), str(ROOT / 'tests/integration/admin_contracts.php'), app, 'all'],
-                                    cwd=ROOT, env=environment, capture_output=True, text=True, timeout=900)
+                                    cwd=ROOT, env=contract_environment, capture_output=True, text=True, timeout=900)
             if result.returncode:
                 raise RuntimeError('admin contracts failed:\n' + result.stdout[-4000:] + result.stderr[-4000:])
             contracts = json.loads(result.stdout)
