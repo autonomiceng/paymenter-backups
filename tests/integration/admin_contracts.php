@@ -615,6 +615,9 @@ PHP;
             && $record->settings()->where('key', 'settings_version')->value('value') === $initialRows['settings_version'],
             'Folder-only repair was blocked by an implicit default or published another damaged row/version');
         $record->settings()->where('key', 'retention_keep_full')->update(['value' => $initialRows['retention_keep_full']]);
+        // Uploads off: a Save with encrypted uploads on creates a recovery key, which is not a repair.
+        $uploadBefore = $record->settings()->where('key', 'upload_s3')->value('value');
+        $record->settings()->where('key', 'upload_s3')->update(['value' => '0']);
         $record->settings()->where('key', 's3_encryption')->update(['value' => '1']); // gitleaks:allow -- next line is a boolean setting name, not a credential
         $record->settings()->where('key', 'plaintext_offsite_acknowledged')->update(['value' => '1']);
         $record->settings()->where('key', 'extra_docroots')->update(['value' => 'invalid-json']);
@@ -631,6 +634,7 @@ PHP;
         foreach (['s3_encryption', 'plaintext_offsite_acknowledged'] as $key) {
             $record->settings()->where('key', $key)->update(['value' => $initialRows[$key]]);
         }
+        $record->settings()->where('key', 'upload_s3')->update(['value' => $uploadBefore]);
         $record->settings()->where('key', 'settings_version')->update(['value' => '1']);
         $record->settings()->where('key', 'retention_keep')->update(['value' => '3']);
         $record->settings()->where('key', 'retention_keep_full')->update(['value' => 'damaged-adapter-field']);
@@ -857,7 +861,7 @@ PHP;
         foreach ([[], ['location' => 'all']] as $staleActionData) {
             $action->data($staleActionData);
             $instance->mountedActions[0]['data']['location'] = 'local';
-            testCheck(str_contains($schema->toHtml(), 'The backup file on this server'), 'Local form selection did not produce its allowed preview');
+            testCheck(str_contains($schema->toHtml(), 'The file on this server.'), 'Local form selection did not produce its allowed preview');
             $submit = $action->getModalSubmitAction();
             testCheck($submit instanceof Filament\Actions\Action && str_contains($submit->toHtml(), 'Delete'),
                 'Allowed local-only preview hides Submit because unvalidated Action data still defaults to all');
