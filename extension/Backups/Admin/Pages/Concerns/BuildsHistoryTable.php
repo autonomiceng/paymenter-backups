@@ -128,11 +128,10 @@ trait BuildsHistoryTable
             ->recordClasses(fn (array $record) => ($record['run']['status'] ?? null) === 'running' ? 'backups-row-running' : null)
             ->columnManagerTriggerAction(fn (Action $action) => $action->label('Columns')->button())
             // Merge, so the skin's shared table class set for every table stays.
+            // On phones the rows stay rows: the table scrolls sideways inside its card, never the page.
             ->extraAttributes(['class' => 'beco-own-table backups-history'], merge: true)
             // No polling while a dialog is open: it would re-render the dialog, including a shown recovery key.
             ->poll(fn () => $this->hasActiveWork() && !$this->mountedActions ? '5s' : null)
-            // Below sm each row stacks, so long status details and both row actions get the full width.
-            ->stackedOnMobile()
             ->headerActions([
                 Action::make('toggleDeleted')->label(fn () => $this->showDeleted ? 'Hide deleted' : 'Show deleted')->link()->color('gray')
                     ->visible(fn () => $this->hasDeletedRuns())
@@ -141,7 +140,7 @@ trait BuildsHistoryTable
             ->columns([
                 TextColumn::make('created_at')->label('Started')
                     ->formatStateUsing(fn ($state) => $this->moment($state)),
-                // Phones keep every column and scroll the table inside its card, so the kind of backup stays in view.
+                // Every column shows on phones, so the kind of backup stays in view.
                 TextColumn::make('type')->label('Type')->toggleable(),
                 TextColumn::make('status_label')->label('Status')->badge()->color(fn (array $record) => $record['status_color'])
                     ->extraCellAttributes(fn (array $record) => ['data-beco-tone' => StatusTone::forLabel($record['status_label'])])->toggleable(),

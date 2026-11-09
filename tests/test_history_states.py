@@ -38,9 +38,11 @@ class HistoryStates(unittest.TestCase):
 
     def test_phone_rows_keep_type_size_and_location(self):
         # Staff tables scroll inside their card on phones, so a full and a database backup stay told apart.
-        columns = {column['name']: column['from'] for column in self.output([run('one')])['columns']}
+        output = self.output([run('one')])
+        columns = {column['name']: column['from'] for column in output['columns']}
         self.assertEqual({name: columns[name] for name in ('type', 'size_label', 'location')},
                          {'type': None, 'size_label': None, 'location': None})
+        self.assertFalse(output['stacked'], 'phones must scroll the staff history table, not stack its rows')
 
     def test_running_backup_gets_its_note_and_row_edge(self):
         rows, classes, _ = self.render([run('busy', status='running', finished_at=None, local=False, size=None)])

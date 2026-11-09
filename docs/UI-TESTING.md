@@ -87,7 +87,9 @@ storage or encryption choice would hang a valid client-only interaction.
   labels match the engine's HH:MM clock values, including midnight wrap.
 * History: Created column names the time zone, Show deleted appears only with
   deleted backups, Delete preview names what is removed and refuses the last
-  usable backup.
+  usable backup. At 390 px the rows don't stack: Type, Size and Location stay,
+  the table scrolls inside its card, and Download and More actions are
+  reachable once scrolled into view.
 * Light and dark, keyboard focus, no horizontal overflow at 390 px.
 
 The browser fixture's `worker` control admits capture requests only when their
