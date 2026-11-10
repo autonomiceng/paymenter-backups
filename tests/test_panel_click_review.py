@@ -43,7 +43,7 @@ $page = new class extends Paymenter\Extensions\Others\Backups\Admin\Pages\Backup
 $input = json_decode(file_get_contents('php://stdin'), true);
 $overview = ['initialized' => true, 'scheduler' => ['last_tick_at' => time()], 'runs' => $input['runs'] ?? [],
     'requests' => [['action' => 'destination-test', 'status' => 'complete', 'result_verified' => true, 'run_id' => null]],
-    'configuration' => ['available' => true, 'valid' => true, 'checks' => $input['checks'] ?? [],
+    'configuration' => ['available' => true, 'valid' => true, 'checks' => $input['checks'] ?? [], 'storage' => $input['storage'] ?? [],
         'readiness' => ['full-quiesced' => ['state' => 'waiting', 'items' => [['code' => 'job-lock-busy']]],
                         'database-online' => ['state' => 'ready', 'items' => []]],
         'admission' => ['full-quiesced' => ['job-lock-busy'], 'database-online' => []]]];
@@ -214,7 +214,7 @@ class ClickReview(unittest.TestCase):
         hints = self.page('hints')
         full = 'The database and all Paymenter files, except logs, cache and sessions. The site stays online.'
         database = "The database only. The site stays online. To restore, you also need Paymenter's files from a full backup."
-        keep = 'The newest verified backup in each place is always kept. So are backups not yet uploaded and backups that failed a check.'
+        keep = 'The newest verified backup on this server is always kept. So are backups that failed a check.'
         self.assertEqual({name: hint['label'] for name, hint in hints.items()},
                          {'schedule_full': full, 'schedule_database': database, 'storage_keep': keep, 'd_type': full})
         for name, hint in hints.items():
@@ -225,6 +225,23 @@ class ClickReview(unittest.TestCase):
                 # A tap focuses the button, which opens the tooltip, and sends nothing to the server.
                 self.assertEqual(hint['click'], '$el.focus()')
                 self.assertIsNone(hint['url'])
+
+    def test_keep_hint_names_only_the_places_that_keep_copies(self):
+        # Cleanup keeps undelivered backups only while S3 uploads are required (storage.py:977), and
+        # S3-only removes each local copy once its S3 copy is verified (storage.py:1083).
+        cases = {
+            'this server only': ({'keep_local': True, 'upload_s3': False},
+                                 'The newest verified backup on this server is always kept. So are backups that failed a check.'),
+            'this server and S3': ({'keep_local': True, 'upload_s3': True},
+                                   'The newest verified backup on this server and in S3 is always kept. '
+                                   'So are backups waiting for their S3 upload and backups that failed a check.'),
+            'S3 only': ({'keep_local': False, 'upload_s3': True},
+                        'The newest verified backup in S3 is always kept. '
+                        'So are backups waiting for their S3 upload and backups that failed a check.'),
+        }
+        for name, (storage, expected) in cases.items():
+            with self.subTest(storage=name):
+                self.assertEqual(self.page('hints', storage=storage)['storage_keep']['label'], expected)
 
     def test_started_sorts_both_ways_and_defaults_to_newest_first(self):
         runs = [{'run_id': run_id, 'request_id': None, 'status': 'ready', 'mode': 'database-online', 'created_at': created,

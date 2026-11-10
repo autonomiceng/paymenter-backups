@@ -195,13 +195,24 @@ trait BuildsPageContent
             Sheet::row(TextEntry::make('storage_s3')->label('S3')->state(fn () => $this->uploadsToS3() ? ($this->storage()['s3_bucket'] ?: 'No bucket') : 'Off')
                 ->belowContent(fn () => [Text::make($this->s3Sentence())]),
                 [$this->link('storageS3', 'Set up S3', $this->settingsUrl('s3'))->label(fn () => $this->uploadsToS3() ? 'Change' : 'Set up S3')]),
-            Sheet::row(Sheet::hint(TextEntry::make('storage_keep')->label('Keep'),
-                'The newest verified backup in each place is always kept. So are backups not yet uploaded and backups that failed a check.')->state(function () {
+            Sheet::row(Sheet::hint(TextEntry::make('storage_keep')->label('Keep'), $this->keepHint())->state(function () {
                 $values = $this->formValues();
                 return 'Newest ' . (int) ($values['retention_keep_full'] ?? 0) . ' full and ' . (int) ($values['retention_keep_database'] ?? 0) . ' database backups';
             })->belowContent(fn () => [Text::make(($this->formValues()['automatic_retention'] ?? true) ? 'Cleanup runs after each backup.' : 'Automatic cleanup is off.')]),
                 [$this->applyRetentionAction()->button()->outlined()->size(Size::Small)]),
         ]);
+    }
+
+    /** What cleanup never deletes, named only for the places that keep copies. */
+    private function keepHint(): string
+    {
+        $local = (bool) ($this->storage()['keep_local'] ?? true);
+        $s3 = $this->uploadsToS3();
+        if (!$local && !$s3) { return ''; }
+        $places = implode(' and ', array_filter([$local ? 'on this server' : null, $s3 ? 'in S3' : null]));
+        // With S3 on, every upload is required, and cleanup keeps a backup until its S3 copy is made.
+        return 'The newest verified backup ' . $places . ' is always kept. So are '
+            . ($s3 ? 'backups waiting for their S3 upload and ' : '') . 'backups that failed a check.';
     }
 
     /** What the S3 copy needs, or when it was last made. */
