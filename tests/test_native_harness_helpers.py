@@ -222,17 +222,23 @@ class LegacyConfigurationChecks(fixtures.PrivateFixture):
 
 
 class AdminContractOwnerChecks(unittest.TestCase):
-    """The admin contract run fails when its fixture owner fails on shutdown."""
+    """Contract failures retain diagnostics and always reap their fixture owner."""
     OWNER = """import json, os, pathlib, signal, sys, time
 stopped = []
 signal.signal(signal.SIGTERM, lambda *_: stopped.append(True))
 work = pathlib.Path(os.environ['TMPDIR'])
+(work / 'owner.pid').write_text(str(os.getpid()))
+mode = sys.argv[sys.argv.index('--release') + 1]
+if mode == 'early-exit':
+    sys.stderr.write('fixture setup failed before readiness')
+    sys.exit(7)
 (work / 'ui-fixture.json').write_text(json.dumps({'app': str(work)}))
 print(json.dumps({'ready': str(work / 'ui-fixture.json')}), flush=True)
 while not stopped:
     time.sleep(0.05)
+(work / 'owner-stopped').touch()
 sys.stderr.write('native core source changed during UI fixture')
-sys.exit(int(sys.argv[sys.argv.index('--release') + 1]))
+sys.exit(int(mode))
 """
 
     def setUp(self):
@@ -257,6 +263,32 @@ sys.exit(int(sys.argv[sys.argv.index('--release') + 1]))
     def run_contracts(self, owner_exit):
         with patch.object(native_integration, 'ROOT', self.root):
             return native_integration.admin_contracts(owner_exit, sys.executable, self.workbase)
+
+    def assert_owner_reaped(self, stopped=True):
+        pid = int((self.workbase / 'owner.pid').read_text())
+        with self.assertRaises(ProcessLookupError):
+            os.kill(pid, 0)
+        if stopped:
+            self.assertTrue((self.workbase / 'owner-stopped').exists())
+
+    def test_owner_exit_before_readiness_reports_fixture_log(self):
+        with self.assertRaisesRegex(RuntimeError, 'UI fixture for admin contracts did not start:\n.*setup failed before readiness'):
+            self.run_contracts('early-exit')
+        self.assert_owner_reaped(stopped=False)
+
+    def test_nonzero_contract_exit_reports_output_and_stops_owner(self):
+        (self.root / 'tests/integration/admin_contracts.php').write_text(
+            'import sys\nprint("contract stdout detail")\nsys.stderr.write("contract stderr detail")\nsys.exit(9)\n')
+        with self.assertRaisesRegex(RuntimeError, 'admin contracts failed:\ncontract stdout detail\ncontract stderr detail'):
+            self.run_contracts('0')
+        self.assert_owner_reaped()
+
+    def test_unavailable_node_stops_owner_without_running_contracts(self):
+        (self.root / 'tests/integration/admin_contracts.php').write_text('raise AssertionError("contracts must not run")\n')
+        with patch.dict(os.environ, {'NODE_BINARY': str(self.node.parent / 'missing-node')}):
+            with self.assertRaisesRegex(RuntimeError, 'Node required for admin contracts'):
+                self.run_contracts('0')
+        self.assert_owner_reaped()
 
     def test_owner_shutdown_failure_fails_passing_contracts(self):
         with self.assertRaisesRegex(RuntimeError, 'failed on shutdown:\n.*source changed'):
