@@ -42,7 +42,7 @@ $page = new class extends Paymenter\Extensions\Others\Backups\Admin\Pages\Backup
 };
 $input = json_decode(file_get_contents('php://stdin'), true);
 $overview = ['initialized' => true, 'scheduler' => ['last_tick_at' => time()], 'runs' => [],
-    'requests' => [['action' => 'destination-test', 'status' => 'complete', 'result_verified' => true]],
+    'requests' => [['action' => 'destination-test', 'status' => 'complete', 'result_verified' => true, 'run_id' => null]],
     'configuration' => ['available' => true, 'valid' => true, 'checks' => $input['checks'] ?? [],
         'readiness' => ['full-quiesced' => ['state' => 'waiting', 'items' => [['code' => 'job-lock-busy']]],
                         'database-online' => ['state' => 'ready', 'items' => []]],
@@ -78,6 +78,20 @@ if ($input['case'] === 'health') {
         'url' => isset($actions['detailsDownload']) ? $actions['detailsDownload']->getUrl() : null,
         // Inline decoration avoids requiring an icon-pack provider in this isolated fixture.
         'html' => $action->icon(new Illuminate\Support\HtmlString('<svg aria-hidden="true"></svg>'))->toHtml()]);
+} elseif ($input['case'] === 'detail-rows') {
+    $run = $input['run'] + ['run_id' => 'fixture-run', 'mode' => 'database-online', 'created_at' => null, 'finished_at' => null, 'verified_at' => null,
+            'remote' => 'none', 'remote_checked_at' => null, 'local' => true, 'size' => 128];
+    $record = ['__key' => $run['run_id'], 'kind' => 'run', 'run_id' => $run['run_id'], 'run' => $run, 'origin' => 'Staff'];
+    $rows = [];
+    foreach (flatten(Filament\Schemas\Schema::make($page)->components($call('detailsSchema', $record))->getComponents()) as $component) {
+        // Each row is its entry, then the actions beside it.
+        if ($component instanceof Filament\Schemas\Components\Section) $entry = 'section ' . $component->getHeading();
+        if ($component instanceof Filament\Infolists\Components\TextEntry) $entry = $component->getName();
+        if ($component instanceof Filament\Actions\Action && $component->isVisible()) {
+            $rows[$entry][] = ['name' => $component->getName(), 'label' => $component->getLabel(), 'url' => $component->getUrl()];
+        }
+    }
+    echo json_encode(['rows' => $rows]);
 } elseif ($input['case'] === 'checks') {
     $settings = $page->settingsForm(Filament\Schemas\Schema::make($page));
     $sections = [];
@@ -143,10 +157,10 @@ class ClickReview(unittest.TestCase):
             shown = self.page('queue', checks={'jobs': dict(inventory, suggestions={'queue': command})})
             self.assertEqual(discovery.parse(shown, state.app)['lock'], str(lock), 'Help must use the lock that capture coordinates')
 
-    def test_details_offers_verify_download_and_closes_the_row_menu(self):
+    def test_details_offers_download_and_closes_the_row_menu(self):
         result = self.page('details')
-        self.assertIn('Verify', result['buttons'])
-        self.assertIn('Download', result['buttons'])
+        # Verify sits in the Check row, as in the mock; the footer keeps Download only.
+        self.assertEqual(result['buttons'], ['Download'])
         class Item(HTMLParser):
             attributes = None
 
@@ -160,6 +174,24 @@ class ClickReview(unittest.TestCase):
         self.assertIsNotNone(item.attributes, result['html'])
         self.assertEqual(item.attributes.get('x-on:click.capture'), 'close()')
         self.assertIn("mountAction('details'", item.attributes.get('wire:click', ''))
+
+    def detail_rows(self, **run):
+        return self.page('detail-rows', run=run)['rows']
+
+    def test_details_offer_verify_in_check_and_set_up_s3_beside_s3_off(self):
+        rows = self.detail_rows(status='ready', download='ready')
+        self.assertEqual([item['label'] for item in rows['d_verified']], ['Verify'])
+        self.assertEqual(rows['d_s3'], [{'name': 'detailsSetUpS3', 'label': 'Set up S3', 'url': '/admin/backups?tab=settings#s3'}])
+
+    def test_details_offer_verify_wherever_the_row_does(self):
+        # A damaged copy shows Verify on its row; its Details must offer it too.
+        for run in ({'status': 'damaged', 'download': 'none'}, {'status': 'ready', 'download': 'none'},
+                    {'status': 'ready', 'download': 'retrieve', 'local': False, 'remote': 'delivered'}):
+            with self.subTest(run=run):
+                rows = self.detail_rows(**run)
+                self.assertEqual([item['name'] for item in rows['d_verified']], ['detailsVerify'])
+                # Set up S3 shows only while S3 is off and the backup has no S3 copy.
+                self.assertEqual('d_s3' in rows, run.get('remote') is None)
 
     def test_settings_commands_can_shrink_and_schedule_columns_start_at_top(self):
         command = '/usr/bin/flock -n /fixture/paymenter-job-locks/scheduler.lock /usr/bin/php /app/artisan schedule:run'
