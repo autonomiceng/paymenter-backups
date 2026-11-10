@@ -117,8 +117,10 @@ trait BuildsHistoryTable
         $inS3 = static fn (array $record) => in_array($record['run']['remote'] ?? null, ['delivered', 'present'], true);
         return $table
             ->description(fn () => $this->hasActiveWork() ? 'Updates every 5 seconds while a backup runs' : null)
-            ->records(function (int|string $page, int|string $recordsPerPage, ?string $search) {
+            ->records(function (int|string $page, int|string $recordsPerPage, ?string $search, ?string $sortColumn = null, ?string $sortDirection = null) {
                 $rows = HistorySearch::filter($this->historyRows($this->showDeleted), $search);
+                // History is newest first; Started sorts oldest first only when asked.
+                if ($sortColumn === 'created_at' && $sortDirection === 'asc') { $rows = array_reverse($rows); }
                 $perPage = max(1, (int) $recordsPerPage);
                 $page = max(1, (int) $page);
                 return new LengthAwarePaginator(array_slice($rows, ($page - 1) * $perPage, $perPage), count($rows), $perPage, $page);
@@ -139,7 +141,7 @@ trait BuildsHistoryTable
                     ->action(function () { $this->showDeleted = !$this->showDeleted; $this->resetPage(); }),
             ])
             ->columns([
-                TextColumn::make('created_at')->label('Started')
+                TextColumn::make('created_at')->label('Started')->sortable()
                     ->formatStateUsing(fn ($state) => $this->moment($state)),
                 // Phones keep every column and scroll the table inside its card, so the kind of backup stays in view.
                 TextColumn::make('type')->label('Type')->toggleable(),

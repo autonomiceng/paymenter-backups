@@ -41,7 +41,7 @@ $page = new class extends Paymenter\Extensions\Others\Backups\Admin\Pages\Backup
     public static function downloadUrl(string $runId): string { return '/admin/backups/download/'.$runId; }
 };
 $input = json_decode(file_get_contents('php://stdin'), true);
-$overview = ['initialized' => true, 'scheduler' => ['last_tick_at' => time()], 'runs' => [],
+$overview = ['initialized' => true, 'scheduler' => ['last_tick_at' => time()], 'runs' => $input['runs'] ?? [],
     'requests' => [['action' => 'destination-test', 'status' => 'complete', 'result_verified' => true, 'run_id' => null]],
     'configuration' => ['available' => true, 'valid' => true, 'checks' => $input['checks'] ?? [],
         'readiness' => ['full-quiesced' => ['state' => 'waiting', 'items' => [['code' => 'job-lock-busy']]],
@@ -92,6 +92,11 @@ if ($input['case'] === 'health') {
         }
     }
     echo json_encode(['rows' => $rows]);
+} elseif ($input['case'] === 'history') {
+    $table = $page->table(Filament\Tables\Table::make($page));
+    $order = fn (?string $direction) => array_map(fn ($row) => $row['__key'], $table->evaluate($table->getDataSource(), ['page' => 1, 'recordsPerPage' => 25,
+        'search' => null, 'sortColumn' => $direction ? 'created_at' : null, 'sortDirection' => $direction])->items());
+    echo json_encode(['sortable' => $table->getColumn('created_at')->isSortable(), 'default' => $order(null), 'asc' => $order('asc'), 'desc' => $order('desc')]);
 } elseif ($input['case'] === 'checks') {
     $settings = $page->settingsForm(Filament\Schemas\Schema::make($page));
     $sections = [];
@@ -192,6 +197,16 @@ class ClickReview(unittest.TestCase):
                 self.assertEqual([item['name'] for item in rows['d_verified']], ['detailsVerify'])
                 # Set up S3 shows only while S3 is off and the backup has no S3 copy.
                 self.assertEqual('d_s3' in rows, run.get('remote') is None)
+
+    def test_started_sorts_both_ways_and_defaults_to_newest_first(self):
+        runs = [{'run_id': run_id, 'request_id': None, 'status': 'ready', 'mode': 'database-online', 'created_at': created,
+                 'finished_at': None, 'verified_at': None, 'remote': 'none', 'local': True, 'size': 1, 'download': 'ready'}
+                for run_id, created in (('older', 1_700_000_000), ('newest', 1_700_000_200), ('middle', 1_700_000_100))]
+        result = self.page('history', runs=runs)
+        self.assertTrue(result['sortable'])
+        self.assertEqual(result['default'], ['newest', 'middle', 'older'])
+        self.assertEqual(result['desc'], ['newest', 'middle', 'older'])
+        self.assertEqual(result['asc'], ['older', 'middle', 'newest'])
 
     def test_settings_commands_can_shrink_and_schedule_columns_start_at_top(self):
         command = '/usr/bin/flock -n /fixture/paymenter-job-locks/scheduler.lock /usr/bin/php /app/artisan schedule:run'
