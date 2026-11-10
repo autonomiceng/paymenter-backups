@@ -42,7 +42,9 @@ The fixture fetches and verifies the official Paymenter v1.5.9 archive, creates
 its own MariaDB datadir/socket, uses fake credentials, and restores into a second
 application/schema. It checks extension discovery, native settings, authentication,
 secret handling, encrypted transfer, recovery verification, preserved `APP_KEY`,
-Passport keys, migrations, and login. It closes its isolated processes afterwards.
+Passport keys, migrations, and login. Last, it starts a separate UI fixture and
+runs the [admin contract tests](../tests/integration/admin_contracts.php) against
+it, because they change fixture rows. It closes its isolated processes afterwards.
 Allow enough disk for both applications, backup payloads, and private state.
 `--skip-restore` is a development shortcut and does not complete release checks.
 The fixture refreshes the native billing guard immediately before configuration

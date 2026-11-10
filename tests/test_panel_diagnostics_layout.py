@@ -1,13 +1,14 @@
 # MIT, Copyright (c) 2026 Autonomic Engineering.
 """Render native diagnostics with pinned Paymenter; check command visibility in a narrow rail."""
 import hashlib
-import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
-import tarfile
 import tempfile
 import unittest
+
+from panel_browser import browser_node
 
 ROOT = Path(__file__).resolve().parents[1]
 PHP = r'''<?php
@@ -30,7 +31,7 @@ $css=file_get_contents($base.'/vendor/filament/filament/dist/theme.css');
 echo '<!doctype html><html class="dark"><head><meta charset="utf-8"><style>'.$css.'</style><style>body{background:#0b132b;color:#f7fbff}main{width:280px;margin:32px}h1{font-size:18px;margin-bottom:20px}</style></head><body><main class="domains-rail"><h1>Full backup diagnostics</h1>'.$body.'</main></body></html>';
 '''
 BROWSER = r'''
-const fs=require('fs');const {chromium}=require(process.env.BACKUPS_TEST_PLAYWRIGHT_MODULE);
+const fs=require('fs');const {chromium}=require(process.env.PAYMENTER_BACKUPS_PLAYWRIGHT || 'playwright');
 (async()=>{const browser=await chromium.launch({headless:true,args:['--no-sandbox','--disable-dev-shm-usage']});
 try{const page=await browser.newPage({viewport:{width:390,height:1000},colorScheme:'dark',reducedMotion:'reduce'});await page.route('**/*',r=>r.abort());
 await page.setContent(fs.readFileSync(process.argv[1],'utf8'),{waitUntil:'domcontentloaded'});
@@ -42,28 +43,26 @@ console.log(JSON.stringify(checks));}finally{await browser.close();}})().catch(e
 '''
 
 
-@unittest.skipUnless(all(os.environ.get(key) for key in ('PAYMENTER_TEST_APP', 'PHP_BINARY', 'BACKUPS_TEST_NODE', 'BACKUPS_TEST_PLAYWRIGHT_MODULE')),
-                     'Pinned native Paymenter, PHP and offline Playwright required')
+@unittest.skipUnless(os.environ.get('PHP_BINARY') and os.environ.get('PAYMENTER_TEST_APP'),
+                     'PHP_BINARY and PAYMENTER_TEST_APP required')
 class DiagnosticsLayout(unittest.TestCase):
+    def setUp(self):
+        self.node = browser_node(self)
+
     def test_native_commands_stay_readable_in_a_narrow_rail(self):
         # A real Filament render is necessary: CSS on a hand-written span misses
         # its native schema grid and command wrappers, where this clipping occurs.
+        # The native fixture is the unpacked release, not a Git checkout; the lock pins its Filament build.
         source = Path(os.environ['PAYMENTER_TEST_APP'])
-        self.assertEqual(subprocess.check_output(['git', '-C', str(source), 'rev-parse', 'HEAD'], text=True).strip(),
-                         'ee729f7d99ac18942625b79f3f93d8d8b21255e8')
         self.assertEqual(hashlib.sha256((source / 'composer.lock').read_bytes()).hexdigest(),
                          'fd6bdeb5557b3af0976d5688d92081abc6f7c3235806a6c4b77f4b8bca9186be')
         output = Path(os.environ['BACKUPS_RENDER_DIR']) if os.environ.get('BACKUPS_RENDER_DIR') else Path(tempfile.mkdtemp(prefix='backups-diagnostics-'))
         output.mkdir(parents=True, exist_ok=True)
         with tempfile.TemporaryDirectory(prefix='backups-diagnostics-native-') as scratch:
             work = Path(scratch)
-            archive = work / 'source.tar'
-            with archive.open('wb') as stream:
-                subprocess.run(['git', '-C', str(source), 'archive', 'HEAD'], stdout=stream, check=True)
             app = work / 'app'
-            app.mkdir()
-            with tarfile.open(archive) as package:
-                package.extractall(app, filter='data')
+            shutil.copytree(source, app, symlinks=True,
+                            ignore=lambda directory, names: {'.git', 'node_modules', 'vendor'} & set(names) if Path(directory) == source else ())
             (app / 'vendor').symlink_to(source / 'vendor', target_is_directory=True)
             for area in ('bootstrap/cache', 'storage/framework/cache', 'storage/framework/views', 'storage/framework/sessions', 'storage/logs'):
                 (app / area).mkdir(parents=True, exist_ok=True)
@@ -76,5 +75,5 @@ class DiagnosticsLayout(unittest.TestCase):
             self.assertEqual(rendered.returncode, 0, rendered.stderr.decode()+rendered.stdout.decode())
             html = output / 'diagnostics.html'
             html.write_bytes(rendered.stdout)
-            checked = subprocess.run([os.environ['BACKUPS_TEST_NODE'], '-e', BROWSER, str(html)], capture_output=True, timeout=25)
+            checked = subprocess.run([self.node, '-e', BROWSER, str(html)], capture_output=True, timeout=25)
             self.assertEqual(checked.returncode, 0, checked.stderr.decode()+checked.stdout.decode())

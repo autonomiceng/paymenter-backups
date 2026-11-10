@@ -303,6 +303,59 @@ def panel_regressions(app, php, work):
         raise RuntimeError('native panel regressions failed or skipped:\n' + result.stdout + result.stderr)
 
 
+def admin_contracts(release, php, workbase):
+    """Run tests/integration/admin_contracts.php against its own disposable UI fixture.
+
+    The contracts change fixture rows, so callers run them after the read-only checks.
+    """
+    environment = child_environment()
+    # The contracts accept only a ui- fixture whose private base sits directly in TMPDIR.
+    environment['TMPDIR'] = str(workbase)
+    log_path = workbase / 'admin-contracts-fixture.log'
+    with log_path.open('wb') as log:
+        owner = subprocess.Popen([sys.executable, '-B', str(ROOT / 'tools/native_ui_fixture.py'), 'serve',
+                                  '--release', str(release), '--php', str(php), '--ttl', '1800'],
+                                 cwd=ROOT, env=environment, stdout=subprocess.PIPE, stderr=log, text=True)
+        try:
+            ready = None
+            for line in owner.stdout:
+                ready = json.loads(line).get('ready')
+                if ready:
+                    break
+            if not ready:
+                owner.wait(timeout=30)
+                raise RuntimeError('UI fixture for admin contracts did not start:\n' + log_path.read_text(errors='replace')[-4000:])
+            app = json.loads(pathlib.Path(ready).read_text())['app']
+            # The recovery key Copy check runs the page's click handler in the Node that CI installs.
+            node = shutil.which(os.environ.get('NODE_BINARY') or 'node')
+            if not node:
+                raise RuntimeError('Node required for admin contracts')
+            contract_environment = dict(environment, NODE_BINARY=str(pathlib.Path(node).resolve()))
+            result = subprocess.run([str(php), str(ROOT / 'tests/integration/admin_contracts.php'), app, 'all'],
+                                    cwd=ROOT, env=contract_environment, capture_output=True, text=True, timeout=900)
+            if result.returncode:
+                raise RuntimeError('admin contracts failed:\n' + result.stdout[-4000:] + result.stderr[-4000:])
+            contracts = json.loads(result.stdout)
+            # The owner checks on shutdown that the contracts left the application source unchanged.
+            if stop_owner(owner):
+                raise RuntimeError('UI fixture for admin contracts failed on shutdown:\n' + log_path.read_text(errors='replace')[-4000:])
+            return contracts
+        finally:
+            stop_owner(owner)
+            owner.stdout.close()
+
+
+def stop_owner(owner):
+    """Stop a fixture owner if it still runs and return its exit status."""
+    if owner.poll() is None:
+        owner.terminate()
+        try:
+            owner.wait(timeout=60)
+        except subprocess.TimeoutExpired:
+            owner.kill(); owner.wait()
+    return owner.returncode
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--release', required=True)
@@ -731,7 +784,9 @@ def main():
                 raise RuntimeError('native source changed during capture')
             if (work / 'forbidden-config-cache.php').exists() or (work / 'forbidden-routes-cache.php').exists():
                 raise RuntimeError('inherited APP cache path was used')
-            result = {'hostile_parent_environment_ignored': True, 'database_visibility': visibility, 'adapter_checks': results, 'open_basedir': open_basedir_results, 'restore': restored_results, 'encrypted_restore': encrypted_restore, 'full_artifact_sha256': hashlib.sha256(archive.read_bytes()).hexdigest(), 'release_sha256': release_sha256, 'native_login': True, 'native_migrations': 'no pending', 'native_source_unchanged': True}
+            # Last, because the contracts change fixture rows.
+            contracts = admin_contracts(args.release, args.php, workbase)
+            result = {'hostile_parent_environment_ignored': True, 'database_visibility': visibility, 'adapter_checks': results, 'open_basedir': open_basedir_results, 'restore': restored_results, 'encrypted_restore': encrypted_restore, 'full_artifact_sha256': hashlib.sha256(archive.read_bytes()).hexdigest(), 'release_sha256': release_sha256, 'native_login': True, 'native_migrations': 'no pending', 'native_source_unchanged': True, 'admin_contracts': contracts}
             (work / 'native-integration-last.json').write_text(json.dumps(result, indent=2) + '\n')
             print(json.dumps(result))
     finally:

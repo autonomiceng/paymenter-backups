@@ -282,13 +282,16 @@ try {
             $repairOnlyPage = Livewire\Livewire::test($class);
             testCheck(!str_contains(html_entity_decode($repairOnlyPage->html(), ENT_QUOTES), 'First-time setup'),
                 'An existing Data directory with invalid permissions re-entered first-time setup');
-            $moveRefusal = submitSettings($class, ['private_root' => $freshRoot . '-moved']);
-            $moveMessage = $moveRefusal->instance()->getErrorBag()->getMessages()['settings.private_root'][0] ?? '';
-            testCheck($moveMessage === Paymenter\Extensions\Others\Backups\Messages::error('private-root-move-refused')
-                && $record->settings()->where('key', 'private_root')->value('value') === $freshRoot
+            // A forged path must never move data, whatever the save reports.
+            submitSettings($class, ['private_root' => $freshRoot . '-moved']);
+            testCheck($record->settings()->where('key', 'private_root')->value('value') === $freshRoot
                 && file_get_contents($freshRoot . '/installation.json') === $installedIdentity
                 && !file_exists($freshRoot . '-moved'),
                 'A damaged existing Data directory was changed or moved during repair');
+            $dataFolder = $repairOnlyPage->instance()->settingsForm->getComponent(static fn ($component) =>
+                $component instanceof Filament\Forms\Components\Field && $component->getName() === 'private_root', withHidden: true);
+            testCheck($dataFolder !== null && $dataFolder->isVisible() && $dataFolder->isDisabled(),
+                'The Data folder field can be edited after setup');
             $results['invalid_existing_store_stays_locked_for_repair'] = true;
         } finally { chmod($freshRoot, 0700); }
         testCheck(file_get_contents($root . '/installation.json') === $identity, 'First-use save changed original installation identity');
@@ -450,7 +453,9 @@ PHP;
                 updates: ['settings.full_schedule' => 'off', 'settings.upload_s3' => false]);
             testCheck($page->instance()->removeSitePasswordAction()->isVisible(),
                         'Saved site password removal is unavailable after URL, schedule or storage changes');
-            testCheck(str_contains($page->html(), 'HTTP Basic'), 'HTTP Basic purpose disappeared when its form was unavailable');
+            $settingsTab = Livewire\Livewire::withQueryParams(['tab' => 'settings'])->test($class)->html();
+            testCheck(str_contains($settingsTab, 'id="advanced"') && !str_contains($settingsTab, 'HTTP Basic'),
+                        'Settings shows the retired site password section');
             $page->update(calls: [['method' => 'mountAction', 'params' => ['removeSitePassword']]], updates: []);
             testCheck(count($page->get('mountedActions') ?? []) === 1, 'HTTP Basic removal confirmation did not mount');
             $partial = modalPartial($page) ?? $page->html();
@@ -593,8 +598,8 @@ PHP;
             testCheck($record->settings()->where('key', 'extra_docroots')->value('value') === $invalidRoots, 'Page silently defaulted the public-directory guard');
         }
         $remedy = Paymenter\Extensions\Others\Backups\Messages::error('document-roots-invalid');
-        testCheck(str_contains($remedy, 'Backups settings') && str_contains($remedy, 'confirm'),
-                    'Public-directory refusal does not explain the Backups settings remedy');
+        testCheck(str_contains($remedy, 'In Settings,') && str_contains($remedy, 'confirm'),
+                    'Public-directory refusal does not explain the Settings remedy');
         testCheck(Illuminate\Support\Facades\Validator::make(['extra_docroots' => $initialRows['extra_docroots']],
             ['extra_docroots' => Paymenter\Extensions\Others\Backups\Settings::rules('extra_docroots')])->passes(),
             'Original public-directory value is not accepted by internal validation');
@@ -610,6 +615,9 @@ PHP;
             && $record->settings()->where('key', 'settings_version')->value('value') === $initialRows['settings_version'],
             'Folder-only repair was blocked by an implicit default or published another damaged row/version');
         $record->settings()->where('key', 'retention_keep_full')->update(['value' => $initialRows['retention_keep_full']]);
+        // Uploads off: a Save with encrypted uploads on creates a recovery key, which is not a repair.
+        $uploadBefore = $record->settings()->where('key', 'upload_s3')->value('value');
+        $record->settings()->where('key', 'upload_s3')->update(['value' => '0']);
         $record->settings()->where('key', 's3_encryption')->update(['value' => '1']); // gitleaks:allow -- next line is a boolean setting name, not a credential
         $record->settings()->where('key', 'plaintext_offsite_acknowledged')->update(['value' => '1']);
         $record->settings()->where('key', 'extra_docroots')->update(['value' => 'invalid-json']);
@@ -626,6 +634,7 @@ PHP;
         foreach (['s3_encryption', 'plaintext_offsite_acknowledged'] as $key) {
             $record->settings()->where('key', $key)->update(['value' => $initialRows[$key]]);
         }
+        $record->settings()->where('key', 'upload_s3')->update(['value' => $uploadBefore]);
         $record->settings()->where('key', 'settings_version')->update(['value' => '1']);
         $record->settings()->where('key', 'retention_keep')->update(['value' => '3']);
         $record->settings()->where('key', 'retention_keep_full')->update(['value' => 'damaged-adapter-field']);
@@ -830,7 +839,7 @@ PHP;
         testCheck($action instanceof Filament\Actions\Action, 'Native Delete action is missing');
         $runId = 'test-delete-gate';
         $action->record(['__key' => $runId, 'key' => $runId, 'kind' => 'run', 'run_id' => $runId, 'created_at' => time(),
-            'run' => ['mode' => 'database-online', 'status' => 'ready', 'local' => true, 'remote' => 'changed']]);
+            'run' => ['mode' => 'database-online', 'status' => 'ready', 'local' => true, 'remote' => 'changed', 'size' => 1024]]);
         $action->nestingIndex(0);
         $instance->mountedActions = [['name' => 'delete', 'arguments' => [], 'context' => ['table' => true, 'recordKey' => $runId],
             'data' => ['location' => 'local']]];
@@ -852,7 +861,7 @@ PHP;
         foreach ([[], ['location' => 'all']] as $staleActionData) {
             $action->data($staleActionData);
             $instance->mountedActions[0]['data']['location'] = 'local';
-            testCheck(str_contains($schema->toHtml(), 'The backup file on this server'), 'Local form selection did not produce its allowed preview');
+            testCheck(str_contains($schema->toHtml(), 'The file on this server.'), 'Local form selection did not produce its allowed preview');
             $submit = $action->getModalSubmitAction();
             testCheck($submit instanceof Filament\Actions\Action && str_contains($submit->toHtml(), 'Delete'),
                 'Allowed local-only preview hides Submit because unvalidated Action data still defaults to all');
@@ -973,7 +982,10 @@ const window = {navigator: {clipboard: {writeText: value => { copied = value; }}
 new Function('window', '$tooltip', '$store', input.handler)(window, () => {}, {theme: 'light'});
 if (copied !== input.expected) process.exit(1);
 JS;
-            $copy = new Symfony\Component\Process\Process(['node', '-e', $javascript], $base, null,
+            // The runner passes the Node that CI installs; PATH alone may find another one.
+            $node = getenv('NODE_BINARY');
+            testCheck(is_string($node) && str_starts_with($node, '/') && is_executable($node), 'Set NODE_BINARY to run the recovery key Copy check');
+            $copy = new Symfony\Component\Process\Process([$node, '-e', $javascript], $base, null,
                 json_encode(['handler' => $handler, 'expected' => $passphrase], JSON_THROW_ON_ERROR));
             $copy->run();
             testCheck($copy->isSuccessful(), 'Recovery key Copy changed imported passphrase bytes');
