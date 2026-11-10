@@ -125,6 +125,7 @@ if ($mode === 'upload') {
     }
     echo json_encode(['env_only_mariadb_save' => true]) . "\n";
 } elseif ($mode === 'check') {
+    $sheetInstalled = $base . '/extensions/Others/Backups';
     require __DIR__ . '/sheet_rows.php';
     // Many Livewire renders of a large page in one process.
     ini_set('memory_limit', '512M');
@@ -683,7 +684,7 @@ if ($mode === 'upload') {
         'livewire_secrets_clear' => true, 'one_save_with_secrets' => true, 'recovery_key_flow' => true, 'permission_denied' => true, 'fpm_actions_spooled' => true, 'gui_docroot_policy' => true,
         'relative_python_refused' => true, 'probe_credentials_bound' => true, 'create_dialog_guided' => true, 'probe_namespace_preserved' => true, 'native_lifecycle_preserved' => true,
         'canonical_cli_repairs_unusable_saved_private_root' => true,
-        'download_route_authenticated' => true]) . "\n";
+        'download_route_authenticated' => true, 'sheet_rows' => 'installed']) . "\n";
 } elseif ($mode === 'ui-history') {
     $admin = App\Models\User::where('email', 'fixture@example.invalid')->firstOrFail();
     Illuminate\Support\Facades\Auth::login($admin);
