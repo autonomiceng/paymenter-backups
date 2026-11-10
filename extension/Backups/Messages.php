@@ -450,6 +450,12 @@ final class Messages
         'database-online' => 'Database',
     ];
 
+    /** What each backup type holds, for the question hint beside its name. */
+    public const TYPE_HINTS = [
+        'full-quiesced' => 'The database and all Paymenter files, except logs, cache and sessions. The site stays online.',
+        'database-online' => 'The database only. The site stays online. To restore, you also need Paymenter\'s files from a full backup.',
+    ];
+
     public static function mode(?string $mode): string { return self::MODES[$mode] ?? 'Backup'; }
 
     public static function type(?string $mode): string { return self::TYPES[$mode] ?? 'Backup'; }

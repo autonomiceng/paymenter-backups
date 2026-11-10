@@ -404,7 +404,7 @@ trait BuildsHistoryTable
                     ->suffixAction(Action::make('copyBackupId')->label('Copy')->icon('ri-file-copy-line')
                         ->visible(request()->isSecure())
                         ->alpineClickHandler('window.navigator.clipboard.writeText(' . \Illuminate\Support\Js::from($run['run_id']) . ')')),
-                TextEntry::make('d_type')->label('Type')->state(Messages::type($run['mode'])),
+                Sheet::hint(TextEntry::make('d_type')->label('Type'), Messages::TYPE_HINTS[$run['mode']] ?? '')->state(Messages::type($run['mode'])),
                 TextEntry::make('d_origin')->label('Started by')->state($record['origin'] ?? 'Not recorded'),
                 TextEntry::make('d_created')->label('Started')->state($this->moment($run['created_at'])),
                 TextEntry::make('d_finished')->label($stopped ? 'Stopped' : 'Finished')

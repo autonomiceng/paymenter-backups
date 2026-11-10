@@ -173,7 +173,7 @@ trait BuildsPageContent
             $at = $this->scheduleFor($mode)['next_at'] ?? null;
             return [Text::make($at ? new HtmlString('Next ' . $this->moment($at) . ($this->schedulerFresh() ? '' : ', once the cron job runs')) : 'None in the next 8 days')];
         };
-        $row = fn (string $mode) => Sheet::row(TextEntry::make('schedule_' . self::KINDS[$mode])->label(self::KIND_LABELS[$mode])
+        $row = fn (string $mode) => Sheet::row(Sheet::hint(TextEntry::make('schedule_' . self::KINDS[$mode])->label(self::KIND_LABELS[$mode]), Messages::TYPE_HINTS[$mode])
             ->state(fn () => $this->scheduleSentence($mode))->belowContent(fn () => $next($mode)),
             [$this->link('schedule' . ucfirst(self::KINDS[$mode]) . 'Change', 'Change', $this->settingsUrl('schedule'))]);
         return Sheet::section('Schedule')->schema([$row('full-quiesced'), $row('database-online')]);
@@ -195,7 +195,8 @@ trait BuildsPageContent
             Sheet::row(TextEntry::make('storage_s3')->label('S3')->state(fn () => $this->uploadsToS3() ? ($this->storage()['s3_bucket'] ?: 'No bucket') : 'Off')
                 ->belowContent(fn () => [Text::make($this->s3Sentence())]),
                 [$this->link('storageS3', 'Set up S3', $this->settingsUrl('s3'))->label(fn () => $this->uploadsToS3() ? 'Change' : 'Set up S3')]),
-            Sheet::row(TextEntry::make('storage_keep')->label('Keep')->state(function () {
+            Sheet::row(Sheet::hint(TextEntry::make('storage_keep')->label('Keep'),
+                'The newest verified backup in each place is always kept. So are backups not yet uploaded and backups that failed a check.')->state(function () {
                 $values = $this->formValues();
                 return 'Newest ' . (int) ($values['retention_keep_full'] ?? 0) . ' full and ' . (int) ($values['retention_keep_database'] ?? 0) . ' database backups';
             })->belowContent(fn () => [Text::make(($this->formValues()['automatic_retention'] ?? true) ? 'Cleanup runs after each backup.' : 'Automatic cleanup is off.')]),

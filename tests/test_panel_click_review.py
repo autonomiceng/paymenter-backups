@@ -92,6 +92,18 @@ if ($input['case'] === 'health') {
         }
     }
     echo json_encode(['rows' => $rows]);
+} elseif ($input['case'] === 'hints') {
+    $record = ['__key' => 'fixture-run', 'kind' => 'run', 'run_id' => 'fixture-run', 'origin' => 'Staff', 'run' => ['run_id' => 'fixture-run',
+        'status' => 'ready', 'mode' => 'full-quiesced', 'created_at' => null, 'finished_at' => null, 'verified_at' => null, 'remote' => 'none', 'local' => true, 'size' => 1, 'download' => 'ready']];
+    $hints = [];
+    foreach (flatten(Filament\Schemas\Schema::make($page)->components([$call('scheduleSection'), $call('storageSection'), ...$call('detailsSchema', $record)])->getComponents()) as $component) {
+        if (!$component instanceof Filament\Infolists\Components\TextEntry) continue;
+        foreach ($component->getHintActions() as $hint) {
+            $hints[$component->getName()] = ['label' => $hint->getLabel(), 'tooltip' => $hint->getTooltip(), 'icon_button' => $hint->isIconButton(),
+                'click' => $hint->getAlpineClickHandler(), 'url' => $hint->getUrl()];
+        }
+    }
+    echo json_encode($hints);
 } elseif ($input['case'] === 'history') {
     $table = $page->table(Filament\Tables\Table::make($page));
     $order = fn (?string $direction) => array_map(fn ($row) => $row['__key'], $table->evaluate($table->getDataSource(), ['page' => 1, 'recordsPerPage' => 25,
@@ -197,6 +209,22 @@ class ClickReview(unittest.TestCase):
                 self.assertEqual([item['name'] for item in rows['d_verified']], ['detailsVerify'])
                 # Set up S3 shows only while S3 is off and the backup has no S3 copy.
                 self.assertEqual('d_s3' in rows, run.get('remote') is None)
+
+    def test_question_hints_explain_types_and_keep_without_a_request(self):
+        hints = self.page('hints')
+        full = 'The database and all Paymenter files, except logs, cache and sessions. The site stays online.'
+        database = "The database only. The site stays online. To restore, you also need Paymenter's files from a full backup."
+        keep = 'The newest verified backup in each place is always kept. So are backups not yet uploaded and backups that failed a check.'
+        self.assertEqual({name: hint['label'] for name, hint in hints.items()},
+                         {'schedule_full': full, 'schedule_database': database, 'storage_keep': keep, 'd_type': full})
+        for name, hint in hints.items():
+            with self.subTest(hint=name):
+                # The label is the button's accessible name; the tooltip shows the same words.
+                self.assertEqual(hint['tooltip'], hint['label'])
+                self.assertTrue(hint['icon_button'])
+                # A tap focuses the button, which opens the tooltip, and sends nothing to the server.
+                self.assertEqual(hint['click'], '$el.focus()')
+                self.assertIsNone(hint['url'])
 
     def test_started_sorts_both_ways_and_defaults_to_newest_first(self):
         runs = [{'run_id': run_id, 'request_id': None, 'status': 'ready', 'mode': 'database-online', 'created_at': created,

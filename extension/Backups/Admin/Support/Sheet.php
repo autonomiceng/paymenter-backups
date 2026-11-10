@@ -1,8 +1,10 @@
 <?php
 namespace Paymenter\Extensions\Others\Backups\Admin\Support;
 
+use Filament\Actions\Action;
 use Filament\Infolists\Components\TextEntry;
 use Filament\Schemas\Components\{Actions, Component, Flex, Group, Html, Section};
+use Filament\Support\Enums\Size;
 use Illuminate\Contracts\Support\Htmlable;
 use Illuminate\Support\HtmlString;
 
@@ -26,6 +28,14 @@ final class Sheet
         if ($actions) { $children[] = Actions::make($actions)->grow(false); }
         $row = Flex::make($children)->from('md')->extraAttributes(['class' => 'domains-row']);
         return $actions ? $row : $row->hiddenWhenAllChildComponentsHidden();
+    }
+
+    /** A question mark after the label. Hover, keyboard focus or a tap shows the text; screen readers read it as the button name. */
+    public static function hint(TextEntry $entry, string $text): TextEntry
+    {
+        if ($text === '') { return $entry; }
+        return $entry->hintAction(Action::make($entry->getName() . 'Hint')->label($text)->icon('ri-question-line')->iconButton()
+            ->color('gray')->size(Size::Small)->tooltip($text)->alpineClickHandler('$el.focus()')->extraAttributes(['class' => 'backups-hint']));
     }
 
     public static function rows(array $entries, array $actions = []): array
