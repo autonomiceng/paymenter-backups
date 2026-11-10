@@ -334,18 +334,6 @@ def coordination(state, envelope, *, required=True):
             os.close(descriptor)
 
 
-def cron_lock(line, app, paths):
-    """Support explicit path-based flock invocations; ambiguous shell refuses."""
-    from .discovery import parse
-    try:
-        item = parse(line, app)
-        if item['lock'] not in paths or item['coordination'] != 'coordinated':
-            raise BackupError('job-locks-unverified')
-        return item['lock']
-    except BackupError:
-        raise BackupError('job-locks-unverified') from None
-
-
 def _legacy_cron_lock(line, app, paths, cron=True, *, continuous_locks=None):
     """Verify legacy syntax; optionally collect and skip continuous launcher locks."""
     from .discovery import cron_command, parse

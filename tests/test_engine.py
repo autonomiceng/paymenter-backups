@@ -22,7 +22,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "src"))
 from paymenter_backups.common import BackupError, State, atomic_json, digest, identity
 from paymenter_backups.config import DEFAULTS, billing_fingerprint, normalize, redact, validate
 from paymenter_backups.engine import capture, changed_storage_files, check_archive, external_symlinks, inventory, verify
-from paymenter_backups.maintenance import MARKERS, billing_admission, cleanup, cron_lock, recover, systemd_locks
+from paymenter_backups.maintenance import MARKERS, _legacy_cron_lock, billing_admission, cleanup, recover, systemd_locks
 from paymenter_backups.process import group_members, process_identity, run
 from paymenter_backups.requests import cancel, create, due_slots
 
@@ -792,10 +792,10 @@ else: print({show!r})"""))
     def test_cron_exact_paths_and_actual_command(self):
         lock = self.settings["job_lock_paths"][0]
         good = f"* * * * * flock {lock} php {self.app}/artisan schedule:run"
-        self.assertEqual(cron_lock(good, self.app, [lock]), lock)
+        self.assertEqual(_legacy_cron_lock(good, self.app, [lock]), lock)
         for bad in (good.replace(lock, lock + "-other"), good.replace("flock", "echo flock"), good.replace("php", "true ; php"), good + " ; true"):
             with self.assertRaisesRegex(BackupError, "job-locks-unverified"):
-                cron_lock(bad, self.app, [lock])
+                _legacy_cron_lock(bad, self.app, [lock])
 
     def test_atime_change_does_not_change_marker_ownership(self):
         path = self.app / "marker"

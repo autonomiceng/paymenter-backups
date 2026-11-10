@@ -285,57 +285,6 @@ def probe(command, timeout=5, stdout_limit=262144, stderr_limit=8192):
         proc.stderr.close()
 
 
-def hash_stream(command, timeout, register=None):
-    """Stream the second dump through a hasher, with no second SQL file."""
-    import hashlib
-    import selectors
-    parent = os.getpid()
-    proc = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                            stderr=subprocess.DEVNULL, close_fds=True, start_new_session=True,
-                            preexec_fn=lambda: child_setup(parent), env=safe_environment())
-    group = process_identity(proc.pid)
-    if group is None:
-        group = {"pid": proc.pid, "pgid": proc.pid, "starttime": "unknown", "boot_id": boot_id()}
-    if register:
-        register(group)
-    hasher = hashlib.sha256()
-    selector = selectors.DefaultSelector()
-    selector.register(proc.stdout, selectors.EVENT_READ)
-    deadline = time.monotonic() + timeout
-    try:
-        while selector.get_map():
-            if time.monotonic() >= deadline:
-                raise BackupError("child-timeout")
-            for key, _ in selector.select(0.1):
-                chunk = os.read(key.fd, 1024 * 1024)
-                if chunk:
-                    hasher.update(chunk)
-                else:
-                    selector.unregister(key.fileobj)
-        try:
-            code = proc.wait(timeout=max(0.1, deadline - time.monotonic()))
-        except subprocess.TimeoutExpired:
-            raise BackupError("child-timeout") from None
-        if code:
-            raise BackupError("child-failed")
-        if group_members(group):
-            raise BackupError("process-state-uncertain")
-        return hasher.hexdigest()
-    finally:
-        selector.close()
-        try:
-            if proc.poll() is None:
-                try:
-                    terminate_child(proc, group)
-                finally:
-                    try:
-                        proc.wait(timeout=3)
-                    except subprocess.TimeoutExpired:
-                        pass
-        finally:
-            proc.stdout.close()
-
-
 def waiting_launchers(held_locks):
     """Kernel-proven flock waiters cannot spawn a writer while we own these inodes."""
     held = set()

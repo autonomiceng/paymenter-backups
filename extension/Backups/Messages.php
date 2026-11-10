@@ -17,12 +17,6 @@ final class Messages
         return [$status, $color, $next];
     }
 
-    public static function installationCheck(string $key, array $check): string
-    {
-        [$status, , $next] = self::installationState($key, $check);
-        return self::INSTALLATION_CHECKS[$key] . ': ' . $status . ($next ? '. ' . $next : '');
-    }
-
     /** @return array{0: string, 1: ?string} An error's first sentence, what happened, then the rest, what to do. */
     public static function reasonAndNext(?string $code): array
     {
