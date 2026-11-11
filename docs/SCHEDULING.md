@@ -68,9 +68,11 @@ Cancelling stops retries; it does not delete a backup or abandon prepared
 provider work. A frozen delivery intent still protects its files until delivery
 finishes or the existing explicit Delete action safely removes the run.
 
-Capture tool failures retry at most three attempts within the existing request
-age; admission contention does not consume that budget. Interrupted workers also
-respect it. Scheduled extension changes skip to the next full slot instead.
+Retryable capture-tool failures have a budget of at most three attempts within
+the existing request age; admission contention does not consume that budget.
+Interrupted workers also respect it. A failed or timed-out mysql inventory check
+is terminal with `database-inventory-failed`, without automatic retry or deferral.
+Scheduled extension changes skip to the next full slot instead.
 Repeated capture failure needs inspection because another automatic copy cannot
 repair a failing database/export tool; existing failure details identify the cause.
 
@@ -127,30 +129,36 @@ Locks open without creation, in stable order, and identity/remaining workers
 are rechecked after acquisition. init creates only the suggested scheduler.lock
 and queue.lock as 0600 owner-private regular files and validates existing
 descriptors without acquiring these launcher locks. Full capture requires these
-locks. Database-only capture takes the verified locks for finite jobs, waits up to
-max(lock_timeout, 60 seconds), and defers when a finite job is still running. This spans
-the suggested queue worker's 50-second run; billing admission reserves that wait. It uses
+locks. When finite jobs have verified cooperative locks, database-only capture
+takes those locks, waits up to max(lock_timeout, 60 seconds), and defers while
+a guarded finite job still holds its lock. This spans the suggested queue worker's
+50-second run; billing admission reserves that wait. It uses
 no maintenance mode or drain. Locks keep a multi-step job out of the dump; a
 transactional snapshot alone cannot make its separate writes atomic.
 Continuous workers, including stock systemd `queue:work`, may keep running during
 a database-only snapshot. Their lifetime lock cannot provide a boundary between
 jobs, so database admission excludes it and the continuous process from its writer
-check. Bounded workers with a cooperative lock still wait, even when systemd
-restarts them. V1 with explicit locks retains the legacy finite launcher syntax,
-including queue selection options; v2 retains its strict parser. Full admission
+check. Bounded workers with a verified cooperative lock still wait, even when
+systemd restarts them. V1 with explicit locks retains the legacy finite launcher
+syntax, including queue selection options; v2 retains its strict parser. Full admission
 continues to refuse continuous workers.
 Worker classification reads the command after `artisan`, skipping only `--quiet`,
 `-q`, `--no-interaction` and `-n`, as discovery does. Queue names and other argument
 values do not identify continuous workers.
 A database snapshot may therefore contain a continuous job's intermediate commits;
 it guarantees transactional InnoDB consistency, not atomic multi-step jobs.
-Fresh discovery still verifies all finite coordination and any explicit lock list;
+Fresh discovery still verifies discovered finite locks and any explicit lock list;
 discovery failures, unknown locks and unsafe finite locks defer and retry.
 Only a complete fresh inventory with no finite coordination to acquire, or with no
-configured/discovered coordination at all, permits capture without locks. The page
-shows that these snapshots can overlap jobs. Backups never stops a continuous worker.
+configured/discovered coordination at all, permits capture without locks. With an
+empty `job_lock_paths` setting and only unlocked uncoordinated or continuous jobs
+in the inventory, this includes an unguarded finite `schedule:run`: it is neither
+waited for nor excluded from the dump. Its intermediate commits may appear in the
+transactional snapshot too. The page shows that these snapshots can overlap jobs.
+Backups never stops a continuous worker.
 Blocked flock launchers proven by kernel wait records for our held inodes are
-excluded from the writer scan; actual children and uncoordinated writers remain checked. Settings saves, schedule changes and
+excluded from the writer scan; actual children and uncoordinated writers remain
+checked when coordination locks are held. Settings saves, schedule changes and
 initialization do not acquire launcher locks.
 Routine contention stays deferred without a failed run or staff alert. Database
 requests waiting for jobs or failed lock verification retain their retry obligation
