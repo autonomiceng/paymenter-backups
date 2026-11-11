@@ -512,6 +512,8 @@ def main():
             creds = {'access_key': 'ACCESS-CREDENTIAL-CANARY', 'secret_key': 'SECRET-CREDENTIAL-CANARY', 'session_token': 'TOKEN-CREDENTIAL-CANARY'}
             execute([args.php, bridge, 'credentials-write', '--app', app, '--private-root', private], input=json.dumps(creds).encode())
             results = json.loads(execute([args.php, checker, app, 'check'], timeout=420))
+            if results.get('sheet_rows') != 'installed':
+                raise RuntimeError('native check did not test the installed Sheet class')
             # Cached config must be honoured without providers; native URL/TZ
             # overrides intentionally differ from .env in this fixture.
             execute([args.php, 'artisan', 'config:cache'], cwd=app)

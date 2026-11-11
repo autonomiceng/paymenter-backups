@@ -117,8 +117,10 @@ trait BuildsHistoryTable
         $inS3 = static fn (array $record) => in_array($record['run']['remote'] ?? null, ['delivered', 'present'], true);
         return $table
             ->description(fn () => $this->hasActiveWork() ? 'Updates every 5 seconds while a backup runs' : null)
-            ->records(function (int|string $page, int|string $recordsPerPage, ?string $search) {
+            ->records(function (int|string $page, int|string $recordsPerPage, ?string $search, ?string $sortColumn = null, ?string $sortDirection = null) {
                 $rows = HistorySearch::filter($this->historyRows($this->showDeleted), $search);
+                // History is newest first; Started sorts oldest first only when asked.
+                if ($sortColumn === 'created_at' && $sortDirection === 'asc') { $rows = array_reverse($rows); }
                 $perPage = max(1, (int) $recordsPerPage);
                 $page = max(1, (int) $page);
                 return new LengthAwarePaginator(array_slice($rows, ($page - 1) * $perPage, $perPage), count($rows), $perPage, $page);
@@ -138,7 +140,7 @@ trait BuildsHistoryTable
                     ->action(function () { $this->showDeleted = !$this->showDeleted; $this->resetPage(); }),
             ])
             ->columns([
-                TextColumn::make('created_at')->label('Started')
+                TextColumn::make('created_at')->label('Started')->sortable()
                     ->formatStateUsing(fn ($state) => $this->moment($state)),
                 // Every column shows on phones, so the kind of backup stays in view.
                 TextColumn::make('type')->label('Type')->toggleable(),
@@ -164,8 +166,7 @@ trait BuildsHistoryTable
                     ->action(fn (array $record) => $this->queue('deliver', ['run_id' => $record['run_id']], 'Upload to S3 queued')),
                 Action::make('verifyFirst')->label('Verify')->icon('ri-shield-check-line')->button()->color('gray')
                     ->tooltip('Checks the backup against its checksums.')
-                    ->visible(fn (array $record) => $isRun($record) && in_array($record['run']['status'], ['ready', 'damaged'], true)
-                        && !in_array($record['run']['download'], ['ready', 'retrieve'], true) && !$this->activeRequest('verify', $record['run_id']))
+                    ->visible(fn (array $record) => $isRun($record) && self::verifiesOnRow($record['run']) && !$this->activeRequest('verify', $record['run_id']))
                     ->action(fn (array $record) => $this->queue('verify', ['run_id' => $record['run_id']], 'Verification queued')),
                 Action::make('cancelQueued')->label('Cancel')->icon('ri-close-line')->button()->color('gray')
                     ->visible(fn (array $record) => $record['kind'] === 'request' && $record['cancel_request'] !== null)
@@ -179,11 +180,6 @@ trait BuildsHistoryTable
                         ->modalWidth('2xl')->modalSubmitAction(false)->modalCancelActionLabel('Close')
                         ->extraAttributes(['x-on:click.capture' => 'close()'])
                         ->extraModalFooterActions(fn (array $record) => [
-                            Action::make('detailsVerify')->label('Verify')->icon('ri-shield-check-line')->color('gray')
-                                ->visible($isRun($record) && $record['run']['status'] === 'ready'
-                                    && ($record['run']['download'] === 'ready' || (!$record['run']['local'] && $inS3($record)))
-                                    && !$this->activeRequest('verify', $record['run_id']))
-                                ->action(fn () => $this->queue('verify', ['run_id' => $record['run_id']], 'Verification queued')),
                             Action::make('detailsDownload')->label('Download')->icon('ri-download-2-line')->color('gray')
                                 ->visible($isRun($record) && $record['run']['download'] === 'ready')
                                 ->url($isRun($record) ? static::downloadUrl($record['run_id']) : null),
@@ -191,9 +187,7 @@ trait BuildsHistoryTable
                         ->extraModalWindowAttributes(['class' => 'backups-details'])
                         ->schema(fn (array $record) => [Sheet::make($this->detailsSchema($record))]),
                     Action::make('verify')->label('Verify')->icon('ri-shield-check-line')
-                        ->visible(fn (array $record) => $isRun($record) && $record['run']['status'] === 'ready'
-                            && ($record['run']['download'] === 'ready' || (!$record['run']['local'] && $inS3($record)))
-                            && !$this->activeRequest('verify', $record['run_id']))
+                        ->visible(fn (array $record) => $isRun($record) && self::verifiesInMenu($record['run']) && !$this->activeRequest('verify', $record['run_id']))
                         ->action(fn (array $record) => $this->queue('verify', ['run_id' => $record['run_id']], 'Verification queued')),
                     Action::make('copy')->label('Upload to S3')->icon('ri-upload-cloud-2-line')
                         ->visible(fn (array $record) => $isRun($record) && $record['run']['status'] === 'ready' && !$inS3($record)
@@ -241,6 +235,19 @@ trait BuildsHistoryTable
             ->emptyStateHeading(fn () => filled($this->getTableSearch()) ? 'No matching backups' : 'No backups yet')
             ->emptyStateDescription(fn () => filled($this->getTableSearch()) ? 'Try another backup ID, type, status or location.' : ($this->setupOpen() && $this->nothingCanStart() ? 'Finish setup above to create your first backup.' : 'Create a backup or turn on a schedule.'))
             ->emptyStateActions([$this->backupAction('createFirstBackup')->visible(fn () => !filled($this->getTableSearch()) && !$this->nothingCanStart())]);
+    }
+
+    /** Verify is a row button while there's nothing to download here. */
+    private static function verifiesOnRow(array $run): bool
+    {
+        return in_array($run['status'], ['ready', 'damaged'], true) && !in_array($run['download'], ['ready', 'retrieve'], true);
+    }
+
+    /** Otherwise it's in the row menu, for a ready copy here or only in S3. */
+    private static function verifiesInMenu(array $run): bool
+    {
+        return $run['status'] === 'ready' && ($run['download'] === 'ready'
+            || (!$run['local'] && in_array($run['remote'] ?? null, ['delivered', 'present'], true)));
     }
 
     private function pendingTaskLabel(array $record): string
@@ -396,7 +403,7 @@ trait BuildsHistoryTable
                     ->suffixAction(Action::make('copyBackupId')->label('Copy')->icon('ri-file-copy-line')
                         ->visible(request()->isSecure())
                         ->alpineClickHandler('window.navigator.clipboard.writeText(' . \Illuminate\Support\Js::from($run['run_id']) . ')')),
-                TextEntry::make('d_type')->label('Type')->state(Messages::type($run['mode'])),
+                Sheet::hint(TextEntry::make('d_type')->label('Type'), Messages::TYPE_HINTS[$run['mode']] ?? '')->state(Messages::type($run['mode'])),
                 TextEntry::make('d_origin')->label('Started by')->state($record['origin'] ?? 'Not recorded'),
                 TextEntry::make('d_created')->label('Started')->state($this->moment($run['created_at'])),
                 TextEntry::make('d_finished')->label($stopped ? 'Stopped' : 'Finished')
@@ -412,12 +419,14 @@ trait BuildsHistoryTable
                 TextEntry::make('d_retrieved')->label('Copy from S3 kept until')->state(fn () => $this->moment($run['local_download_until'] ?? null))
                     ->visible((bool) ($run['local_download_until'] ?? null)),
                 TextEntry::make('d_s3')->label('S3')->state($s3[0])->belowContent($below($s3[1])),
-            ]))->visible(!$stopped),
+            ], ['d_s3' => $run['remote'] === 'none' && !$this->uploadsToS3() ? [$this->link('detailsSetUpS3', 'Set up S3', $this->settingsUrl('s3'))] : []]))->visible(!$stopped),
             Sheet::section('Check')->schema(Sheet::rows([
                 TextEntry::make('d_verified')->label('Last verified')->state($run['verified_at'] ? $this->moment($run['verified_at']) : 'Not verified yet')
                     ->belowContent($below($run['verified_at'] && $run['verification_source'] === 'capture'
                         ? 'When it was made. Verify checks the file against its checksums again.' : 'Verify checks the file against its checksums.')),
-            ]))->visible($run['status'] === 'ready' || $run['status'] === 'damaged'),
+            ], ['d_verified' => [Action::make('detailsVerify')->label('Verify')->button()->outlined()->size(Size::Small)->color('gray')
+                ->visible((self::verifiesOnRow($run) || self::verifiesInMenu($run)) && !$this->activeRequest('verify', $run['run_id']))
+                ->action(fn () => $this->queue('verify', ['run_id' => $run['run_id']], 'Verification queued'))]]))->visible($run['status'] === 'ready' || $run['status'] === 'damaged'),
             Sheet::section('Restore')->schema(Sheet::contentRows([
                 Text::make('Restore into a new folder and a new database, never over the running site. As the site user, this copies the backup out:'),
                 $this->command('paymenter_backups export ' . self::shell($run['run_id']) . ' --output /new/folder'),
