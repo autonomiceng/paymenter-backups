@@ -63,7 +63,7 @@ final class Sheet
     /** A state word with its mark. Plain Filament shows the same word as a badge. */
     public static function state(TextEntry $entry, ?string $color): TextEntry
     {
-        return $entry->badge()->color($color)->extraEntryWrapperAttributes(['data-beco-tone' => StatusTone::forColor($color)]);
+        return $entry->badge()->color($color)->extraEntryWrapperAttributes(['data-backups-tone' => StatusTone::forColor($color)]);
     }
 
     /** The status line under a title: mark, state word, then one sentence. */
@@ -71,7 +71,7 @@ final class Sheet
     {
         $badge = view('filament::components.badge', ['color' => $color, 'size' => 'lg', 'slot' => new HtmlString(e($label))])->render();
         $step = $step instanceof Htmlable ? $step->toHtml() : e((string) $step);
-        return new HtmlString('<span class="domains-head-line"><span class="domains-head-state" data-beco-tone="' . e(StatusTone::forColor($color) ?? '') . '">'
+        return new HtmlString('<span class="domains-head-line"><span class="domains-head-state" data-backups-tone="' . e(StatusTone::forColor($color) ?? '') . '">'
             . $badge . '</span>' . ($step !== '' ? ' <span class="domains-head-step">' . $step . '</span>' : '') . '</span>');
     }
 
@@ -84,7 +84,7 @@ final class Sheet
         return Group::make(array_map(static fn (array $step) => Group::make([
             Html::make(new HtmlString(view('backups::partials.step', $step)->render())),
             ...($step['content'] ?? []),
-        ])->extraAttributes(['class' => 'domains-trace-item', 'role' => 'listitem', 'data-beco-tone' => StatusTone::forColor($step['color']) ?? 'off', 'style' => 'min-width: 0']), $steps))
+        ])->extraAttributes(['class' => 'domains-trace-item', 'role' => 'listitem', 'data-backups-tone' => StatusTone::forColor($step['color']) ?? 'off', 'style' => 'min-width: 0']), $steps))
             ->extraAttributes(['class' => 'domains-trace' . ($trace ? '' : ' backups-checks'), 'role' => 'list']);
     }
 }

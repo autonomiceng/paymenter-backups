@@ -168,7 +168,7 @@ trait BuildsHistoryTable
             ->columnManagerTriggerAction(fn (Action $action) => $action->label('Columns')->button())
             // Merge, so the skin's shared table class set for every table stays.
             // On phones the rows stay rows: the table scrolls sideways inside its card, never the page.
-            ->extraAttributes(['class' => 'beco-own-table backups-history'], merge: true)
+            ->extraAttributes(['class' => 'backups-own-table backups-history'], merge: true)
             // No polling while a dialog is open: it would re-render the dialog, including a shown recovery key.
             ->poll(fn () => $this->hasActiveWork() && !$this->mountedActions ? '5s' : null)
             ->headerActions([
@@ -182,7 +182,7 @@ trait BuildsHistoryTable
                 // Every column shows on phones, so the kind of backup stays in view.
                 TextColumn::make('type')->label('Type')->toggleable(),
                 TextColumn::make('status_label')->label('Status')->badge()->color(fn (array $record) => $record['status_color'])
-                    ->extraCellAttributes(fn (array $record) => ['data-beco-tone' => StatusTone::forLabel($record['status_label'])])->toggleable(),
+                    ->extraCellAttributes(fn (array $record) => ['data-backups-tone' => StatusTone::forLabel($record['status_label'])])->toggleable(),
                 TextColumn::make('detail')->label('Note')->wrap()->toggleable(),
                 TextColumn::make('size_label')->label('Size')->alignEnd()->extraCellAttributes(['class' => 'tabular-nums'])->toggleable(),
                 TextColumn::make('location')->label('Location')->toggleable(),
