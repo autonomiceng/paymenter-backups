@@ -196,6 +196,19 @@ async function submitDatabaseBackup(page) {
   assert.equal(await type.inputValue(), 'database-online', 'Manual captures must explicitly select Database');
   await livewire(page, () => dialog.getByRole('button', {name: 'Create backup', exact: true}).click());
 }
+// Where a control sits against every box that clips it sideways, so a scrolled table proves it can be reached.
+async function reachable(locator) {
+  return locator.evaluate(element => {
+    const rect = element.getBoundingClientRect();
+    const clips = []; let ancestor = element.parentElement;
+    while (ancestor) {
+      if (['auto', 'hidden', 'scroll', 'clip'].includes(getComputedStyle(ancestor).overflowX)) clips.push(ancestor.getBoundingClientRect());
+      ancestor = ancestor.parentElement;
+    }
+    return {left: rect.left, right: rect.right, viewport: innerWidth, clipLeft: Math.max(0, ...clips.map(clip => clip.left)), clipRight: Math.min(innerWidth, ...clips.map(clip => clip.right))};
+  });
+}
+
 async function findRow(page, runId) {
   // Filament's stable record key identifies the same row before and after retrieval;
   // a remote-only backup deliberately has no Download anchor yet.
@@ -255,17 +268,12 @@ try {
       }
       await mobile.context().close(); return 'Fresh mobile context; three tabs at 390px; desktop light and dark';
     });
-    await check('mobile backup actions fit the visible table', async () => {
+    await check('mobile backup actions are reachable inside the scrolling table', async () => {
       const mobile = await login(metadata.admin_email, {width: 390, height: 844}); await load(mobile);
-      const geometry = await mobile.getByRole('button', {name: 'More actions', exact: true}).evaluateAll(buttons => buttons.map(button => {
-        const rect = button.getBoundingClientRect();
-        const clips = []; let ancestor = button.parentElement;
-        while (ancestor) {
-          if (['auto', 'hidden', 'scroll', 'clip'].includes(getComputedStyle(ancestor).overflowX)) clips.push(ancestor.getBoundingClientRect());
-          ancestor = ancestor.parentElement;
-        }
-        return {left: rect.left, right: rect.right, viewport: innerWidth, clipLeft: Math.max(0, ...clips.map(clip => clip.left)), clipRight: Math.min(innerWidth, ...clips.map(clip => clip.right))};
-      }));
+      const geometry = [];
+      for (const button of await mobile.getByRole('button', {name: 'More actions', exact: true}).all()) {
+        await button.scrollIntoViewIfNeeded(); geometry.push(await reachable(button));
+      }
       await shot(mobile, 'mobile-action-containment');
       await mobile.context().close();
       for (const action of geometry) assert(action.left >= action.clipLeft - 1 && action.right <= action.clipRight + 1, `More actions is clipped: ${JSON.stringify(action)}`);
@@ -585,12 +593,25 @@ try {
       await shot(page, 'populated-desktop-dark');
       const mobile = await login(metadata.admin_email, {width: 390, height: 844}); await load(mobile);
       await shot(mobile, 'populated-mobile');
+      // Staff tables keep their rows on phones and scroll inside their card, never the page.
+      const surface = await mobile.locator('.backups-history').evaluate(history => {
+        const table = history.querySelector('table.fi-ta-table'); const card = table.closest('.fi-ta-content-ctn');
+        return {stacked: table.classList.contains('fi-ta-table-stacked-on-mobile'), overflow: getComputedStyle(card).overflowX,
+          headers: [...table.querySelectorAll('thead th')].map(cell => cell.innerText.trim()).filter(Boolean),
+          tableWidth: table.scrollWidth, cardWidth: card.clientWidth};
+      });
+      assert(!surface.stacked, `Phone history rows stack: ${JSON.stringify(surface)}`);
+      assert(['auto', 'scroll'].includes(surface.overflow), `Phone history does not scroll inside its card: ${JSON.stringify(surface)}`);
+      for (const header of ['Type', 'Size', 'Location']) assert(surface.headers.includes(header), `Phone history lost ${header}: ${JSON.stringify(surface)}`);
       const mobileLink = mobile.getByRole('link', {name: 'Download', exact: true}).first();
       await mobileLink.scrollIntoViewIfNeeded(); await shot(mobile, 'mobile-history-actions');
+      const download = await reachable(mobileLink);
+      assert(download.left >= download.clipLeft - 1 && download.right <= download.clipRight + 1, `Phone Download is clipped: ${JSON.stringify(download)}`);
       const geometry = await mobile.evaluate(() => ({viewport: innerWidth, scroll: document.documentElement.scrollWidth}));
       assert(geometry.scroll <= geometry.viewport + 1, `Populated mobile overflow: ${JSON.stringify(geometry)}`);
       await mobile.context().close();
       await page.evaluate(() => {localStorage.setItem('theme', 'light'); document.documentElement.classList.remove('dark');});
+      report.phoneHistory = surface;
       report.download = {runId, verificationRequest:verification.request_id, bytes: archive.length, sha256: createHash('sha256').update(archive).digest('hex')};
       return report.download;
     });

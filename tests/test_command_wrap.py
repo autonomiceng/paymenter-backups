@@ -90,15 +90,14 @@ class CommandBlockWrap(unittest.TestCase):
     def test_native_scrolling_check_matches_rendered_command_markup(self):
         rendered = self.render()
         source = (ROOT / 'tests/integration/native_checks.php').read_text()
-        check = re.search(r"check\(([^\n]+), 'mobile history or command scrolling missing'\);", source)
+        check = re.search(r"check\(([^\n]+), 'command scrolling missing'\);", source)
         self.assertIsNotNone(check, 'native command scrolling check not found')
         needles = re.findall(r"str_contains\(\$queue->html\(\), '([^']+)'\)", check[1])
-        self.assertEqual(len(needles), 2)
-        # History stacking is unrelated; exercise the exact command assertion
-        # against the real BuildsCommands output, without booting a database.
-        markup = 'fi-ta-table-stacked-on-mobile ' + rendered['html']
-        self.assertTrue(all(needle in markup for needle in needles),
-                        f'Native check strings {needles!r} do not match rendered markup {markup!r}')
+        self.assertEqual(len(needles), 1)
+        # Exercise the exact command assertion against the real BuildsCommands
+        # output, without booting a database.
+        self.assertIn(needles[0], rendered['html'],
+                      f'Native check string {needles[0]!r} does not match rendered markup {rendered["html"]!r}')
 
     def test_recovery_contract_matches_rendered_command_span_style(self):
         rendered = self.render()

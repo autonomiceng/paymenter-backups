@@ -2,7 +2,9 @@
 
 Read [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) before changing execution,
 maintenance, storage, configuration, scheduling, or recovery. It defines module
-contracts and consistency guarantees. Read [docs/MAINTENANCE.md](docs/MAINTENANCE.md)
+contracts and consistency guarantees. Scheduling, admission and capture modes are
+in [docs/SCHEDULING.md](docs/SCHEDULING.md); administrator page contracts are in
+[docs/ADMIN-UI.md](docs/ADMIN-UI.md). Read [docs/MAINTENANCE.md](docs/MAINTENANCE.md)
 for release validation and [CONTRIBUTING.md](CONTRIBUTING.md) for contribution setup.
 
 Keep Paymenter application files, native schema, themes, and root Composer

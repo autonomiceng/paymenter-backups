@@ -368,12 +368,6 @@ PYTHON;
         if (($result['ok'] ?? false) !== true) { throw new RuntimeException('config-save-outcome-unknown'); }
     }
 
-    public static function saveCredentials(array $input): void
-    {
-        $result = self::saveConfiguration([], $input);
-        if (($result['partial'] ?? false) || ($result['updated'] ?? false) !== true) { throw new RuntimeException('config-save-outcome-unknown'); }
-    }
-
     /** Encryption setup returns only public metadata; secrets have dedicated paths below. */
     public static function encryptionKey(string $action, array $input = []): array
     {
@@ -428,12 +422,6 @@ PYTHON;
     {
         if (!preg_match('/^[a-f0-9]{64}$/D', $fingerprint)) { throw new RuntimeException('archive-key-invalid'); }
         return self::keyResponse('archive-key-export', ['fingerprint' => $fingerprint]);
-    }
-
-    /** Refresh APP_KEY wrapping without changing the independent recovery secrets. */
-    public static function rewrapCredentials(): void
-    {
-        self::keyResponse('credentials-rewrap');
     }
 
     /** Private bridge pipe; authenticated callers cannot supply their own audit actor. */

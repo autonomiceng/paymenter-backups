@@ -6,10 +6,8 @@ use Filament\Forms\Components\Radio;
 use Filament\Forms\Components\TextInput;
 use Filament\Notifications\Notification;
 use Filament\Schemas\Components\Actions;
-use Filament\Schemas\Components\EmbeddedSchema;
 use Filament\Schemas\Components\Grid;
 use Filament\Schemas\Components\Group;
-use Filament\Schemas\Components\Section;
 use Filament\Schemas\Components\Text;
 use Filament\Schemas\Components\Utilities\Get;
 use Filament\Schemas\Schema;
@@ -19,33 +17,6 @@ use Paymenter\Extensions\Others\Backups\Settings;
 
 trait ManagesCredentials
 {
-    private function sitePasswordSection(): Section
-    {
-        $site = fn () => $this->configuration()['site_password'] ?? [];
-        $saved = fn () => (bool) ($this->configuration()['saved_keys']['site'] ?? false);
-        $attention = fn () => $saved() && in_array($site()['state'] ?? null, ['http', 'unavailable', 'origin-changed'], true);
-        return Section::make('Site password (HTTP Basic)')->id('site-password')->compact()
-            ->collapsible()->collapsed(fn () => !$saved() && !in_array('maintenance-probe-failed', $this->configuration()['admission']['full-quiesced'] ?? [], true))
-            ->afterHeader([
-                Text::make('Saved')->badge()->color('success')->visible(fn () => $saved() && !$attention()),
-                Text::make('Needs attention')->badge()->color('warning')->visible($attention),
-            ])
-            ->description(fn () => 'Only if your web server asks for a username and password before Paymenter loads. Full backups use it to check the maintenance page at '
-                . ($site()['probe_base'] ?? 'App URL') . '.')
-            ->schema([
-                Text::make(fn () => match ($site()['state'] ?? 'unavailable') {
-                    'saved' => 'Saved for ' . ($site()['origin'] ?? 'App URL') . '. Only sent there.',
-                    'http' => $saved() ? 'Your App URL now uses http://, so the saved password can\'t be sent. Remove it, or change App URL back to https://.'
-                        : 'Your App URL uses http://. A site password can only be sent over https://.',
-                    'unavailable' => 'Your App URL (Settings, General) isn\'t a valid web address.',
-                    'origin-changed' => 'The saved password is for ' . ($site()['saved_origin'] ?? 'another address') . ', but App URL is now ' . ($site()['origin'] ?? 'different') . '. Enter it again or remove it.',
-                    default => 'No site password saved. You only need one if your web server asks for a password.',
-                }),
-                EmbeddedSchema::make('siteAccessForm')->visible(fn () => $this->httpsOrigin() !== null),
-                Actions::make([$this->removeSitePasswordAction()]),
-            ]);
-    }
-
     public function s3KeysForm(Schema $schema): Schema
     {
         $saved = fn () => $this->savedS3Keys();

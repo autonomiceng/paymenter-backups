@@ -225,7 +225,7 @@ class MergedRuntimeTests(unittest.TestCase):
             combined = r'''
     \Symfony\Component\Process\Process::$success = true;
     \Symfony\Component\Process\Process::$response = ['updated' => true, 'credentials_updated' => true];
-    \Paymenter\Extensions\Others\Backups\Runtime::saveCredentials([
+    $result['saved'] = \Paymenter\Extensions\Others\Backups\Runtime::saveConfiguration([], [
         's3' => ['access_key' => 'fake', 'secret_key' => ' fake secret '], 'site' => null,
     ]);
     $result['combined'] = array_values(array_filter(\Symfony\Component\Process\Process::$calls,
@@ -243,6 +243,7 @@ class MergedRuntimeTests(unittest.TestCase):
             result = json.loads(process.stdout)
             self.assertEqual(result['generated']['state'], 'pending')
             self.assertEqual(result['generic-command'], 'sensitive-command-refused')
+            self.assertEqual(result['saved'], {'updated': True, 'credentials_updated': True})
             self.assertEqual(len(result['combined']), 1)
             combined_input = json.loads(result['combined'][0][1])
             self.assertEqual(combined_input['settings'], {})

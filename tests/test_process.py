@@ -12,7 +12,7 @@ from unittest.mock import patch
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "src"))
 from paymenter_backups.common import BackupError, State
 from paymenter_backups import process
-from paymenter_backups.process import detach, group_members, hash_stream, process_identity, reap_detached, run, terminate
+from paymenter_backups.process import detach, group_members, process_identity, reap_detached, run, terminate
 
 
 class ProcessTests(unittest.TestCase):
@@ -39,9 +39,6 @@ class ProcessTests(unittest.TestCase):
                 else:
                     with self.assertRaisesRegex(BackupError, '^child-failed$'):
                         run(command, 3, native_storage_changes=changes)
-
-    def test_hash_stream_registers_and_terminates_fallback_group(self):
-        self.check_fallback_cleanup(hash_stream)
 
     def test_run_terminates_fallback_group(self):
         self.check_fallback_cleanup(run)
@@ -101,7 +98,7 @@ class ProcessTests(unittest.TestCase):
                     process.terminate_child(child, group)
             kill.assert_not_called()
 
-    def test_hash_stream_cleanup_wait_preserves_timeout_and_closes_pipe(self):
+    def test_run_cleanup_wait_preserves_timeout_and_closes_pipe(self):
         children = []
         popen = subprocess.Popen
         def spawn(*args, **kwargs):
@@ -113,24 +110,12 @@ class ProcessTests(unittest.TestCase):
                     patch.object(process, 'terminate'), \
                     patch.object(popen, 'wait', side_effect=subprocess.TimeoutExpired('fixture', 3)):
                 with self.assertRaisesRegex(BackupError, 'child-timeout'):
-                    hash_stream([sys.executable, '-c', 'import time;time.sleep(30)'], .1)
+                    run([sys.executable, '-c', 'import time;time.sleep(30)'], .1)
             self.assertTrue(children[0].stdout.closed)
         finally:
             for child in children:
                 child.kill()
                 child.wait()
-
-    def test_hash_stream_successful_leader_with_live_descendant_refuses(self):
-        groups = []
-        try:
-            with self.assertRaisesRegex(BackupError, 'process-state-uncertain'):
-                hash_stream([sys.executable, '-c',
-                             'import os,time;p=os.fork();os.close(1) if p==0 else None;time.sleep(30) if p==0 else None'],
-                            2, groups.append)
-            self.assertTrue(group_members(groups[0]))
-        finally:
-            if groups and group_members(groups[0]):
-                os.killpg(groups[0]['pgid'], signal.SIGKILL)
 
     def test_subprocess_cannot_inherit_flock(self):
         with tempfile.TemporaryDirectory() as temporary:
