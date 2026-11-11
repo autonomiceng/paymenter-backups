@@ -147,6 +147,12 @@ class HistoryPaging(PrivateFixture):
             item['action'] = 'retention'
             atomic_json(requests.path(self.state, item['request_id']), item)
         damaged = self.complete_request(fixture.NOW + 1)
+        # A newer passing test for another binding leaves the current proof in history.
+        newer = self.complete_request(fixture.NOW + 2)
+        self.settings['s3_bucket'] = 'replacement'
+        newer['result'] = storage.destination_test(self.state, self.envelope)
+        self.settings['s3_bucket'] = 'fixture'
+        atomic_json(requests.path(self.state, newer['request_id']), newer)
         history.maintain(self.state, fixture.NOW)
         target = self.damage_request(damaged)
         from paymenter_backups.commissioning import check

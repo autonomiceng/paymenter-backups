@@ -45,6 +45,49 @@ class HistoryRetention(PrivateFixture):
         self.assertEqual(len(list((self.state.root / 'history/v1/requests').glob('*.json'))), 1)
         self.assertFalse(requests.path(self.state, item['request_id']).exists())
 
+    def test_latest_passing_storage_test_survives_retention_and_failed_retests(self):
+        from paymenter_backups.commissioning import check
+        from paymenter_backups.presentation import destination_test_binding, destination_test_current
+        self.remote()
+        self.envelope['credentials'] = {'access_key': 'fixture-access', 'secret_key': 'fixture-secret'}
+        self.envelope['framework']['app_key'] = 'fixture-app-key'
+
+        def passing(at):
+            item = self.complete_request(at)
+            item['result'] = storage.destination_test(self.state, self.envelope)
+            self.assertTrue(item['result']['verified'])
+            atomic_json(requests.path(self.state, item['request_id']), item)
+            return item
+
+        def proof():
+            binding = destination_test_binding(self.state, self.envelope)
+            return any(destination_test_current(self.state, self.envelope, item, item.get('result') or {}, binding)
+                       for item in requests.list_requests(self.state, history=False)
+                       if item.get('action') == 'destination-test')
+
+        older = passing(OLD - 86400)
+        current = passing(OLD)
+        failed = self.complete_request(OLD + 86400)
+        failed.update(status='failed', result={'verified': False})
+        atomic_json(requests.path(self.state, failed['request_id']), failed)
+        self.assertTrue(proof())
+        self.sweep()
+        self.assertTrue(proof())
+        active = {item['request_id'] for item in requests.list_requests(self.state, history=False)}
+        self.assertIn(current['request_id'], active)
+        self.assertIn(failed['request_id'], active)
+        self.assertNotIn(older['request_id'], active)
+        self.assertEqual(check(self.state, self.envelope)['checks']['offsite']['state'], 'ready')
+        # A newer passing test releases the old proof to ordinary retention.
+        replacement = passing(NOW + 1)
+        self.sweep(NOW + 2)
+        active = {item['request_id'] for item in requests.list_requests(self.state, history=False)}
+        self.assertIn(replacement['request_id'], active)
+        self.assertNotIn(current['request_id'], active)
+        self.sweep(NOW + 4 * 366 * 86400)
+        self.assertTrue(proof())
+        self.assertTrue((self.state.root / 'requests' / (replacement['request_id'] + '.json')).exists())
+
     def test_deleted_recovered_run_moves_with_its_authoritative_manifest(self):
         original = self.deleted_run()
         self.sweep()

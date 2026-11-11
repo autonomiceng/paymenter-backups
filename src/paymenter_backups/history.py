@@ -85,7 +85,7 @@ def unresolved(item):
             or bool(item.get('cleanup_error')))
 
 
-def request_time(state, root, item, journals):
+def request_time(state, root, item, journals, latest_test):
     arguments, result = item.get('arguments', {}), item.get('result', {})
     if not isinstance(arguments, dict) or not isinstance(result, dict):
         return None, 'request-shape-unknown'
@@ -96,6 +96,8 @@ def request_time(state, root, item, journals):
     if item.get('status') not in TERMINAL or item.get('action') not in (
             'run', 'verify', 'deliver', 'retrieve', 'retention', 'destination-test', 'delete'):
         return None, 'request-outcome-uncertain'
+    if item['request_id'] == latest_test:
+        return None, None
     references = {value for value in (arguments.get('run_id'), result.get('run_id'), item.get('covered_by')) if isinstance(value, str)}
     related = [row for row in journals if row.get('request_id') == item['request_id'] or row.get('run_id') in references]
     if any(unresolved(row) for row in related):
@@ -233,11 +235,16 @@ def maintain(state, now=None):
             # An unreadable active request might reference any run. Keep all
             # runs when that relationship cannot be proved.
             unknown_requests = any(row['family'] == 'requests' for row in report['unclassified'])
+            passing_tests = [item for item in requests if item.get('action') == 'destination-test'
+                             and item.get('status') == 'complete' and isinstance(item.get('result'), dict)
+                             and item['result'].get('verified') is True and timestamp(item.get('created_at'))]
+            latest_test = max(passing_tests, key=lambda item: (item['created_at'], item['request_id']),
+                              default={}).get('request_id')
             for family, rows in (('requests', requests), ('runs', journals)):
                 for item in rows:
                     identifier = item['request_id' if family == 'requests' else 'run_id']
                     try:
-                        at, reason = request_time(state, root, item, journals) if family == 'requests' else run_time(item, requests)
+                        at, reason = request_time(state, root, item, journals, latest_test) if family == 'requests' else run_time(item, requests)
                     except (BackupError, TypeError, AttributeError, ValueError):
                         at, reason = None, 'history-classification-unknown'
                     if family == 'runs' and unknown_requests:
