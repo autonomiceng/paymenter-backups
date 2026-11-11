@@ -236,7 +236,7 @@ class ClickReview(unittest.TestCase):
         hints = self.page('hints')
         full = 'The database and all Paymenter files, except logs, cache and sessions. The site stays online.'
         database = "The database only. The site stays online. To restore, you also need Paymenter's files from a full backup."
-        keep = 'The newest verified backup on this server is always kept. So are backups that failed a check.'
+        keep = 'The newest verified backup of each type on this server is always kept. So are backups that failed a check.'
         self.assertEqual({name: hint['label'] for name, hint in hints.items()},
                          {'schedule_full': full, 'schedule_database': database, 'storage_keep': keep, 'd_type': full})
         for name, hint in hints.items():
@@ -253,12 +253,12 @@ class ClickReview(unittest.TestCase):
         # S3-only removes each local copy once its S3 copy is verified (storage.py:1083).
         cases = {
             'this server only': ({'keep_local': True, 'upload_s3': False},
-                                 'The newest verified backup on this server is always kept. So are backups that failed a check.'),
+                                 'The newest verified backup of each type on this server is always kept. So are backups that failed a check.'),
             'this server and S3': ({'keep_local': True, 'upload_s3': True},
-                                   'The newest verified backup on this server and in S3 is always kept. '
+                                   'The newest verified backup of each type on this server and in S3 is always kept. '
                                    'So are backups waiting for their S3 upload and backups that failed a check.'),
             'S3 only': ({'keep_local': False, 'upload_s3': True},
-                        'The newest verified backup in S3 is always kept. '
+                        'The newest verified backup of each type in S3 is always kept. '
                         'So are backups waiting for their S3 upload and backups that failed a check.'),
         }
         for name, (storage, expected) in cases.items():
