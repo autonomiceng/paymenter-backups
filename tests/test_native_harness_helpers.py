@@ -222,17 +222,41 @@ class LegacyConfigurationChecks(fixtures.PrivateFixture):
 
 
 class AdminContractOwnerChecks(unittest.TestCase):
-    """The admin contract run fails when its fixture owner fails on shutdown."""
-    OWNER = """import json, os, pathlib, signal, sys, time
+    """Contract failures retain diagnostics and always reap their fixture owner."""
+    OWNER = r"""import json, os, pathlib, signal, sys, time
 stopped = []
 signal.signal(signal.SIGTERM, lambda *_: stopped.append(True))
 work = pathlib.Path(os.environ['TMPDIR'])
+(work / 'owner.pid').write_text(str(os.getpid()))
+mode = sys.argv[sys.argv.index('--release') + 1]
+if mode == 'early-exit':
+    sys.stderr.write('fixture setup failed before readiness')
+    sys.exit(7)
 (work / 'ui-fixture.json').write_text(json.dumps({'app': str(work)}))
-print(json.dumps({'ready': str(work / 'ui-fixture.json')}), flush=True)
+if mode in ('silent', 'partial', 'malformed', 'non-object', 'oversized'):
+    sys.stderr.write('discarded log prefix' + 'x' * 8000 + '\nfixture startup detail\n')
+    sys.stderr.flush()
+    if mode == 'partial':
+        sys.stdout.write('{"ready":')
+        sys.stdout.flush()
+    elif mode == 'malformed':
+        print('not a JSON readiness message', flush=True)
+    elif mode == 'non-object':
+        print('[]', flush=True)
+    elif mode == 'oversized':
+        sys.stdout.write('x' * 70000)
+        sys.stdout.flush()
+else:
+    print(json.dumps({'ready': str(work / 'ui-fixture.json')}), flush=True)
+# Bound the stub even on revisions whose startup read has no deadline.
+expires = time.monotonic() + 0.8
 while not stopped:
+    if not mode.isdigit() and time.monotonic() >= expires:
+        break
     time.sleep(0.05)
+(work / 'owner-stopped').touch()
 sys.stderr.write('native core source changed during UI fixture')
-sys.exit(int(sys.argv[sys.argv.index('--release') + 1]))
+sys.exit(int(mode) if mode.isdigit() else 0)
 """
 
     def setUp(self):
@@ -255,8 +279,59 @@ sys.exit(int(sys.argv[sys.argv.index('--release') + 1]))
         self.addCleanup(environment.stop)
 
     def run_contracts(self, owner_exit):
-        with patch.object(native_integration, 'ROOT', self.root):
+        with patch.object(native_integration, 'ROOT', self.root), \
+             patch.object(native_integration, 'ADMIN_CONTRACT_STARTUP_TIMEOUT', 0.2, create=True):
             return native_integration.admin_contracts(owner_exit, sys.executable, self.workbase)
+
+    def assert_owner_reaped(self, stopped=True):
+        pid = int((self.workbase / 'owner.pid').read_text())
+        with self.assertRaises(ProcessLookupError):
+            os.kill(pid, 0)
+        if stopped:
+            self.assertTrue((self.workbase / 'owner-stopped').exists())
+
+    def test_owner_exit_before_readiness_reports_fixture_log(self):
+        with self.assertRaisesRegex(RuntimeError, 'UI fixture for admin contracts did not start:.*\n(?:stdout: .*\n)?.*setup failed before readiness'):
+            self.run_contracts('early-exit')
+        self.assert_owner_reaped(stopped=False)
+
+    def test_nonzero_contract_exit_reports_output_and_stops_owner(self):
+        (self.root / 'tests/integration/admin_contracts.php').write_text(
+            'import sys\nprint("contract stdout detail")\nsys.stderr.write("contract stderr detail")\nsys.exit(9)\n')
+        with self.assertRaisesRegex(RuntimeError, 'admin contracts failed:\ncontract stdout detail\ncontract stderr detail'):
+            self.run_contracts('0')
+        self.assert_owner_reaped()
+
+    def test_unavailable_node_stops_owner_without_running_contracts(self):
+        (self.root / 'tests/integration/admin_contracts.php').write_text('raise AssertionError("contracts must not run")\n')
+        with patch.dict(os.environ, {'NODE_BINARY': str(self.node.parent / 'missing-node')}):
+            with self.assertRaisesRegex(RuntimeError, 'Node required for admin contracts'):
+                self.run_contracts('0')
+        self.assert_owner_reaped()
+
+    def assert_startup_failure(self, mode, reason):
+        (self.root / 'tests/integration/admin_contracts.php').write_text('raise AssertionError("contracts must not run")\n')
+        with self.assertRaisesRegex(RuntimeError, 'UI fixture for admin contracts did not start: ' + reason) as failure:
+            self.run_contracts(mode)
+        self.assertIn('fixture startup detail', str(failure.exception))
+        self.assertNotIn('discarded log prefix', str(failure.exception))
+        self.assertLess(len(str(failure.exception)), 8500)
+        self.assert_owner_reaped()
+
+    def test_silent_startup_has_deadline_and_stops_owner(self):
+        self.assert_startup_failure('silent', 'readiness timeout')
+
+    def test_partial_line_has_deadline_and_stops_owner(self):
+        self.assert_startup_failure('partial', 'readiness timeout')
+
+    def test_malformed_stdout_reports_context_and_stops_owner(self):
+        self.assert_startup_failure('malformed', 'invalid readiness JSON')
+
+    def test_non_object_stdout_reports_context_and_stops_owner(self):
+        self.assert_startup_failure('non-object', 'invalid readiness message')
+
+    def test_oversized_stdout_is_bounded_and_stops_owner(self):
+        self.assert_startup_failure('oversized', 'readiness line exceeds')
 
     def test_owner_shutdown_failure_fails_passing_contracts(self):
         with self.assertRaisesRegex(RuntimeError, 'failed on shutdown:\n.*source changed'):

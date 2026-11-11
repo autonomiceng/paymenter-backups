@@ -10,6 +10,7 @@ import hashlib
 import json
 import os
 import pathlib
+import selectors
 import shutil
 import socket
 import subprocess
@@ -23,6 +24,7 @@ from fetch_fixture import fetch
 from fixture_environment import child_environment, private_work_directory
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
+ADMIN_CONTRACT_STARTUP_TIMEOUT = 180
 
 
 def fixture_http():
@@ -303,6 +305,47 @@ def panel_regressions(app, php, work):
         raise RuntimeError('native panel regressions failed or skipped:\n' + result.stdout + result.stderr)
 
 
+def admin_fixture_ready(owner, log_path):
+    """Read newline-delimited readiness without blocking on a silent or partial line."""
+    deadline = time.monotonic() + ADMIN_CONTRACT_STARTUP_TIMEOUT
+    pending = b''
+
+    def failed(reason):
+        with log_path.open('rb') as log:
+            log.seek(0, os.SEEK_END)
+            log.seek(max(0, log.tell() - 4000))
+            tail = log.read(4000).decode(errors='replace')
+        return RuntimeError('UI fixture for admin contracts did not start: ' + reason +
+                            '\nstdout: ' + pending[-4000:].decode(errors='replace') + '\n' + tail)
+
+    with selectors.DefaultSelector() as selector:
+        selector.register(owner.stdout, selectors.EVENT_READ)
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0 or not selector.select(remaining):
+                raise failed('readiness timeout')
+            # Read the descriptor directly: text readline() can still block after select().
+            chunk = os.read(owner.stdout.fileno(), 4096)
+            if not chunk:
+                raise failed('owner stdout closed before readiness')
+            pending += chunk
+            while b'\n' in pending:
+                line, rest = pending.split(b'\n', 1)
+                if len(line) > 65536:
+                    raise failed('readiness line exceeds 65536 bytes')
+                try:
+                    message = json.loads(line)
+                except (json.JSONDecodeError, UnicodeDecodeError) as error:
+                    raise failed('invalid readiness JSON') from error
+                if not isinstance(message, dict) or (message.get('ready') and not isinstance(message['ready'], str)):
+                    raise failed('invalid readiness message')
+                if message.get('ready'):
+                    return message['ready']
+                pending = rest
+            if len(pending) > 65536:
+                raise failed('readiness line exceeds 65536 bytes')
+
+
 def admin_contracts(release, php, workbase):
     """Run tests/integration/admin_contracts.php against its own disposable UI fixture.
 
@@ -317,14 +360,7 @@ def admin_contracts(release, php, workbase):
                                   '--release', str(release), '--php', str(php), '--ttl', '1800'],
                                  cwd=ROOT, env=environment, stdout=subprocess.PIPE, stderr=log, text=True)
         try:
-            ready = None
-            for line in owner.stdout:
-                ready = json.loads(line).get('ready')
-                if ready:
-                    break
-            if not ready:
-                owner.wait(timeout=30)
-                raise RuntimeError('UI fixture for admin contracts did not start:\n' + log_path.read_text(errors='replace')[-4000:])
+            ready = admin_fixture_ready(owner, log_path)
             app = json.loads(pathlib.Path(ready).read_text())['app']
             # The recovery key Copy check runs the page's click handler in the Node that CI installs.
             node = shutil.which(os.environ.get('NODE_BINARY') or 'node')
