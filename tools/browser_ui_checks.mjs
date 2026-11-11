@@ -596,12 +596,18 @@ try {
       // Staff tables keep their rows on phones and scroll inside their card, never the page.
       const surface = await mobile.locator('.backups-history').evaluate(history => {
         const table = history.querySelector('table.fi-ta-table'); const card = table.closest('.fi-ta-content-ctn');
+        card.scrollLeft = 0;
+        const scrollBefore = card.scrollLeft;
+        card.scrollLeft = card.scrollWidth;
         return {stacked: table.classList.contains('fi-ta-table-stacked-on-mobile'), overflow: getComputedStyle(card).overflowX,
           headers: [...table.querySelectorAll('thead th')].map(cell => cell.innerText.trim()).filter(Boolean),
-          tableWidth: table.scrollWidth, cardWidth: card.clientWidth};
+          tableWidth: table.scrollWidth, cardWidth: card.clientWidth, cardScrollWidth: card.scrollWidth,
+          scrollBefore, scrollAfter: card.scrollLeft};
       });
       assert(!surface.stacked, `Phone history rows stack: ${JSON.stringify(surface)}`);
       assert(['auto', 'scroll'].includes(surface.overflow), `Phone history does not scroll inside its card: ${JSON.stringify(surface)}`);
+      assert(surface.tableWidth > surface.cardWidth && surface.cardScrollWidth > surface.cardWidth, `Phone history table does not overflow its card: ${JSON.stringify(surface)}`);
+      assert(surface.scrollAfter > surface.scrollBefore, `Phone history card does not move when scrolled: ${JSON.stringify(surface)}`);
       for (const header of ['Type', 'Size', 'Location']) assert(surface.headers.includes(header), `Phone history lost ${header}: ${JSON.stringify(surface)}`);
       const mobileLink = mobile.getByRole('link', {name: 'Download', exact: true}).first();
       await mobileLink.scrollIntoViewIfNeeded(); await shot(mobile, 'mobile-history-actions');
