@@ -215,19 +215,21 @@ class ClickReview(unittest.TestCase):
             with self.subTest(run=run):
                 rows = self.detail_rows(**run)
                 self.assertEqual([item['name'] for item in (rows or {}).get('d_verified', [])], ['detailsVerify'])
-                # Set up S3 shows only while S3 is off and the backup has no S3 copy.
-                self.assertEqual('d_s3' in rows, run.get('remote') is None)
+                # The fixture has S3 off; only copies without an S3 copy offer Set up S3.
+                expected_s3_actions = [] if run.get('remote') == 'delivered' else [
+                    {'name': 'detailsSetUpS3', 'label': 'Set up S3', 'url': '/admin/backups?tab=settings#s3'}]
+                self.assertEqual(rows.get('d_s3', []), expected_s3_actions)
 
     def test_verify_menu_complements_the_row_and_suppresses_pending_requests(self):
         for status in ('ready', 'damaged', 'failed'):
             for download in ('none', 'ready', 'retrieve'):
                 run = {'run_id': 'fixture-run', 'status': status, 'download': download,
                        'local': download != 'retrieve', 'remote': 'delivered' if download == 'retrieve' else 'none'}
-                for pending in (False, True):
-                    with self.subTest(run=run, pending=pending):
-                        requests = [{'action': 'verify', 'status': 'pending', 'run_id': run['run_id']}] if pending else []
+                for request_status in (None, 'pending', 'failed'):
+                    with self.subTest(run=run, request_status=request_status):
+                        requests = [{'action': 'verify', 'status': request_status, 'run_id': run['run_id']}] if request_status else []
                         result = self.page('detail-rows', run=run, requests=requests)
-                        eligible = status in ('ready', 'damaged') and not pending
+                        eligible = status in ('ready', 'damaged') and request_status != 'pending'
                         self.assertEqual(result['verify'], {'verifyFirst': eligible and download == 'none',
                                                            'verify': eligible and download != 'none'})
                         self.assertEqual(bool((result['rows'] or {}).get('d_verified')), eligible)

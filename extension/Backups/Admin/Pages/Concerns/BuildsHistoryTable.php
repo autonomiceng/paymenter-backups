@@ -237,13 +237,13 @@ trait BuildsHistoryTable
             ->emptyStateActions([$this->backupAction('createFirstBackup')->visible(fn () => !filled($this->getTableSearch()) && !$this->nothingCanStart())]);
     }
 
-    /** Verify is a row button while there's nothing to download here. */
+    /** Ready or damaged copies without Download or Get from S3 use row Verify. */
     private static function verifiesOnRow(array $run): bool
     {
         return in_array($run['status'], ['ready', 'damaged'], true) && !in_array($run['download'], ['ready', 'retrieve'], true);
     }
 
-    /** Other ready or damaged copies have Verify in the row menu. */
+    /** The remaining ready or damaged copies use menu Verify, never both. */
     private static function verifiesInMenu(array $run): bool
     {
         return in_array($run['status'], ['ready', 'damaged'], true) && !self::verifiesOnRow($run);
