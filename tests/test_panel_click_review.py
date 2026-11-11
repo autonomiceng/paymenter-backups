@@ -43,7 +43,7 @@ $page = new class extends Paymenter\Extensions\Others\Backups\Admin\Pages\Backup
 $input = json_decode(file_get_contents('php://stdin'), true);
 $overview = ['initialized' => true, 'scheduler' => ['last_tick_at' => time()], 'runs' => $input['runs'] ?? [],
     'requests' => $input['requests'] ?? [['action' => 'destination-test', 'status' => 'complete', 'result_verified' => true, 'run_id' => null]],
-    'configuration' => ['available' => true, 'valid' => true, 'checks' => $input['checks'] ?? [], 'storage' => $input['storage'] ?? [],
+    'configuration' => ['available' => true, 'valid' => true, 'settings_version' => $input['settings_version'] ?? 2, 'checks' => $input['checks'] ?? [], 'storage' => $input['storage'] ?? [],
         'readiness' => ['full-quiesced' => ['state' => 'waiting', 'items' => [['code' => 'job-lock-busy']]],
                         'database-online' => ['state' => 'ready', 'items' => []]],
         'admission' => ['full-quiesced' => ['job-lock-busy'], 'database-online' => []]]];
@@ -215,25 +215,27 @@ class ClickReview(unittest.TestCase):
             with self.subTest(run=run):
                 rows = self.detail_rows(**run)
                 self.assertEqual([item['name'] for item in (rows or {}).get('d_verified', [])], ['detailsVerify'])
-                # Set up S3 shows only while S3 is off and the backup has no S3 copy.
-                self.assertEqual('d_s3' in rows, run.get('remote') is None)
+                # The fixture has S3 off; only copies without an S3 copy offer Set up S3.
+                expected_s3_actions = [] if run.get('remote') == 'delivered' else [
+                    {'name': 'detailsSetUpS3', 'label': 'Set up S3', 'url': '/admin/backups?tab=settings#s3'}]
+                self.assertEqual(rows.get('d_s3', []), expected_s3_actions)
 
     def test_verify_menu_complements_the_row_and_suppresses_pending_requests(self):
         for status in ('ready', 'damaged', 'failed'):
             for download in ('none', 'ready', 'retrieve'):
                 run = {'run_id': 'fixture-run', 'status': status, 'download': download,
                        'local': download != 'retrieve', 'remote': 'delivered' if download == 'retrieve' else 'none'}
-                for pending in (False, True):
-                    with self.subTest(run=run, pending=pending):
-                        requests = [{'action': 'verify', 'status': 'pending', 'run_id': run['run_id']}] if pending else []
+                for request_status in (None, 'pending', 'failed'):
+                    with self.subTest(run=run, request_status=request_status):
+                        requests = [{'action': 'verify', 'status': request_status, 'run_id': run['run_id']}] if request_status else []
                         result = self.page('detail-rows', run=run, requests=requests)
-                        eligible = status in ('ready', 'damaged') and not pending
+                        eligible = status in ('ready', 'damaged') and request_status != 'pending'
                         self.assertEqual(result['verify'], {'verifyFirst': eligible and download == 'none',
                                                            'verify': eligible and download != 'none'})
                         self.assertEqual(bool((result['rows'] or {}).get('d_verified')), eligible)
 
     def test_question_hints_explain_types_and_keep_without_a_request(self):
-        hints = self.page('hints')
+        hints = self.page('hints', settings_version=2)
         full = 'The database and all Paymenter files, except logs, cache and sessions. The site stays online.'
         database = "The database only. The site stays online. To restore, you also need Paymenter's files from a full backup."
         keep = 'The newest verified backup of each type on this server is always kept. So are backups that failed a check.'
@@ -261,9 +263,12 @@ class ClickReview(unittest.TestCase):
                         'The newest verified backup of each type in S3 is always kept. '
                         'So are backups waiting for their S3 upload and backups that failed a check.'),
         }
-        for name, (storage, expected) in cases.items():
-            with self.subTest(storage=name):
-                self.assertEqual(self.page('hints', storage=storage)['storage_keep']['label'], expected)
+        for version in (1, 2):
+            for name, (storage, expected) in cases.items():
+                with self.subTest(settings_version=version, storage=name):
+                    if version < 2:
+                        expected = expected.replace(' of each type', '')
+                    self.assertEqual(self.page('hints', settings_version=version, storage=storage)['storage_keep']['label'], expected)
 
     def test_started_sorts_both_ways_and_defaults_to_newest_first(self):
         runs = [{'run_id': run_id, 'request_id': None, 'status': 'ready', 'mode': 'database-online', 'created_at': created,
