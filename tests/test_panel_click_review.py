@@ -42,7 +42,7 @@ $page = new class extends Paymenter\Extensions\Others\Backups\Admin\Pages\Backup
 };
 $input = json_decode(file_get_contents('php://stdin'), true);
 $overview = ['initialized' => true, 'scheduler' => ['last_tick_at' => time()], 'runs' => $input['runs'] ?? [],
-    'requests' => [['action' => 'destination-test', 'status' => 'complete', 'result_verified' => true, 'run_id' => null]],
+    'requests' => $input['requests'] ?? [['action' => 'destination-test', 'status' => 'complete', 'result_verified' => true, 'run_id' => null]],
     'configuration' => ['available' => true, 'valid' => true, 'checks' => $input['checks'] ?? [], 'storage' => $input['storage'] ?? [],
         'readiness' => ['full-quiesced' => ['state' => 'waiting', 'items' => [['code' => 'job-lock-busy']]],
                         'database-online' => ['state' => 'ready', 'items' => []]],
@@ -91,7 +91,14 @@ if ($input['case'] === 'health') {
             $rows[$entry][] = ['name' => $component->getName(), 'label' => $component->getLabel(), 'url' => $component->getUrl()];
         }
     }
-    echo json_encode(['rows' => $rows]);
+    $verify = [];
+    foreach ($page->table(Filament\Tables\Table::make($page))->getRecordActions() as $action) {
+        $actions = $action instanceof Filament\Actions\ActionGroup ? $action->getActions() : [$action];
+        foreach ($actions as $item) {
+            if (in_array($item->getName(), ['verifyFirst', 'verify'], true)) $verify[$item->getName()] = $item->record($record)->isVisible();
+        }
+    }
+    echo json_encode(['rows' => $rows, 'verify' => $verify]);
 } elseif ($input['case'] === 'hints') {
     $record = ['__key' => 'fixture-run', 'kind' => 'run', 'run_id' => 'fixture-run', 'origin' => 'Staff', 'run' => ['run_id' => 'fixture-run',
         'status' => 'ready', 'mode' => 'full-quiesced', 'created_at' => null, 'finished_at' => null, 'verified_at' => null, 'remote' => 'none', 'local' => true, 'size' => 1, 'download' => 'ready']];
@@ -203,18 +210,33 @@ class ClickReview(unittest.TestCase):
     def test_details_offer_verify_wherever_the_row_does(self):
         # A damaged copy shows Verify on its row; its Details must offer it too.
         for run in ({'status': 'damaged', 'download': 'none'}, {'status': 'ready', 'download': 'none'},
-                    {'status': 'ready', 'download': 'retrieve', 'local': False, 'remote': 'delivered'}):
+                    {'status': 'ready', 'download': 'retrieve', 'local': False, 'remote': 'delivered'},
+                    {'status': 'damaged', 'download': 'retrieve', 'local': False, 'remote': 'delivered'}):
             with self.subTest(run=run):
                 rows = self.detail_rows(**run)
-                self.assertEqual([item['name'] for item in rows['d_verified']], ['detailsVerify'])
+                self.assertEqual([item['name'] for item in (rows or {}).get('d_verified', [])], ['detailsVerify'])
                 # Set up S3 shows only while S3 is off and the backup has no S3 copy.
                 self.assertEqual('d_s3' in rows, run.get('remote') is None)
+
+    def test_verify_menu_complements_the_row_and_suppresses_pending_requests(self):
+        for status in ('ready', 'damaged', 'failed'):
+            for download in ('none', 'ready', 'retrieve'):
+                run = {'run_id': 'fixture-run', 'status': status, 'download': download,
+                       'local': download != 'retrieve', 'remote': 'delivered' if download == 'retrieve' else 'none'}
+                for pending in (False, True):
+                    with self.subTest(run=run, pending=pending):
+                        requests = [{'action': 'verify', 'status': 'pending', 'run_id': run['run_id']}] if pending else []
+                        result = self.page('detail-rows', run=run, requests=requests)
+                        eligible = status in ('ready', 'damaged') and not pending
+                        self.assertEqual(result['verify'], {'verifyFirst': eligible and download == 'none',
+                                                           'verify': eligible and download != 'none'})
+                        self.assertEqual(bool((result['rows'] or {}).get('d_verified')), eligible)
 
     def test_question_hints_explain_types_and_keep_without_a_request(self):
         hints = self.page('hints')
         full = 'The database and all Paymenter files, except logs, cache and sessions. The site stays online.'
         database = "The database only. The site stays online. To restore, you also need Paymenter's files from a full backup."
-        keep = 'The newest verified backup on this server is always kept. So are backups that failed a check.'
+        keep = 'The newest verified backup of each type on this server is always kept. So are backups that failed a check.'
         self.assertEqual({name: hint['label'] for name, hint in hints.items()},
                          {'schedule_full': full, 'schedule_database': database, 'storage_keep': keep, 'd_type': full})
         for name, hint in hints.items():
@@ -231,12 +253,12 @@ class ClickReview(unittest.TestCase):
         # S3-only removes each local copy once its S3 copy is verified (storage.py:1083).
         cases = {
             'this server only': ({'keep_local': True, 'upload_s3': False},
-                                 'The newest verified backup on this server is always kept. So are backups that failed a check.'),
+                                 'The newest verified backup of each type on this server is always kept. So are backups that failed a check.'),
             'this server and S3': ({'keep_local': True, 'upload_s3': True},
-                                   'The newest verified backup on this server and in S3 is always kept. '
+                                   'The newest verified backup of each type on this server and in S3 is always kept. '
                                    'So are backups waiting for their S3 upload and backups that failed a check.'),
             'S3 only': ({'keep_local': False, 'upload_s3': True},
-                        'The newest verified backup in S3 is always kept. '
+                        'The newest verified backup of each type in S3 is always kept. '
                         'So are backups waiting for their S3 upload and backups that failed a check.'),
         }
         for name, (storage, expected) in cases.items():
