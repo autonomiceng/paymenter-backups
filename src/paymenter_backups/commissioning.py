@@ -86,7 +86,7 @@ def check(state, envelope, prepare=False, inventory=None, now=None, mode_readine
     from . import discovery, tools
     from .engine import plan
     from .presentation import destination_test_binding, destination_test_current
-    from .requests import list_requests
+    from .requests import iter_evidence
     now = time.time() if now is None else now
     settings = envelope['settings']
     state.apply_policy(settings)
@@ -129,7 +129,7 @@ def check(state, envelope, prepare=False, inventory=None, now=None, mode_readine
             offsite_code = 's3-credentials-required'
         binding = destination_binding if destination_binding is not None else destination_test_binding(state, envelope)
         if not offsite_code and not any(destination_test_current(state, envelope, request, request.get('result') or {}, binding)
-                for request in list_requests(state) if request.get('action') == 'destination-test'):
+                for request in iter_evidence(state, actions=('destination-test',), statuses=('complete',))):
             offsite_code = 'storage-untested'
         item('offsite', offsite_code, pending=bool(offsite_code))
     else:

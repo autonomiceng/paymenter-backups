@@ -7,7 +7,7 @@ import subprocess
 import unittest
 from unittest.mock import patch
 
-from paymenter_backups import history, requests
+from paymenter_backups import history, observation, requests, storage
 from paymenter_backups.common import BackupError, atomic_json, read_json
 from paymenter_backups.presentation import overview
 from test_engine_schedules import PrivateFixture
@@ -108,6 +108,92 @@ class HistoryPaging(PrivateFixture):
         replay = requests.create(self.state, 'destination-test', slot='recent-damaged-slot')
         self.assertEqual(replay['request_id'], item['request_id'])
         self.assertEqual(replay['status'], 'complete')
+
+    def damage_request(self, item):
+        root = history.layout(self.state)
+        receipt = read_json(root / 'request-keys' / (item['request_id'] + '.json'))
+        target = root / 'recent-requests' / receipt['recent_name']
+        target.write_text('{broken')
+        return target
+
+    def configured_s3_test(self, at):
+        self.remote()
+        self.envelope['credentials'] = {'access_key': 'fixture-access', 'secret_key': 'fixture-secret'}
+        self.envelope['framework']['app_key'] = 'fixture-app-key'
+        item = self.complete_request(at)
+        item['result'] = storage.destination_test(self.state, self.envelope)
+        self.assertTrue(item['result']['verified'])
+        atomic_json(requests.path(self.state, item['request_id']), item)
+        return item
+
+    def test_configured_s3_overview_is_bounded_with_damaged_off_page_history(self):
+        current = self.configured_s3_test(fixture.NOW + 1)
+        older = self.recent_requests(35)
+        damaged = self.damage_request(older[-1])
+        with patch.object(history, 'owned', wraps=history.owned) as reads:
+            result = overview(self.state, self.envelope)
+        payloads = [call.args[1] for call in reads.call_args_list if call.args[1].parent.name == 'recent-requests']
+        self.assertLessEqual(len(payloads), 31)
+        self.assertNotIn(damaged, payloads)
+        self.assertEqual(len(result['requests']), 30)
+        self.assertEqual(result['history_errors'], [])
+        self.assertTrue(next(row for row in result['requests'] if row['request_id'] == current['request_id'])['result_verified'])
+        self.assertEqual(result['configuration']['installation']['checks']['offsite']['state'], 'ready')
+
+    def test_s3_readiness_keeps_off_page_evidence_past_a_damaged_matching_test(self):
+        current = self.configured_s3_test(fixture.NOW - 40 * 86400)
+        for index in range(35):
+            item = self.complete_request(fixture.NOW - index * 86400)
+            item['action'] = 'retention'
+            atomic_json(requests.path(self.state, item['request_id']), item)
+        damaged = self.complete_request(fixture.NOW + 1)
+        history.maintain(self.state, fixture.NOW)
+        target = self.damage_request(damaged)
+        from paymenter_backups.commissioning import check
+        with patch.object(history, 'owned', wraps=history.owned) as reads:
+            result = check(self.state, self.envelope)
+        payloads = [call.args[1] for call in reads.call_args_list if call.args[1].parent.name == 'recent-requests']
+        self.assertEqual(len(payloads), 2)
+        self.assertIn(target, payloads)
+        self.assertTrue(any(current['request_id'] in path.name for path in payloads))
+        self.assertEqual(result['checks']['offsite']['state'], 'ready')
+
+    def test_incidents_keep_off_page_coverage_and_unresolved_work_without_reading_other_history(self):
+        at = fixture.NOW - 40 * 86400
+        self.remote()
+        self.settings.update(database_schedule='hourly')
+        requests.sync_schedule(self.state, self.settings, now=at)
+        epoch = read_json(self.state.root / 'schedule.json')['kinds']['database']
+        self.backup('covering-full', mode='full-quiesced', created_at=at + 3 * 3600, deliver=True)
+        journal = self.item('covering-full')
+        journal.update(database_snapshot_lower_bound=at + 3 * 3600,
+                       database_coverage={'snapshot_lower_bound': at + 3 * 3600})
+        self.state.save(journal)
+        covered = requests.create(self.state, arguments={'mode': 'database-online'}, slot='covered-slot',
+            scheduled_metadata={'schedule_kind': 'database', 'slot_at': at + 3 * 3600,
+                                'schedule_fingerprint': epoch['fingerprint'], 'schedule_since': epoch['since']})
+        requests.reconcile_coverage(self.state, self.envelope, cheap_only=True)
+        self.assertEqual(read_json(requests.path(self.state, covered['request_id']))['status'], 'satisfied')
+        # Keep the coverage receipt off-page by its original creation time.
+        covered = read_json(requests.path(self.state, covered['request_id']))
+        covered.update(created_at=at, updated_at=at + 3 * 3600, finished_at=at + 3 * 3600)
+        atomic_json(requests.path(self.state, covered['request_id']), covered)
+        older = [self.complete_request(fixture.NOW - index * 86400) for index in range(35)]
+        history.maintain(self.state, fixture.NOW)
+        failed = requests.create(self.state, arguments={'mode': 'database-online'})
+        failed.update(status='failed', created_at=at + 3 * 3600 + 30)
+        atomic_json(requests.path(self.state, failed['request_id']), failed)
+        damaged = self.damage_request(older[-1])
+        with patch.object(history, 'owned', wraps=history.owned) as reads:
+            result = observation.check(self.state, self.envelope, now=at + 3 * 3600 + 60)
+        payloads = [call.args[1] for call in reads.call_args_list if call.args[1].parent.name == 'recent-requests']
+        self.assertEqual(len(payloads), 1)
+        self.assertNotIn(damaged, payloads)
+        for location in ('local', 'offsite'):
+            database = next(row for row in result['checks'] if row['key'] == 'database:' + location)
+            self.assertEqual(database['last_good_at'], at + 3 * 3600)
+            self.assertEqual(database['reason'], 'backup-failed')
+        self.assertTrue(requests.path(self.state, failed['request_id']).exists())
 
     def test_invalid_history_names_are_local_errors_without_blocking_tick(self):
         self.recent_requests(1)

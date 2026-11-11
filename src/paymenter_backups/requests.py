@@ -109,6 +109,34 @@ def list_requests(state, history=True):
     return items
 
 
+def iter_evidence(state, *, actions, statuses):
+    """Read work first, then one matching terminal payload at a time.
+
+    Receipt metadata selects evidence without decoding unrelated history.
+    Damaged terminal entries are local to that evidence; work still fails closed.
+    """
+    from .history import read_entry, recent_index, replay
+
+    def matches(item):
+        return item.get('action') in actions and item.get('status') in statuses
+
+    work = list_requests(state, history=False)
+    seen = {item['request_id'] for item in work}
+    yield from (item for item in work if matches(item))
+    for entry in recent_index(state, 'requests'):
+        if entry['id'] is None or entry['id'] in seen:
+            continue
+        try:
+            receipt = replay(state, entry['id'])
+            if receipt is None or not matches(receipt):
+                continue
+            item = read_entry(state, 'requests', entry)
+        except (BackupError, OSError):
+            continue
+        if matches(item):
+            yield item
+
+
 def cancel(state, request_id):
     # Match the run -> requests lock order used by coverage reconciliation.
     needs_run_lock = read_json(path(state, request_id))["action"] == "deliver"
