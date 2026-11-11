@@ -243,11 +243,10 @@ trait BuildsHistoryTable
         return in_array($run['status'], ['ready', 'damaged'], true) && !in_array($run['download'], ['ready', 'retrieve'], true);
     }
 
-    /** Otherwise it's in the row menu, for a ready copy here or only in S3. */
+    /** Other ready or damaged copies have Verify in the row menu. */
     private static function verifiesInMenu(array $run): bool
     {
-        return $run['status'] === 'ready' && ($run['download'] === 'ready'
-            || (!$run['local'] && in_array($run['remote'] ?? null, ['delivered', 'present'], true)));
+        return in_array($run['status'], ['ready', 'damaged'], true) && !self::verifiesOnRow($run);
     }
 
     private function pendingTaskLabel(array $record): string
