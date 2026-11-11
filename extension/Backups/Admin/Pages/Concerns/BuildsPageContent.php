@@ -211,7 +211,7 @@ trait BuildsPageContent
         if (!$local && !$s3) { return ''; }
         $places = implode(' and ', array_filter([$local ? 'on this server' : null, $s3 ? 'in S3' : null]));
         // With S3 on, every upload is required, and cleanup keeps a backup until its S3 copy is made.
-        return 'The newest verified backup of each type ' . $places . ' is always kept. So are '
+        return 'The newest verified backup' . ($this->settingsVersion() < 2 ? '' : ' of each type') . ' ' . $places . ' is always kept. So are '
             . ($s3 ? 'backups waiting for their S3 upload and ' : '') . 'backups that failed a check.';
     }
 
