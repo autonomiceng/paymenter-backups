@@ -39,6 +39,9 @@ def path(state, request_id):
     target = state.root / "requests" / (request_id + ".json")
     if target.is_symlink():
         raise BackupError("private-state-permissions")
+    if not target.exists():
+        from .history import recent_path
+        return recent_path(state, 'requests', request_id) or target
     return target
 
 
@@ -61,11 +64,17 @@ def create(state, action="run", arguments=None, slot=None, scheduled_metadata=No
     if action == "delete" and arguments.get("execute") is not True:
         raise BackupError("delete-confirmation-required")
     request_id = hashlib.sha256((state.uuid + ":" + slot).encode()).hexdigest()[:32] if slot else uuid.uuid4().hex
-    target = path(state, request_id)
+    target = state.root / 'requests' / (request_id + '.json')
     with state.lock("requests.lock"):
+        if target.is_symlink():
+            raise BackupError('private-state-permissions')
         if target.exists():
             return read_json(target)
-        existing = list_requests(state)
+        from .history import replay
+        previous = replay(state, request_id)
+        if previous is not None:
+            return previous
+        existing = list_requests(state, history=False)
         if not slot:
             # A repeated click returns the waiting request instead of queueing a copy.
             comparable = {key: value for key, value in arguments.items() if key != "actor"}
@@ -91,8 +100,41 @@ def create(state, action="run", arguments=None, slot=None, scheduled_metadata=No
     return item
 
 
-def list_requests(state):
-    return [read_json(item) for item in sorted((state.root / "requests").glob("*.json"))]
+def list_requests(state, history=True):
+    from .history import active_records
+    items = active_records(state, 'requests')
+    if history:
+        from .history import recent_index, read_entry
+        items += [read_entry(state, 'requests', entry) for entry in recent_index(state, 'requests')]
+    return items
+
+
+def iter_evidence(state, *, actions, statuses):
+    """Read work first, then one matching terminal payload at a time.
+
+    Receipt metadata selects evidence without decoding unrelated history.
+    Damaged terminal entries are local to that evidence; work still fails closed.
+    """
+    from .history import read_entry, recent_index, replay
+
+    def matches(item):
+        return item.get('action') in actions and item.get('status') in statuses
+
+    work = list_requests(state, history=False)
+    seen = {item['request_id'] for item in work}
+    yield from (item for item in work if matches(item))
+    for entry in recent_index(state, 'requests'):
+        if entry['id'] is None or entry['id'] in seen:
+            continue
+        try:
+            receipt = replay(state, entry['id'])
+            if receipt is None or not matches(receipt):
+                continue
+            item = read_entry(state, 'requests', entry)
+        except (BackupError, OSError):
+            continue
+        if matches(item):
+            yield item
 
 
 def cancel(state, request_id):
@@ -244,6 +286,8 @@ def tick(state, envelope, command_prefix, envelope_loader=None, database_context
             if not settings.get("extension_enabled", True):
                 return {"enabled": False}
         now = time.time()
+        from .history import maintain
+        maintain(state, now)
         from .discovery import refresh_cache
         refresh_cache(state, envelope, now)
         epoch = _sync_schedule(state, settings, now)
@@ -269,7 +313,7 @@ def tick(state, envelope, command_prefix, envelope_loader=None, database_context
             dues[kind] = due
         reconcile_coverage(state, envelope, cheap_only=True)
         with state.lock("requests.lock"):
-            items = list_requests(state)
+            items = list_requests(state, history=False)
             eligible = []
             for item in items:
                 if item["status"] in ("launching", "running"):
@@ -366,7 +410,7 @@ def _sync_schedules_v2(state, settings, now):
 def freeze_legacy_requests(state, mode):
     """Freeze pre-0.4 mode-less obligations before changing legacy defaults."""
     with state.lock('requests.lock'):
-        for item in list_requests(state):
+        for item in list_requests(state, history=False):
             if item.get('status') in ('pending', 'deferred') and item.get('action') == 'run' and not item.get('arguments', {}).get('mode'):
                 item['arguments']['mode'] = mode
                 atomic_json(path(state, item['request_id']), item)
@@ -403,7 +447,7 @@ def _reconcile_coverage(state, envelope, cheap_only):
     current = epoch.get('kinds', {}).get('database')
     proofs = {}
     with state.lock("requests.lock"):
-        for item in list_requests(state):
+        for item in list_requests(state, history=False):
             if (item.get("schedule_kind") != "database" or not item.get("slot")
                     or item.get("status") not in ("pending", "deferred")):
                 continue

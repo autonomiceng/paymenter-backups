@@ -243,7 +243,8 @@ class State:
         return path
 
     def journals(self):
-        return [read_json(path) for path in sorted((self.root / "runs").glob("*/journal.json"))]
+        from .history import active_records
+        return active_records(self, 'runs')
 
     def save(self, journal):
         journal["updated_at"] = time.time()

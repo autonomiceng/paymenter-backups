@@ -1150,7 +1150,7 @@ def delete_plan(state, envelope, run_id, request_id=None, location="all"):
     if not refusal and target_remote and run_id == latest_remote_run(state, envelope, items):
         refusal = "delete-latest-remote-copy"
     if not refusal:
-        for request in list_requests(state):
+        for request in list_requests(state, history=False):
             if request.get("request_id") != request_id and request.get("status") in ACTIVE_REQUESTS and request.get("arguments", {}).get("run_id") == run_id:
                 refusal = "delete-conflict"
                 break

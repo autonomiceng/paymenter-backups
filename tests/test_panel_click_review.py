@@ -93,9 +93,11 @@ if ($input['case'] === 'health') {
     }
     $verify = [];
     foreach ($page->table(Filament\Tables\Table::make($page))->getRecordActions() as $action) {
+        // The table binds the record to the group before evaluating any child.
+        $action->record($record);
         $actions = $action instanceof Filament\Actions\ActionGroup ? $action->getActions() : [$action];
         foreach ($actions as $item) {
-            if (in_array($item->getName(), ['verifyFirst', 'verify'], true)) $verify[$item->getName()] = $item->record($record)->isVisible();
+            if (in_array($item->getName(), ['verifyFirst', 'verify'], true)) $verify[$item->getName()] = $item->isVisible();
         }
     }
     echo json_encode(['rows' => $rows, 'verify' => $verify]);

@@ -339,6 +339,60 @@ requested and performs owned probe/readback/cleanup only. Bucket policy is never
 modified. Document least-privilege credentials, optional versioning/Object Lock,
 and plaintext local archives containing private data and APP_KEY.
 
+### Local history retention
+
+The tick and explicit `history-maintain` command move completed requests and
+fully deleted, recovered runs to `history/v1/requests` and `history/v1/runs`
+after 13 calendar months, and delete their cold payloads after three calendar
+years from their proven terminal time. All dates use UTC. Missing terminal
+dates, unknown outcomes, unfinished intents, remaining run work and unresolved
+recovery stay active and appear in `history-maintenance.json`. Failed requests
+remain uncertain records. This policy never deletes backup artifacts.
+The newest completed, verified storage-test request stays active as readiness
+evidence, regardless of age. A newer passing test releases the older proof to
+ordinary retention; a failed retest does not displace it.
+
+Maintenance takes the run lock before requests.lock, both without waiting.
+It skips a busy attempt. It writes and fsyncs permanent installation-bound
+request/slot and run receipts in `history/v1/request-keys` and `run-keys` before
+atomically renaming an exact payload on the same filesystem. Each receipt pins
+the cold name, terminal time and checksum. Both rename directories are fsynced.
+A crash before renaming leaves the active record authoritative; a crash after
+renaming leaves the cold payload and its replay receipt. Request creation
+checks the permanent receipt before publishing a new request. Receipts never
+expire, including when their payload is deleted. Cold expiration verifies the
+receipt and checksum; damaged entries remain and are reported separately.
+Terminal records within their first 13 months move to `recent-requests` and
+`recent-runs` under the same locks, receipt and rename contract. These records
+are still active history, separate from open work. Recent filenames contain
+creation and terminal UTC microseconds plus the record ID; page selection
+uses those names before decoding payloads. At 13 months, a checksum-verified
+recent payload moves to its receipt's cold name. Existing cold receipts remain
+compatible. Unclassifiable rows stay in the work set.
+
+Tick, recovery, admission and storage enumerate the work set. Overview reads
+that set plus the latest 30 terminal requests; all unresolved runs remain
+visible regardless of page. Its `recent_runs` contains IDs and creation times
+from filenames, without opening terminal journals. The administrator table
+merges these names with live rows, selects a page, then requests only those
+terminal payloads. Explicit full-field searches read recent deleted records
+to preserve the existing search behavior. The read-only
+`history-page runs|requests [--offset N] [--limit 1..100] [--cold] [--ids IDS]`
+command returns a whitelisted page and per-entry errors. `list` and
+`requests list` also accept `--offset` and `--limit` for terminal history,
+alongside all work records; `status` includes work only. The initial upgrade
+classifies existing files once under the same locks; subsequent ticks do not
+read recent terminal payloads until they reach the cold-storage boundary.
+Concurrent readers skip a vanished work record only when a permanent receipt
+proves its terminal transition; missing unresolved records still fail closed.
+Unresolved runs are shown as needing recovery even if marked deleted. Cold
+entries never appear on normal pages. Payload permissions, installation identity and receipt
+checksums are checked on each history read. A damaged entry does not suppress
+other entries or an unresolved run.
+
+Normal active readers never enumerate cold payloads. Manifests and unresolved
+recovery journals retain their authority; no SQL or provider access is involved.
+
 ### Encrypted remote artifacts
 
 Capture and storage mutation entry points reload the current configuration and credentials

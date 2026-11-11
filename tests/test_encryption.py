@@ -680,7 +680,7 @@ time.sleep(30)
         from paymenter_backups.presentation import overview
         result = storage.destination_test(self.state, self.envelope)
         result['unexpected_secret'] = self.record['secret']
-        atomic_json(self.state.root / 'requests' / 'badge.json', {'request_id': 'badge', 'action': 'destination-test',
+        atomic_json(self.state.root / 'requests' / 'badge.json', {'request_id': 'badge', 'installation_uuid': self.state.uuid, 'action': 'destination-test',
                     'status': 'complete', 'created_at': time.time(), 'arguments': {}, 'result': result})
         public = overview(self.state, self.envelope, error='synthetic-settings-error')
         self.assertTrue(public['requests'][0]['result_verified'])
@@ -697,7 +697,7 @@ time.sleep(30)
         for index in range(50):
             request_id = 'badge-' + str(index)
             atomic_json(self.state.root / 'requests' / (request_id + '.json'),
-                        {'request_id': request_id, 'action': 'destination-test', 'status': 'complete',
+                        {'request_id': request_id, 'installation_uuid': self.state.uuid, 'action': 'destination-test', 'status': 'complete',
                          'created_at': time.time(), 'arguments': {}, 'result': result})
         with patch('paymenter_backups.encryption.key', wraps=encryption.key) as checked_key:
             public = overview(self.state, self.envelope, error='synthetic-settings-error')

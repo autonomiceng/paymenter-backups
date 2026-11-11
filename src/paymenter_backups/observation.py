@@ -4,7 +4,7 @@ import time
 from . import artifacts
 from .common import BackupError, private_file, read_json
 from .config import schedule_settings
-from .requests import CAPTURE_ATTEMPTS, list_requests, next_slot
+from .requests import CAPTURE_ATTEMPTS, iter_evidence, next_slot
 from .storage import scope_matches
 
 MODES = {"full": "full-quiesced", "database": "database-online"}
@@ -41,7 +41,7 @@ def check(state, envelope, now=None):
     if not state.initialized:
         raise BackupError("installation-missing")
     journals = state.journals()
-    requests = list_requests(state)
+    requests = list(iter_evidence(state, actions=('run', 'deliver'), statuses=('satisfied', 'failed', 'expired')))
     by_id = {item["run_id"]: item for item in journals}
     epoch = saved(state.root / "schedule.json", {})
     initialized_at = state.binding.stat().st_mtime

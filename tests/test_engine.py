@@ -90,7 +90,7 @@ payload={'status':503,'except':[],'secret':None,'redirect':None,'template':'fixt
     def journal(self):
         directory = self.state.run_path("owned")
         directory.mkdir(exist_ok=True)
-        journal = {"run_id": "owned", "phase": "capturing", "groups": [], "owned_markers": {}, "initial_markers": {}, "service_recovered": False}
+        journal = {"run_id": "owned", "installation_uuid": self.state.uuid, "phase": "capturing", "groups": [], "owned_markers": {}, "initial_markers": {}, "service_recovered": False}
         for relative in MARKERS:
             (self.app / relative).write_text("marker")
             journal["owned_markers"][relative] = identity(self.app / relative)

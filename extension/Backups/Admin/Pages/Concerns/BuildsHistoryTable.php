@@ -34,14 +34,15 @@ trait BuildsHistoryTable
     }
 
     /** History rows: queued or refused backup requests, then backups. */
-    private function historyRows(bool $showDeleted): array
+    private function historyRows(bool $showDeleted, array $extraRuns = []): array
     {
         $rows = [];
         $started = [];
         $scheduled = $this->scheduledRequests();
         $uploads = $this->uploadsToS3();
         $running = false;
-        foreach ($this->overview()['runs'] as $run) {
+        $runs = array_merge($this->overview()['runs'], $extraRuns);
+        foreach ($runs as $run) {
             if ($run['request_id']) { $started[$run['request_id']] = true; }
             $running = $running || $run['status'] === 'running';
         }
@@ -64,7 +65,7 @@ trait BuildsHistoryTable
                 'cancel_request' => in_array($request['status'], ['pending', 'deferred'], true) ? $request['request_id'] : null,
                 'run_id' => null, 'run' => null];
         }
-        foreach ($this->overview()['runs'] as $run) {
+        foreach ($runs as $run) {
             if ($run['status'] === 'deleted' && !$showDeleted) { continue; }
             [$label, $color] = Messages::runStatus($run);
             $detail = Messages::runDetail($run + ['maintenance' => $this->overview()['maintenance'] ?? false, 'uploads' => $uploads]);
@@ -108,7 +109,47 @@ trait BuildsHistoryTable
 
     private function hasDeletedRuns(): bool
     {
-        return array_filter($this->overview()['runs'], static fn ($run) => $run['status'] === 'deleted') !== [];
+        return ($this->overview()['recent_runs'] ?? []) !== []
+            || array_filter($this->overview()['runs'], static fn ($run) => $run['status'] === 'deleted') !== [];
+    }
+
+    /** Select a page from live rows and terminal filenames before loading payloads. */
+    private function historyPage(int $page, int $perPage, ?string $search, bool $ascending): LengthAwarePaginator
+    {
+        $recent = $this->showDeleted ? ($this->overview()['recent_runs'] ?? []) : [];
+        $rows = $this->historyRows($this->showDeleted);
+        $load = function (array $ids): array {
+            $runs = [];
+            foreach (array_chunk($ids, 100) as $chunk) {
+                $result = Runtime::command(['history-page', 'runs', '--limit', '100', '--ids', implode(',', $chunk)], null, 20);
+                $runs = array_merge($runs, $result['items'] ?? []);
+            }
+            return $runs;
+        };
+        // Explicit full-field searches keep their existing semantics. Ordinary
+        // page reads only open the selected terminal payloads.
+        if (trim($search ?? '') !== '' && $recent) {
+            $rows = $this->historyRows($this->showDeleted, $load(array_column($recent, 'run_id')));
+            $recent = [];
+        }
+        $rows = HistorySearch::filter($rows, $search);
+        foreach ($recent as $entry) {
+            $rows[] = ['__key' => $entry['run_id'], 'created_at' => $entry['created_at'], 'history_pending' => true];
+        }
+        usort($rows, static fn ($a, $b) => (($b['created_at'] ?? 0) <=> ($a['created_at'] ?? 0)) ?: strcmp($b['__key'], $a['__key']));
+        if ($ascending) { $rows = array_reverse($rows); }
+        $total = count($rows);
+        $rows = array_slice($rows, ($page - 1) * $perPage, $perPage);
+        $ids = array_column(array_filter($rows, static fn ($row) => $row['history_pending'] ?? false), '__key');
+        if ($ids) {
+            $loaded = array_column($this->historyRows(true, $load($ids)), null, '__key');
+            $rows = array_map(static fn ($row) => ($row['history_pending'] ?? false)
+                ? ($loaded[$row['__key']] ?? ['__key' => $row['__key'], 'kind' => 'history-error', 'run_id' => null, 'run' => null,
+                    'request_id' => null, 'created_at' => $row['created_at'], 'type' => 'Unknown', 'origin' => null,
+                    'status_label' => 'Unreadable', 'status_color' => 'danger', 'detail' => Messages::error('state-unreadable'),
+                    'size' => null, 'size_label' => '—', 'location' => '—', 'cancel_request' => null]) : $row, $rows);
+        }
+        return new LengthAwarePaginator($rows, $total, $perPage, $page);
     }
 
     public function table(Table $table): Table
@@ -118,12 +159,8 @@ trait BuildsHistoryTable
         return $table
             ->description(fn () => $this->hasActiveWork() ? 'Updates every 5 seconds while a backup runs' : null)
             ->records(function (int|string $page, int|string $recordsPerPage, ?string $search, ?string $sortColumn = null, ?string $sortDirection = null) {
-                $rows = HistorySearch::filter($this->historyRows($this->showDeleted), $search);
-                // History is newest first; Started sorts oldest first only when asked.
-                if ($sortColumn === 'created_at' && $sortDirection === 'asc') { $rows = array_reverse($rows); }
-                $perPage = max(1, (int) $recordsPerPage);
-                $page = max(1, (int) $page);
-                return new LengthAwarePaginator(array_slice($rows, ($page - 1) * $perPage, $perPage), count($rows), $perPage, $page);
+                return $this->historyPage(max(1, (int) $page), max(1, (int) $recordsPerPage), $search,
+                    $sortColumn === 'created_at' && $sortDirection === 'asc');
             })
             ->paginated([25, 50, 100])->defaultPaginationPageOption(25)
             ->searchable()->searchPlaceholder('Search backup ID')
@@ -131,7 +168,7 @@ trait BuildsHistoryTable
             ->columnManagerTriggerAction(fn (Action $action) => $action->label('Columns')->button())
             // Merge, so the skin's shared table class set for every table stays.
             // On phones the rows stay rows: the table scrolls sideways inside its card, never the page.
-            ->extraAttributes(['class' => 'beco-own-table backups-history'], merge: true)
+            ->extraAttributes(['class' => 'backups-own-table backups-history'], merge: true)
             // No polling while a dialog is open: it would re-render the dialog, including a shown recovery key.
             ->poll(fn () => $this->hasActiveWork() && !$this->mountedActions ? '5s' : null)
             ->headerActions([
@@ -145,7 +182,7 @@ trait BuildsHistoryTable
                 // Every column shows on phones, so the kind of backup stays in view.
                 TextColumn::make('type')->label('Type')->toggleable(),
                 TextColumn::make('status_label')->label('Status')->badge()->color(fn (array $record) => $record['status_color'])
-                    ->extraCellAttributes(fn (array $record) => ['data-beco-tone' => StatusTone::forLabel($record['status_label'])])->toggleable(),
+                    ->extraCellAttributes(fn (array $record) => ['data-backups-tone' => StatusTone::forLabel($record['status_label'])])->toggleable(),
                 TextColumn::make('detail')->label('Note')->wrap()->toggleable(),
                 TextColumn::make('size_label')->label('Size')->alignEnd()->extraCellAttributes(['class' => 'tabular-nums'])->toggleable(),
                 TextColumn::make('location')->label('Location')->toggleable(),
@@ -175,6 +212,7 @@ trait BuildsHistoryTable
                     ->action(fn (array $record) => $this->callCancel($record['cancel_request'])),
                 ActionGroup::make([
                     Action::make('details')->label('Details')->icon('ri-information-line')
+                        ->visible(static fn (array $record) => $record['kind'] !== 'history-error')
                         ->modalHeading(fn (array $record) => $isRun($record) ? Messages::mode($record['run']['mode']) : 'Queued backup')
                         ->modalDescription(fn (array $record) => $this->detailsLine($record))
                         ->modalWidth('2xl')->modalSubmitAction(false)->modalCancelActionLabel('Close')
