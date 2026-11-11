@@ -91,8 +91,16 @@ def parser():
     sub = commands.add_parser("run")
     sub.add_argument("--execute", action="store_true")
     sub.add_argument("--mode", choices=("full-quiesced", "database-online"))
-    commands.add_parser("list")
+    sub = commands.add_parser("list")
+    sub.add_argument("--limit", type=int, default=30)
+    sub.add_argument("--offset", type=int, default=0)
     commands.add_parser("status")
+    sub = commands.add_parser("history-page", help="Read one page of terminal history without provider access")
+    sub.add_argument("family", choices=("runs", "requests"))
+    sub.add_argument("--limit", type=int, default=30)
+    sub.add_argument("--offset", type=int, default=0)
+    sub.add_argument("--cold", action="store_true")
+    sub.add_argument("--ids", help="Comma-separated IDs within the selected history family")
     commands.add_parser("history-maintain", help="Apply local history retention without configuration or provider access")
     commands.add_parser("observe", help="Read independent scheduler and backup freshness checks")
     sub = commands.add_parser("overview", help="Whitelisted backup, task and readiness summary without paths or manifests")
@@ -119,6 +127,8 @@ def parser():
     sub = commands.add_parser("requests")
     sub.add_argument("verb", choices=("list", "cancel", "create"))
     sub.add_argument("request_id", nargs="?")
+    sub.add_argument("--limit", type=int, default=30)
+    sub.add_argument("--offset", type=int, default=0)
     sub.add_argument("--action", choices=("run", "verify", "deliver", "retrieve", "retention", "destination-test", "delete"), default="run")
     sub = commands.add_parser("recover")
     sub.add_argument("verb", nargs="?", choices=("acknowledge",))
@@ -532,16 +542,24 @@ def dispatch(args):
         return overview(state, envelope, error, writer_cause=pending_writer_cause)
     if command == "artifact-stream":
         return stream_artifact(state, args)
+    if command == "history-page":
+        from .history import recent_page
+        from .presentation import run_entry, request_entry
+        page = recent_page(state, args.family, args.limit, args.offset, args.cold,
+                           args.ids.split(',') if args.ids else None)
+        page['items'] = [run_entry(state, item, set()) if args.family == 'runs' else request_entry(item) for item in page['items']]
+        return page
     if command == "history-maintain":
         from .history import maintain
         return maintain(state)
     if command in ("status", "list"):
         journals = state.journals()
         if command == "list":
-            return journals
+            from .history import recent_page
+            return journals + recent_page(state, 'runs', args.limit, args.offset)['items']
         return {"installation_uuid": state.uuid, "initialized": state.initialized, "runs": journals,
                 "unresolved": [item["run_id"] for item in journals if not item.get("service_recovered") and not item.get("recovery_acknowledged")],
-                "maintenance": (state.app / "storage/framework/down").exists(), "requests": list_requests(state)}
+                "maintenance": (state.app / "storage/framework/down").exists(), "requests": list_requests(state, history=False)}
     if command == "verify":
         item = artifact_journal(state, args.run_id)
         envelope = load(args) if not item.get("local_complete") and item.get("remote_delivered") else None
@@ -560,7 +578,8 @@ def dispatch(args):
         return recover(state, args.execute, args.auto, args.run_id, args.verb == "acknowledge")
     if command == "requests":
         if args.verb == "list":
-            return list_requests(state)
+            from .history import recent_page
+            return list_requests(state, history=False) + recent_page(state, 'requests', args.limit, args.offset)['items']
         if args.verb == "cancel":
             if not args.request_id:
                 raise BackupError("request-id-required")

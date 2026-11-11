@@ -46,6 +46,8 @@ def alive(item):
 
 
 def run_status(item, active_runs):
+    if not item.get("service_recovered") and not item.get("recovery_acknowledged"):
+        return "running" if alive(item) else "attention"
     if item.get("retained_deleted"):
         return "deleted"
     if artifacts.deleting(item):
@@ -432,7 +434,10 @@ def database_job_coordination(state):
 
 def overview(state, envelope=None, error=None, writer_cause=None):
     journals = state.journals() if state.initialized else []
-    requests = list_requests(state) if state.initialized else []
+    requests = list_requests(state, history=False) if state.initialized else []
+    from .history import recent_page, recent_index
+    page = recent_page(state, 'requests') if state.initialized else {'items': [], 'errors': []}
+    requests += page['items']
     active_runs = {(item.get("action"), (item.get("arguments") or {}).get("run_id")) for item in requests if item.get("status") in ACTIVE}
     runs = sorted((run_entry(state, item, active_runs, envelope) for item in journals), key=lambda item: item["created_at"] or 0, reverse=True)
     destination_binding = destination_test_binding(state, envelope)
@@ -453,6 +458,8 @@ def overview(state, envelope=None, error=None, writer_cause=None):
             "configuration": configuration(state, envelope, error, encryption_key_status=destination_binding.get("key_status"),
                                             writer_cause=writer_cause, destination_binding=destination_binding), "runs": runs,
             "last_good": last_good,
+            "recent_runs": [{'run_id': row['id'], 'created_at': row['created_at']} for row in recent_index(state, 'runs') if row['id'] is not None] if state.initialized else [],
+            "history_errors": page['errors'],
             "job_wait_overdue": job_wait_overdue(requests, journals, time.time()),
             "database_job_coordination": database_job_coordination(state),
             "s3_pending": {"count": len(pending_s3) if envelope and envelope["settings"]["destination"] == "s3" else 0,
