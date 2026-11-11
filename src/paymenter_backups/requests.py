@@ -65,6 +65,10 @@ def create(state, action="run", arguments=None, slot=None, scheduled_metadata=No
     with state.lock("requests.lock"):
         if target.exists():
             return read_json(target)
+        from .history import replay
+        previous = replay(state, request_id)
+        if previous is not None:
+            return previous
         existing = list_requests(state)
         if not slot:
             # A repeated click returns the waiting request instead of queueing a copy.
@@ -244,6 +248,8 @@ def tick(state, envelope, command_prefix, envelope_loader=None, database_context
             if not settings.get("extension_enabled", True):
                 return {"enabled": False}
         now = time.time()
+        from .history import maintain
+        maintain(state, now)
         from .discovery import refresh_cache
         refresh_cache(state, envelope, now)
         epoch = _sync_schedule(state, settings, now)

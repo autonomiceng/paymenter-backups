@@ -339,6 +339,29 @@ requested and performs owned probe/readback/cleanup only. Bucket policy is never
 modified. Document least-privilege credentials, optional versioning/Object Lock,
 and plaintext local archives containing private data and APP_KEY.
 
+### Local history retention
+
+The tick and explicit `history-maintain` command move completed requests and
+fully deleted, recovered runs to `history/v1/requests` and `history/v1/runs`
+after 13 calendar months, and delete their cold payloads after three calendar
+years from their proven terminal time. All dates use UTC. Missing terminal
+dates, unknown outcomes, unfinished intents, remaining run work and unresolved
+recovery stay active and appear in `history-maintenance.json`. Failed requests
+remain uncertain records. This policy never deletes backup artifacts.
+
+Maintenance takes the run lock before requests.lock, both without waiting.
+It skips a busy attempt. It writes and fsyncs permanent installation-bound
+request/slot and run receipts in `history/v1/request-keys` and `run-keys` before
+atomically renaming an exact payload on the same filesystem. Each receipt pins
+the cold name, terminal time and checksum. Both rename directories are fsynced.
+A crash before renaming leaves the active record authoritative; a crash after
+renaming leaves the cold payload and its replay receipt. Request creation
+checks the permanent receipt before publishing a new request. Receipts never
+expire, including when their payload is deleted. Cold expiration verifies the
+receipt and checksum; damaged entries remain and are reported separately.
+Normal active readers never enumerate cold payloads. Manifests and unresolved
+recovery journals retain their authority; no SQL or provider access is involved.
+
 ### Encrypted remote artifacts
 
 Capture and storage mutation entry points reload the current configuration and credentials

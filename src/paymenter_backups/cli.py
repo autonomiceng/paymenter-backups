@@ -93,6 +93,7 @@ def parser():
     sub.add_argument("--mode", choices=("full-quiesced", "database-online"))
     commands.add_parser("list")
     commands.add_parser("status")
+    commands.add_parser("history-maintain", help="Apply local history retention without configuration or provider access")
     commands.add_parser("observe", help="Read independent scheduler and backup freshness checks")
     sub = commands.add_parser("overview", help="Whitelisted backup, task and readiness summary without paths or manifests")
     sub.add_argument("--offline", action="store_true", help="Skip configuration and readiness checks")
@@ -531,6 +532,9 @@ def dispatch(args):
         return overview(state, envelope, error, writer_cause=pending_writer_cause)
     if command == "artifact-stream":
         return stream_artifact(state, args)
+    if command == "history-maintain":
+        from .history import maintain
+        return maintain(state)
     if command in ("status", "list"):
         journals = state.journals()
         if command == "list":
