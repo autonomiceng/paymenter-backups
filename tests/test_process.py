@@ -154,10 +154,10 @@ class ProcessTests(unittest.TestCase):
         parent.kill()
         parent.wait()
         parent.stdout.close()
-        deadline = time.time() + 3
-        while process_identity(child_pid) and time.time() < deadline:
+        deadline = time.monotonic() + 3
+        while (identity := process_identity(child_pid)) and time.monotonic() < deadline:
             time.sleep(.02)
-        self.assertIsNone(process_identity(child_pid))
+        self.assertIsNone(identity)
 
     def test_pipe_output_bound_refuses_without_consuming_unbounded_output(self):
         with self.assertRaisesRegex(BackupError, "child-output-limit"):
