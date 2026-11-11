@@ -69,8 +69,10 @@ provider work. A frozen delivery intent still protects its files until delivery
 finishes or the existing explicit Delete action safely removes the run.
 
 Retryable capture-tool failures have a budget of at most three attempts within
-the existing request age; admission contention does not consume that budget.
-Interrupted workers also respect it. A failed or timed-out mysql inventory check
+the existing request age. Database-online requests carrying `job_wait_since`
+retain these retries past `request_max_age`; schedule supersession still applies.
+Admission contention does not consume the attempt budget. Interrupted workers
+also respect it. A failed or timed-out mysql inventory check
 is terminal with `database-inventory-failed`, without automatic retry or deferral.
 Scheduled extension changes skip to the next full slot instead.
 Repeated capture failure needs inspection because another automatic copy cannot
@@ -131,8 +133,10 @@ and queue.lock as 0600 owner-private regular files and validates existing
 descriptors without acquiring these launcher locks. Full capture requires these
 locks. When finite jobs have verified cooperative locks, database-only capture
 takes those locks, waits up to max(lock_timeout, 60 seconds), and defers while
-a guarded finite job still holds its lock. This spans the suggested queue worker's
-50-second run; billing admission reserves that wait. It uses
+a guarded finite job still holds its lock. This spans the fallback queue suggestion's
+`--max-time=50` run; an existing coordinated crontab worker is preserved and may
+run longer (for example, `--max-time=300`), deferring capture beyond that wait.
+Billing admission reserves the bounded wait. Database-only capture uses
 no maintenance mode or drain. Locks keep a multi-step job out of the dump; a
 transactional snapshot alone cannot make its separate writes atomic.
 Continuous workers, including stock systemd `queue:work`, may keep running during
