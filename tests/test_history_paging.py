@@ -353,12 +353,17 @@ class HistoryPaging(PrivateFixture):
             $ascending = $fixture->page(1, 3, null, true);
             \Paymenter\Extensions\Others\Backups\Runtime::$rows = [];
             $damaged = $fixture->page(2, 3, null, false);
+            $damagedSearch = $fixture->page(1, 3, 'deleted-3', false);
+            $unreadableSearch = $fixture->page(1, 20, 'Unreadable', false);
             $fixture->showDeleted = false;
+            $hiddenSearch = $fixture->page(1, 3, 'deleted-3', false);
             $hidden = $fixture->page(1, 3, null, false);
             echo json_encode(['total' => $first->total(), 'first' => array_column($first->items(), '__key'),
                 'reads' => $reads, 'second' => array_column($second->items(), '__key'), 'second_reads' => $secondReads,
                 'search' => $search->total(), 'ascending' => array_column($ascending->items(), '__key'),
-                'damaged' => array_column($damaged->items(), 'kind'), 'hidden' => $hidden->total(), 'deleted' => $fixture->deleted()]);
+                'damaged' => array_column($damaged->items(), 'kind'), 'damaged_search' => $damagedSearch->items(),
+                'unreadable_search' => $unreadableSearch->total(), 'hidden_search' => $hiddenSearch->total(),
+                'hidden' => $hidden->total(), 'deleted' => $fixture->deleted()]);
         }'''
         result = subprocess.run([PHP, '-r', code], input=json.dumps(data), text=True, capture_output=True,
                                 cwd=pathlib.Path(__file__).resolve().parents[1], check=False, timeout=10)
@@ -372,6 +377,13 @@ class HistoryPaging(PrivateFixture):
         self.assertEqual(value['ascending'], ['deleted-7', 'deleted-6', 'deleted-5'])
         self.assertEqual(value['search'], 8)
         self.assertEqual(value['damaged'], ['history-error'] * 3)
+        self.assertEqual(len(value['damaged_search']), 1)
+        self.assertEqual(value['damaged_search'][0]['__key'], 'deleted-3')
+        self.assertEqual(value['damaged_search'][0]['kind'], 'history-error')
+        self.assertIsNone(value['damaged_search'][0]['run_id'])
+        self.assertIsNone(value['damaged_search'][0]['run'])
+        self.assertEqual(value['unreadable_search'], 8)
+        self.assertEqual(value['hidden_search'], 0)
         self.assertEqual(value['hidden'], 1)
         self.assertTrue(value['deleted'])
 
