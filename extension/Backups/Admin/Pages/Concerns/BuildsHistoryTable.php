@@ -159,7 +159,7 @@ trait BuildsHistoryTable
     {
         return ['__key' => $id, 'kind' => 'history-error', 'run_id' => null, 'run' => null,
             'request_id' => null, 'created_at' => $createdAt, 'type' => 'Unknown', 'origin' => null,
-            'status_label' => 'Unreadable', 'status_color' => 'danger', 'detail' => Messages::error('state-unreadable'),
+            'status_label' => 'Unreadable', 'status_color' => 'danger', 'detail' => Messages::error('state-unreadable') . ' Backup ID: ' . $id,
             'size' => null, 'size_label' => '—', 'location' => '—', 'cancel_request' => null];
     }
 
