@@ -74,6 +74,23 @@ class HistoryPaging(PrivateFixture):
         from paymenter_backups.engine import plan
         self.assertIn('recovery-required', plan(self.state, self.envelope, probe_locks=False)['admission_errors'])
 
+    def test_archive_failure_keeps_recovery_status_visible(self):
+        from paymenter_backups import presentation
+        archive, _ = self.backup('recovering', created_at=fixture.NOW)
+        journal = self.item('recovering')
+        journal['service_recovered'] = False
+        self.state.save(journal)
+        for damage in ('changed', 'missing'):
+            if damage == 'changed':
+                archive.write_bytes(b'corrupted archive')
+            else:
+                archive.unlink()
+            for alive, status in ((False, 'attention'), (True, 'running')):
+                with self.subTest(damage=damage, alive=alive), patch.object(presentation, 'alive', return_value=alive):
+                    row = next(row for row in overview(self.state)['runs'] if row['run_id'] == 'recovering')
+                    self.assertEqual(row['status'], status)
+                    self.assertNotIn(row['download'], (None, 'ready', 'verify'))
+
     def test_recent_run_moves_to_cold_at_13_months_without_changing_its_manifest(self):
         original = self.deleted_run(at=fixture.NOW - 86400)
         self.sweep()

@@ -103,7 +103,8 @@ def run_entry(state, item, active_runs, envelope=None):
                 entry["download"] = "ready" if artifacts.verification_current(artifact) else "verify"
         except BackupError as error:
             entry["download"] = code(error.code)
-            entry["status"] = "damaged"
+            if status not in ("running", "attention"):
+                entry["status"] = "damaged"
             if error.code in ("artifact-missing", "artifact-location-invalid", "run-incomplete"):
                 entry["local"] = False
     intent = item.get("delete_intent") or item.get("retention_delete_intent")
