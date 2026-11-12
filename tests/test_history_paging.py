@@ -389,7 +389,8 @@ class HistoryPaging(PrivateFixture):
             echo json_encode(['total' => $first->total(), 'first' => array_column($first->items(), '__key'),
                 'reads' => $reads, 'second' => array_column($second->items(), '__key'), 'second_reads' => $secondReads,
                 'search' => $search->total(), 'ascending' => array_column($ascending->items(), '__key'),
-                'damaged' => array_column($damaged->items(), 'kind'), 'damaged_search' => $damagedSearch->items(),
+                'damaged' => array_column($damaged->items(), 'kind'), 'damaged_rows' => $damaged->items(), 'damaged_search' => $damagedSearch->items(),
+                'unreadable_rows' => $unreadableSearch->items(),
                 'unreadable_search' => $unreadableSearch->total(), 'hidden_search' => $hiddenSearch->total(),
                 'hidden' => $hidden->total(), 'deleted' => $fixture->deleted()]);
         }'''
@@ -410,6 +411,8 @@ class HistoryPaging(PrivateFixture):
         self.assertEqual(value['damaged_search'][0]['kind'], 'history-error')
         self.assertIsNone(value['damaged_search'][0]['run_id'])
         self.assertIsNone(value['damaged_search'][0]['run'])
+        for row in value['damaged_rows'] + value['unreadable_rows'] + value['damaged_search']:
+            self.assertIn(row['__key'], row['detail'], 'The visible note must identify each unreadable entry')
         self.assertEqual(value['unreadable_search'], 8)
         self.assertEqual(value['hidden_search'], 0)
         self.assertEqual(value['hidden'], 1)
