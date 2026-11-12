@@ -197,6 +197,9 @@ trait BuildsPageContent
                 [$this->link('storageS3', 'Set up S3', $this->settingsUrl('s3'))->label(fn () => $this->uploadsToS3() ? 'Change' : 'Set up S3')]),
             Sheet::row(Sheet::hint(TextEntry::make('storage_keep')->label('Keep'), $this->keepHint())->state(function () {
                 $values = $this->formValues();
+                if ($this->settingsVersion() < 2) {
+                    return 'Newest ' . (int) ($values['retention_keep_full'] ?? 0) . ' backups';
+                }
                 return 'Newest ' . (int) ($values['retention_keep_full'] ?? 0) . ' full and ' . (int) ($values['retention_keep_database'] ?? 0) . ' database backups';
             })->belowContent(fn () => [Text::make(($this->formValues()['automatic_retention'] ?? true) ? 'Cleanup runs after each backup.' : 'Automatic cleanup is off.')]),
                 [$this->applyRetentionAction()->button()->outlined()->size(Size::Small)]),

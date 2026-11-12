@@ -170,6 +170,56 @@ class HistoryRetention(PrivateFixture):
         self.assertFalse(requests.path(self.state, item['request_id']).exists())
         self.assertEqual(len(list((self.state.root / 'history/v1/requests').glob('*.json'))), 1)
 
+    def test_history_parents_are_durable_before_receipt_and_move_even_on_retry(self):
+        from paymenter_backups import history
+        item = self.complete_request(slot='durable-slot')
+        root = self.state.root / 'history/v1'
+        synced = []
+        publish = history.atomic_json
+
+        def durable():
+            self.assertIn(self.state.root, synced)
+            self.assertIn(root.parent, synced)
+            self.assertGreaterEqual(synced.count(root), 6)
+
+        def receipt(path, value):
+            durable()
+            publish(path, value)
+
+        def interrupted(source, target):
+            durable()
+            raise OSError('controlled crash before move')
+
+        # The second attempt sees a hierarchy and receipt left by the first.
+        for attempt in range(2):
+            with self.subTest(attempt=attempt):
+                synced.clear()
+                with patch.object(history, 'sync', side_effect=synced.append), patch.object(
+                        history, 'atomic_json', side_effect=receipt), patch.object(
+                        history, 'move', side_effect=interrupted):
+                    history.maintain(self.state, NOW)
+                self.assertTrue(requests.path(self.state, item['request_id']).exists())
+        history.maintain(self.state, NOW)
+        self.assertEqual(requests.create(self.state, 'destination-test', slot='durable-slot')['status'], 'complete')
+
+    def test_receipt_retry_crossing_cold_boundary_keeps_recorded_destination(self):
+        from paymenter_backups import history
+        at = datetime.datetime(2025, 10, 11, tzinfo=datetime.timezone.utc).timestamp()
+        item = self.complete_request(at, slot='boundary-crash-slot')
+        with patch.object(history, 'move', side_effect=OSError('controlled crash before move')):
+            history.maintain(self.state, NOW)
+        root = history.layout(self.state)
+        key = root / 'request-keys' / (item['request_id'] + '.json')
+        receipt = read_json(key)
+        self.assertIn('recent_name', receipt)
+        report = history.maintain(self.state, NOW + 86400)
+        self.assertEqual(report['unclassified'], [])
+        self.assertEqual(report['damaged'], [])
+        self.assertFalse(requests.path(self.state, item['request_id']).exists())
+        self.assertEqual(read_json(root / 'requests' / receipt['cold_name']), item)
+        self.assertEqual(read_json(key), receipt)
+        self.assertEqual(requests.create(self.state, 'destination-test', slot='boundary-crash-slot')['status'], 'complete')
+
     def test_damaged_or_foreign_cold_records_are_retained_and_reported(self):
         self.complete_request(slot='damaged-slot')
         self.sweep()
@@ -181,6 +231,34 @@ class HistoryRetention(PrivateFixture):
         self.assertEqual(report['damaged'][0]['code'], 'state-unreadable')
         requests.create(self.state, 'destination-test', slot='new-active-slot')
         self.assertEqual(len(requests.list_requests(self.state)), 1)
+
+    def test_tick_expiry_records_terminal_time_and_can_archive(self):
+        with patch.object(requests.time, 'time', return_value=OLD):
+            item = requests.create(self.state, 'retention')
+        self.tick(NOW)
+        expired = requests.read_request(self.state, item['request_id'])
+        self.assertEqual(expired['status'], 'expired')
+        self.assertEqual(expired.get('finished_at'), NOW)
+        self.sweep(NOW + 450 * 86400)
+        self.assertFalse(requests.path(self.state, item['request_id']).exists())
+
+    def test_tick_capture_completion_records_missing_time_and_preserves_existing_time(self):
+        for index, finished in enumerate((None, NOW - 10)):
+            with self.subTest(finished=finished):
+                item = requests.create(self.state, arguments={'mode': 'database-online'})
+                item.update(status='running', created_at=NOW - 30)
+                if finished is not None:
+                    item['finished_at'] = finished
+                atomic_json(requests.path(self.state, item['request_id']), item)
+                run_id = 'tick-complete-' + str(index)
+                self.backup(run_id, created_at=NOW - 30)
+                journal = self.item(run_id)
+                journal.update(request_id=item['request_id'], delivery_required=False)
+                self.state.save(journal)
+                self.tick(NOW)
+                complete = requests.read_request(self.state, item['request_id'])
+                self.assertEqual(complete['status'], 'complete')
+                self.assertEqual(complete.get('finished_at'), NOW if finished is None else finished)
 
     def test_busy_run_lock_skips_maintenance_without_lock_inversion(self):
         item = self.complete_request()

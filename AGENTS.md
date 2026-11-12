@@ -13,6 +13,10 @@ state and encrypted credentials belong in an owner-private directory outside the
 application and all web roots. Use disposable fixtures and fake credentials.
 Keep deployment credentials and private operational logs outside the repository.
 
+Keep administrator UI brand neutral and use native Filament components. The host
+application owns appearance, including colors, typography and shared admin styles.
+Do not add extension-specific branding or theme overrides.
+
 Paymenter must stay upgradable without extension releases. Follow [Keeping Paymenter upgradable](docs/ARCHITECTURE.md#keeping-paymenter-upgradable): no container rebinding, native route remaps, global hooks or version gates.
 
 Set up a Python virtual environment and install `requirements-s3.lock` with

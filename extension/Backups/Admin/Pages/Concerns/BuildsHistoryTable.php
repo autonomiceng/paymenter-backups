@@ -130,6 +130,12 @@ trait BuildsHistoryTable
         // page reads only open the selected terminal payloads.
         if (trim($search ?? '') !== '' && $recent) {
             $rows = $this->historyRows($this->showDeleted, $load(array_column($recent, 'run_id')));
+            $loaded = array_column($rows, null, '__key');
+            foreach ($recent as $entry) {
+                if (!isset($loaded[$entry['run_id']])) {
+                    $rows[] = self::unreadableHistoryRow($entry['run_id'], $entry['created_at']);
+                }
+            }
             $recent = [];
         }
         $rows = HistorySearch::filter($rows, $search);
@@ -144,12 +150,17 @@ trait BuildsHistoryTable
         if ($ids) {
             $loaded = array_column($this->historyRows(true, $load($ids)), null, '__key');
             $rows = array_map(static fn ($row) => ($row['history_pending'] ?? false)
-                ? ($loaded[$row['__key']] ?? ['__key' => $row['__key'], 'kind' => 'history-error', 'run_id' => null, 'run' => null,
-                    'request_id' => null, 'created_at' => $row['created_at'], 'type' => 'Unknown', 'origin' => null,
-                    'status_label' => 'Unreadable', 'status_color' => 'danger', 'detail' => Messages::error('state-unreadable'),
-                    'size' => null, 'size_label' => '—', 'location' => '—', 'cancel_request' => null]) : $row, $rows);
+                ? ($loaded[$row['__key']] ?? self::unreadableHistoryRow($row['__key'], $row['created_at'])) : $row, $rows);
         }
         return new LengthAwarePaginator($rows, $total, $perPage, $page);
+    }
+
+    private static function unreadableHistoryRow(string $id, ?float $createdAt): array
+    {
+        return ['__key' => $id, 'kind' => 'history-error', 'run_id' => null, 'run' => null,
+            'request_id' => null, 'created_at' => $createdAt, 'type' => 'Unknown', 'origin' => null,
+            'status_label' => 'Unreadable', 'status_color' => 'danger', 'detail' => Messages::error('state-unreadable'),
+            'size' => null, 'size_label' => '—', 'location' => '—', 'cancel_request' => null];
     }
 
     public function table(Table $table): Table

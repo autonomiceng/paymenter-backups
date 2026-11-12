@@ -25,8 +25,10 @@ HEX_DIGEST = re.compile(r"[0-9a-f]{64}")
 def journal(state, run_id):
     path = state.run_path(run_id) / "journal.json"
     if not path.exists() and not path.is_symlink():
-        from .history import recent_path
-        path = recent_path(state, 'runs', run_id) or path
+        from .history import recent_record
+        item = recent_record(state, 'runs', run_id)
+        if item is not None:
+            return item
     try:
         private_file(path)
     except FileNotFoundError:

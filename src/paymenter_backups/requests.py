@@ -33,16 +33,26 @@ def resume_delivery(item, journal):
         item["delivery_scope"] = journal["delivery_scope"]
 
 
-def path(state, request_id):
+def path(state, request_id, history=True):
     # Reuse the strict run-ID grammar without creating a run.
     state.run_path(request_id)
     target = state.root / "requests" / (request_id + ".json")
     if target.is_symlink():
         raise BackupError("private-state-permissions")
-    if not target.exists():
+    if history and not target.exists():
         from .history import recent_path
         return recent_path(state, 'requests', request_id) or target
     return target
+
+
+def read_request(state, request_id):
+    target = path(state, request_id, history=False)
+    if not target.exists():
+        from .history import recent_record
+        item = recent_record(state, 'requests', request_id)
+        if item is not None:
+            return item
+    return read_json(target)
 
 
 def create(state, action="run", arguments=None, slot=None, scheduled_metadata=None):
@@ -109,7 +119,7 @@ def list_requests(state, history=True):
     return items
 
 
-def iter_evidence(state, *, actions, statuses):
+def iter_evidence(state, *, actions, statuses, terminal_after=None):
     """Read work first, then one matching terminal payload at a time.
 
     Receipt metadata selects evidence without decoding unrelated history.
@@ -126,6 +136,8 @@ def iter_evidence(state, *, actions, statuses):
     for entry in recent_index(state, 'requests'):
         if entry['id'] is None or entry['id'] in seen:
             continue
+        if terminal_after is not None and entry['terminal_at'] is not None and entry['terminal_at'] < terminal_after:
+            continue  # Callers that pass terminal_after only need history finished after it.
         try:
             receipt = replay(state, entry['id'])
             if receipt is None or not matches(receipt):
@@ -139,19 +151,19 @@ def iter_evidence(state, *, actions, statuses):
 
 def cancel(state, request_id):
     # Match the run -> requests lock order used by coverage reconciliation.
-    needs_run_lock = read_json(path(state, request_id))["action"] == "deliver"
+    needs_run_lock = read_request(state, request_id)["action"] == "deliver"
     with contextlib.ExitStack() as locks:
         if needs_run_lock:
             locks.enter_context(state.lock())
         locks.enter_context(state.lock("requests.lock"))
-        item = read_json(path(state, request_id))
+        item = read_request(state, request_id)
         if item["action"] == "deliver" and not needs_run_lock:
             # A worker/tick converted the request. Release requests.lock before
             # taking the journal lock, then re-read status and action below.
             locks.close()
             locks.enter_context(state.lock())
             locks.enter_context(state.lock("requests.lock"))
-            item = read_json(path(state, request_id))
+            item = read_request(state, request_id)
         if item["status"] not in ("pending", "deferred"):
             raise BackupError("request-not-cancellable")
         item["status"] = "cancelled"
@@ -330,6 +342,7 @@ def tick(state, envelope, command_prefix, envelope_loader=None, database_context
                             resume_delivery(item, journal)
                         else:
                             item.update(status="complete", result={"run_id": journal["run_id"], "local_complete": journal.get("local_complete", False)})
+                            item.setdefault("finished_at", now)
                             atomic_json(path(state, item["request_id"]), item)
                             continue
                     elif item.get("capture_attempts", 0) >= CAPTURE_ATTEMPTS:
@@ -351,6 +364,7 @@ def tick(state, envelope, command_prefix, envelope_loader=None, database_context
                                     and "job_wait_since" in item)
                 if item["action"] != "deliver" and now - item["created_at"] > settings["request_max_age"] and not waiting_for_jobs:
                     item["status"] = "expired"
+                    item.setdefault("finished_at", now)
                     atomic_json(path(state, item["request_id"]), item)
                     continue
                 # Freeze old mode-less pending requests before any later edit.
@@ -488,7 +502,7 @@ def worker(state, envelope, request_id, envelope_loader=None, database_context=N
     from .engine import capture, verify
     from .storage import delete_run, deliver, destination_test, retention, retrieve
     with state.lock("requests.lock"):
-        item = read_json(path(state, request_id))
+        item = read_request(state, request_id)
         if item["status"] != "launching":
             raise BackupError("request-not-launchable")
         item.update({"status": "running", "worker": process_identity(__import__("os").getpid())})

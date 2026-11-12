@@ -19,7 +19,7 @@ from .common import BackupError, private_file, read_json, safe_writer_cause
 from .config import DEFAULTS
 from .engine import plan, storage_usage
 from .process import process_identity
-from .requests import ACTIVE, list_requests, next_slot
+from .requests import ACTIVE, iter_evidence, list_requests, next_slot
 
 SAFE_CODE = re.compile(r"[a-z0-9][a-z0-9-]{0,63}")
 SAFE_ID = re.compile(r"[A-Za-z0-9_-]{1,100}")
@@ -103,7 +103,8 @@ def run_entry(state, item, active_runs, envelope=None):
                 entry["download"] = "ready" if artifacts.verification_current(artifact) else "verify"
         except BackupError as error:
             entry["download"] = code(error.code)
-            entry["status"] = "damaged"
+            if status not in ("running", "attention"):
+                entry["status"] = "damaged"
             if error.code in ("artifact-missing", "artifact-location-invalid", "run-incomplete"):
                 entry["local"] = False
     intent = item.get("delete_intent") or item.get("retention_delete_intent")
@@ -411,11 +412,15 @@ def scheduler(state):
         return {"last_tick_at": None}
 
 
+def recovered_capture_at(journals):
+    return max((item.get("created_at", 0) for item in journals
+                if item.get("capture_complete") and item.get("service_recovered")), default=0)
+
+
 def job_wait_overdue(requests, journals, now):
     # Keep the first contention time across superseded hourly slots. A successful
     # full checkpoint also resolves the missing database snapshot.
-    latest = max((item.get("created_at", 0) for item in journals
-                  if item.get("capture_complete") and item.get("service_recovered")), default=0)
+    latest = recovered_capture_at(journals)
     return any(item.get("action") == "run" and item.get("arguments", {}).get("mode") == "database-online"
                and (item.get("status") != "cancelled" or item.get("error") == "schedule-superseded")
                and latest < item.get("job_wait_since", now) <= now - 86400
@@ -452,6 +457,10 @@ def overview(state, envelope=None, error=None, writer_cause=None):
         last_good[kind] = next((item['run_id'] for item in runs if item['mode'] == mode and
                               ((item['local'] and item['download'] == 'ready') or (item['remote'] in ('delivered', 'present') and item['run_id'] in verified_remote))), None)
         last_good['s3_' + kind] = next((item['run_id'] for item in runs if item['mode'] == mode and item['remote'] in ('delivered', 'present') and item['run_id'] in verified_remote), None)
+    from .history import TERMINAL
+    # A request that finished before the last recovered capture cannot carry a later wait time.
+    wait_evidence = iter_evidence(state, actions={'run'}, statuses=set(ACTIVE) | TERMINAL | {'failed'},
+                                  terminal_after=recovered_capture_at(journals)) if state.initialized else ()
     return {"schema_version": 1, "generated_at": time.time(), "initialized": state.initialized,
             "installation_uuid": state.uuid, "maintenance": (state.app / "storage/framework/down").exists(),
             "scheduler": scheduler(state) if state.initialized else {"last_tick_at": None},
@@ -460,7 +469,7 @@ def overview(state, envelope=None, error=None, writer_cause=None):
             "last_good": last_good,
             "recent_runs": [{'run_id': row['id'], 'created_at': row['created_at']} for row in recent_index(state, 'runs') if row['id'] is not None] if state.initialized else [],
             "history_errors": page['errors'],
-            "job_wait_overdue": job_wait_overdue(requests, journals, time.time()),
+            "job_wait_overdue": job_wait_overdue(wait_evidence, journals, time.time()),
             "database_job_coordination": database_job_coordination(state),
             "s3_pending": {"count": len(pending_s3) if envelope and envelope["settings"]["destination"] == "s3" else 0,
                            "oldest_at": min((number(item.get("created_at")) or 0 for item in pending_s3), default=None) if envelope and envelope["settings"]["destination"] == "s3" else None},

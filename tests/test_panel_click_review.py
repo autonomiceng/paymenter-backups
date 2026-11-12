@@ -2,6 +2,7 @@
 from html.parser import HTMLParser
 import json
 import os
+import re
 from pathlib import Path
 import subprocess
 import tempfile
@@ -48,7 +49,10 @@ $overview = ['initialized' => true, 'scheduler' => ['last_tick_at' => time()], '
                         'database-online' => ['state' => 'ready', 'items' => []]],
         'admission' => ['full-quiesced' => ['job-lock-busy'], 'database-online' => []]]];
 (new ReflectionProperty($class, 'overviewCache'))->setValue($page, $overview);
-(new ReflectionProperty($class, 'storedForm'))->setValue($page, Paymenter\Extensions\Others\Backups\Settings::DEFAULTS);
+$values = ($input['settings_version'] ?? 2) < 2
+    ? Paymenter\Extensions\Others\Backups\Settings::fromLegacy($input['settings'] ?? [])
+    : array_replace(Paymenter\Extensions\Others\Backups\Settings::DEFAULTS, $input['settings'] ?? []);
+(new ReflectionProperty($class, 'storedForm'))->setValue($page, $values);
 $call = fn ($name, ...$args) => (new ReflectionMethod($class, $name))->invoke($page, ...$args);
 function flatten($components) {
     $result = [];
@@ -101,6 +105,12 @@ if ($input['case'] === 'health') {
         }
     }
     echo json_encode(['rows' => $rows, 'verify' => $verify]);
+} elseif ($input['case'] === 'keep') {
+    foreach (flatten(Filament\Schemas\Schema::make($page)->components([$call('storageSection')])->getComponents()) as $component) {
+        if ($component instanceof Filament\Infolists\Components\TextEntry && $component->getName() === 'storage_keep') {
+            echo json_encode($component->getState());
+        }
+    }
 } elseif ($input['case'] === 'hints') {
     $record = ['__key' => 'fixture-run', 'kind' => 'run', 'run_id' => 'fixture-run', 'origin' => 'Staff', 'run' => ['run_id' => 'fixture-run',
         'status' => 'ready', 'mode' => 'full-quiesced', 'created_at' => null, 'finished_at' => null, 'verified_at' => null, 'remote' => 'none', 'local' => true, 'size' => 1, 'download' => 'ready']];
@@ -209,6 +219,13 @@ class ClickReview(unittest.TestCase):
         self.assertEqual([item['label'] for item in rows['d_verified']], ['Verify'])
         self.assertEqual(rows['d_s3'], [{'name': 'detailsSetUpS3', 'label': 'Set up S3', 'url': '/admin/backups?tab=settings#s3'}])
 
+    def test_keep_summary_counts_follow_the_stored_settings_schema(self):
+        settings = dict(retention_keep=7, retention_keep_full=3, retention_keep_database=11)
+        for version, counts in ((1, ['7']), (2, ['3', '11'])):
+            with self.subTest(version=version):
+                summary = self.page('keep', settings_version=version, settings=settings)
+                self.assertEqual(re.findall(r'\d+', summary), counts)
+
     def test_details_offer_verify_wherever_the_row_does(self):
         # A damaged copy shows Verify on its row; its Details must offer it too.
         for run in ({'status': 'damaged', 'download': 'none'}, {'status': 'ready', 'download': 'none'},
@@ -222,16 +239,16 @@ class ClickReview(unittest.TestCase):
                     {'name': 'detailsSetUpS3', 'label': 'Set up S3', 'url': '/admin/backups?tab=settings#s3'}]
                 self.assertEqual(rows.get('d_s3', []), expected_s3_actions)
 
-    def test_verify_menu_complements_the_row_and_suppresses_pending_requests(self):
+    def test_verify_menu_complements_the_row_and_suppresses_active_requests(self):
         for status in ('ready', 'damaged', 'failed'):
             for download in ('none', 'ready', 'retrieve'):
                 run = {'run_id': 'fixture-run', 'status': status, 'download': download,
                        'local': download != 'retrieve', 'remote': 'delivered' if download == 'retrieve' else 'none'}
-                for request_status in (None, 'pending', 'failed'):
+                for request_status in (None, 'pending', 'deferred', 'launching', 'running', 'failed'):
                     with self.subTest(run=run, request_status=request_status):
                         requests = [{'action': 'verify', 'status': request_status, 'run_id': run['run_id']}] if request_status else []
                         result = self.page('detail-rows', run=run, requests=requests)
-                        eligible = status in ('ready', 'damaged') and request_status != 'pending'
+                        eligible = status in ('ready', 'damaged') and request_status not in ('pending', 'deferred', 'launching', 'running')
                         self.assertEqual(result['verify'], {'verifyFirst': eligible and download == 'none',
                                                            'verify': eligible and download != 'none'})
                         self.assertEqual(bool((result['rows'] or {}).get('d_verified')), eligible)

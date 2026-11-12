@@ -341,6 +341,10 @@ and plaintext local archives containing private data and APP_KEY.
 
 ### Local history retention
 
+Before publishing history receipts or moving active payloads, maintenance syncs
+every history directory's parent, including directories left by an interrupted
+attempt. Leaf publication and source removal then sync their own directories.
+
 The tick and explicit `history-maintain` command move completed requests and
 fully deleted, recovered runs to `history/v1/requests` and `history/v1/runs`
 after 13 calendar months, and delete their cold payloads after three calendar
@@ -348,6 +352,8 @@ years from their proven terminal time. All dates use UTC. Missing terminal
 dates, unknown outcomes, unfinished intents, remaining run work and unresolved
 recovery stay active and appear in `history-maintenance.json`. Failed requests
 remain uncertain records. This policy never deletes backup artifacts.
+Tick-only completion and prelaunch expiry record a terminal timestamp when
+missing, preserving any existing finish evidence.
 The newest completed, verified storage-test request stays active as readiness
 evidence, regardless of age. A newer passing test releases the older proof to
 ordinary retention; a failed retest does not displace it.
@@ -362,6 +368,8 @@ renaming leaves the cold payload and its replay receipt. Request creation
 checks the permanent receipt before publishing a new request. Receipts never
 expire, including when their payload is deleted. Cold expiration verifies the
 receipt and checksum; damaged entries remain and are reported separately.
+Recent fallback reads verify the receipt checksum against the exact bytes
+decoded as JSON. An existing active record remains authoritative.
 Terminal records within their first 13 months move to `recent-requests` and
 `recent-runs` under the same locks, receipt and rename contract. These records
 are still active history, separate from open work. Recent filenames contain
@@ -369,11 +377,15 @@ creation and terminal UTC microseconds plus the record ID; page selection
 uses those names before decoding payloads. At 13 months, a checksum-verified
 recent payload moves to its receipt's cold name. Existing cold receipts remain
 compatible. Unclassifiable rows stay in the work set.
+An interrupted source move resumes to the receipt's recorded recent or cold
+destination, even across an age boundary, before ordinary cooling applies.
 
 Tick, recovery, admission and storage enumerate the work set. Overview reads
 that set plus the latest 30 terminal requests; all unresolved runs remain
-visible regardless of page. Its `recent_runs` contains IDs and creation times
-from filenames, without opening terminal journals. The administrator table
+visible regardless of page. Job-wait warnings select run-request evidence
+independently of the display page, preserving contention across superseded
+hourly slots. Its `recent_runs` contains IDs and creation times from filenames,
+without opening terminal journals. The administrator table
 merges these names with live rows, selects a page, then requests only those
 terminal payloads. Explicit full-field searches read recent deleted records
 to preserve the existing search behavior. The read-only

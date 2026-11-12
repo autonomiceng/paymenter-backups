@@ -74,6 +74,23 @@ class HistoryPaging(PrivateFixture):
         from paymenter_backups.engine import plan
         self.assertIn('recovery-required', plan(self.state, self.envelope, probe_locks=False)['admission_errors'])
 
+    def test_archive_failure_keeps_recovery_status_visible(self):
+        from paymenter_backups import presentation
+        archive, _ = self.backup('recovering', created_at=fixture.NOW)
+        journal = self.item('recovering')
+        journal['service_recovered'] = False
+        self.state.save(journal)
+        for damage in ('changed', 'missing'):
+            if damage == 'changed':
+                archive.write_bytes(b'corrupted archive')
+            else:
+                archive.unlink()
+            for alive, status in ((False, 'attention'), (True, 'running')):
+                with self.subTest(damage=damage, alive=alive), patch.object(presentation, 'alive', return_value=alive):
+                    row = next(row for row in overview(self.state)['runs'] if row['run_id'] == 'recovering')
+                    self.assertEqual(row['status'], status)
+                    self.assertNotIn(row['download'], (None, 'ready', 'verify'))
+
     def test_recent_run_moves_to_cold_at_13_months_without_changing_its_manifest(self):
         original = self.deleted_run(at=fixture.NOW - 86400)
         self.sweep()
@@ -99,6 +116,34 @@ class HistoryPaging(PrivateFixture):
         self.assertEqual(result['recent_runs'][0]['run_id'], 'old-run')
         self.assertEqual(result['requests'][0]['request_id'], items[0]['request_id'])
 
+    def test_job_wait_evidence_survives_supersession_and_history_page_eviction(self):
+        at = fixture.NOW - 2 * 86400
+        first = self.complete_request(at)
+        first.update(action='run', arguments={'mode': 'database-online'}, status='cancelled',
+                     error='schedule-superseded', job_wait_since=at)
+        atomic_json(requests.path(self.state, first['request_id']), first)
+        current = requests.create(self.state, arguments={'mode': 'database-online'})
+        current.update(status='deferred', created_at=fixture.NOW - 60, job_wait_since=fixture.NOW - 60)
+        atomic_json(requests.path(self.state, current['request_id']), current)
+        for index in range(35):
+            self.complete_request(fixture.NOW - index * 60)
+        self.sweep()
+        with patch('paymenter_backups.presentation.time.time', return_value=fixture.NOW):
+            result = overview(self.state)
+            self.assertNotIn(first['request_id'], [row['request_id'] for row in result['requests']])
+            self.assertTrue(result['job_wait_overdue'])
+            self.backup('new-full', mode='full-quiesced', created_at=fixture.NOW - 30)
+            journal = self.item('new-full')
+            journal['service_recovered'] = False
+            self.state.save(journal)
+            self.assertTrue(overview(self.state)['job_wait_overdue'])
+            journal['service_recovered'] = True
+            self.state.save(journal)
+            with patch('paymenter_backups.history.replay', wraps=history.replay) as replayed:
+                self.assertFalse(overview(self.state)['job_wait_overdue'])
+            # Only history finished after the recovered capture is reread for wait evidence.
+            self.assertLessEqual(replayed.call_count, 1)
+
     def test_recent_slot_replay_does_not_read_a_damaged_payload(self):
         item = self.complete_request(fixture.NOW - 86400, slot='recent-damaged-slot')
         self.sweep()
@@ -108,6 +153,35 @@ class HistoryPaging(PrivateFixture):
         replay = requests.create(self.state, 'destination-test', slot='recent-damaged-slot')
         self.assertEqual(replay['request_id'], item['request_id'])
         self.assertEqual(replay['status'], 'complete')
+
+    def test_run_fallback_refuses_changed_audit_payload_but_active_record_wins(self):
+        from paymenter_backups import artifacts
+        original = self.deleted_run(at=fixture.NOW - 86400)
+        self.sweep()
+        self.assertEqual(artifacts.journal(self.state, 'old-run'), original)
+        root = history.layout(self.state)
+        receipt = read_json(root / 'run-keys/old-run.json')
+        target = root / 'recent-runs' / receipt['recent_name']
+        atomic_json(target, dict(original, retained_deleted=False))
+        with self.assertRaisesRegex(BackupError, 'history-payload-conflict'):
+            artifacts.journal(self.state, 'old-run')
+        self.state.run_path('old-run').mkdir(mode=0o700)
+        atomic_json(self.state.run_path('old-run') / 'journal.json', original)
+        self.assertEqual(artifacts.journal(self.state, 'old-run'), original)
+
+    def test_request_fallback_refuses_changed_terminal_status(self):
+        item = self.complete_request(fixture.NOW - 86400)
+        self.sweep()
+        with self.assertRaisesRegex(BackupError, 'request-not-cancellable'):
+            requests.cancel(self.state, item['request_id'])
+        root = history.layout(self.state)
+        receipt = read_json(root / 'request-keys' / (item['request_id'] + '.json'))
+        atomic_json(root / 'recent-requests' / receipt['recent_name'], dict(item, status='pending'))
+        with self.assertRaisesRegex(BackupError, 'history-payload-conflict'):
+            requests.cancel(self.state, item['request_id'])
+        atomic_json(self.state.root / 'requests' / (item['request_id'] + '.json'), item)
+        with self.assertRaisesRegex(BackupError, 'request-not-cancellable'):
+            requests.cancel(self.state, item['request_id'])
 
     def damage_request(self, item):
         root = history.layout(self.state)
@@ -307,12 +381,17 @@ class HistoryPaging(PrivateFixture):
             $ascending = $fixture->page(1, 3, null, true);
             \Paymenter\Extensions\Others\Backups\Runtime::$rows = [];
             $damaged = $fixture->page(2, 3, null, false);
+            $damagedSearch = $fixture->page(1, 3, 'deleted-3', false);
+            $unreadableSearch = $fixture->page(1, 20, 'Unreadable', false);
             $fixture->showDeleted = false;
+            $hiddenSearch = $fixture->page(1, 3, 'deleted-3', false);
             $hidden = $fixture->page(1, 3, null, false);
             echo json_encode(['total' => $first->total(), 'first' => array_column($first->items(), '__key'),
                 'reads' => $reads, 'second' => array_column($second->items(), '__key'), 'second_reads' => $secondReads,
                 'search' => $search->total(), 'ascending' => array_column($ascending->items(), '__key'),
-                'damaged' => array_column($damaged->items(), 'kind'), 'hidden' => $hidden->total(), 'deleted' => $fixture->deleted()]);
+                'damaged' => array_column($damaged->items(), 'kind'), 'damaged_search' => $damagedSearch->items(),
+                'unreadable_search' => $unreadableSearch->total(), 'hidden_search' => $hiddenSearch->total(),
+                'hidden' => $hidden->total(), 'deleted' => $fixture->deleted()]);
         }'''
         result = subprocess.run([PHP, '-r', code], input=json.dumps(data), text=True, capture_output=True,
                                 cwd=pathlib.Path(__file__).resolve().parents[1], check=False, timeout=10)
@@ -326,6 +405,13 @@ class HistoryPaging(PrivateFixture):
         self.assertEqual(value['ascending'], ['deleted-7', 'deleted-6', 'deleted-5'])
         self.assertEqual(value['search'], 8)
         self.assertEqual(value['damaged'], ['history-error'] * 3)
+        self.assertEqual(len(value['damaged_search']), 1)
+        self.assertEqual(value['damaged_search'][0]['__key'], 'deleted-3')
+        self.assertEqual(value['damaged_search'][0]['kind'], 'history-error')
+        self.assertIsNone(value['damaged_search'][0]['run_id'])
+        self.assertIsNone(value['damaged_search'][0]['run'])
+        self.assertEqual(value['unreadable_search'], 8)
+        self.assertEqual(value['hidden_search'], 0)
         self.assertEqual(value['hidden'], 1)
         self.assertTrue(value['deleted'])
 
