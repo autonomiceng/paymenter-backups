@@ -183,11 +183,17 @@ def archive(state, root, family, source, item, at, recent=False):
         receipt['recent_name'] = recent_name
     if key_path.exists() or key_path.is_symlink():
         previous = owned(state, key_path, family, identifier)
+        # Finish the published transition before applying today's cooling age.
+        recent = 'recent_name' in previous
+        if recent:
+            receipt['recent_name'] = recent_name
+        else:
+            receipt.pop('recent_name', None)
         if previous != receipt:
             raise BackupError('history-key-conflict')
     else:
         # A crash can leave both a replay receipt and the active payload. The
-        # active payload still wins reads; retry checks the exact same receipt.
+        # active payload still wins reads; retry honors the recorded destination.
         atomic_json(key_path, receipt)
     target = root / ('recent-' + family if recent else family) / (recent_name if recent else name)
     if target.exists() or target.is_symlink():

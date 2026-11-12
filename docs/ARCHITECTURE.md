@@ -375,6 +375,8 @@ creation and terminal UTC microseconds plus the record ID; page selection
 uses those names before decoding payloads. At 13 months, a checksum-verified
 recent payload moves to its receipt's cold name. Existing cold receipts remain
 compatible. Unclassifiable rows stay in the work set.
+An interrupted source move resumes to the receipt's recorded recent or cold
+destination, even across an age boundary, before ordinary cooling applies.
 
 Tick, recovery, admission and storage enumerate the work set. Overview reads
 that set plus the latest 30 terminal requests; all unresolved runs remain

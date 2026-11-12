@@ -202,6 +202,24 @@ class HistoryRetention(PrivateFixture):
         history.maintain(self.state, NOW)
         self.assertEqual(requests.create(self.state, 'destination-test', slot='durable-slot')['status'], 'complete')
 
+    def test_receipt_retry_crossing_cold_boundary_keeps_recorded_destination(self):
+        from paymenter_backups import history
+        at = datetime.datetime(2025, 10, 11, tzinfo=datetime.timezone.utc).timestamp()
+        item = self.complete_request(at, slot='boundary-crash-slot')
+        with patch.object(history, 'move', side_effect=OSError('controlled crash before move')):
+            history.maintain(self.state, NOW)
+        root = history.layout(self.state)
+        key = root / 'request-keys' / (item['request_id'] + '.json')
+        receipt = read_json(key)
+        self.assertIn('recent_name', receipt)
+        report = history.maintain(self.state, NOW + 86400)
+        self.assertEqual(report['unclassified'], [])
+        self.assertEqual(report['damaged'], [])
+        self.assertFalse(requests.path(self.state, item['request_id']).exists())
+        self.assertEqual(read_json(root / 'requests' / receipt['cold_name']), item)
+        self.assertEqual(read_json(key), receipt)
+        self.assertEqual(requests.create(self.state, 'destination-test', slot='boundary-crash-slot')['status'], 'complete')
+
     def test_damaged_or_foreign_cold_records_are_retained_and_reported(self):
         self.complete_request(slot='damaged-slot')
         self.sweep()
