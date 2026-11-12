@@ -382,8 +382,10 @@ destination, even across an age boundary, before ordinary cooling applies.
 
 Tick, recovery, admission and storage enumerate the work set. Overview reads
 that set plus the latest 30 terminal requests; all unresolved runs remain
-visible regardless of page. Its `recent_runs` contains IDs and creation times
-from filenames, without opening terminal journals. The administrator table
+visible regardless of page. Job-wait warnings select run-request evidence
+independently of the display page, preserving contention across superseded
+hourly slots. Its `recent_runs` contains IDs and creation times from filenames,
+without opening terminal journals. The administrator table
 merges these names with live rows, selects a page, then requests only those
 terminal payloads. Explicit full-field searches read recent deleted records
 to preserve the existing search behavior. The read-only

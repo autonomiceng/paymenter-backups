@@ -116,6 +116,31 @@ class HistoryPaging(PrivateFixture):
         self.assertEqual(result['recent_runs'][0]['run_id'], 'old-run')
         self.assertEqual(result['requests'][0]['request_id'], items[0]['request_id'])
 
+    def test_job_wait_evidence_survives_supersession_and_history_page_eviction(self):
+        at = fixture.NOW - 2 * 86400
+        first = self.complete_request(at)
+        first.update(action='run', arguments={'mode': 'database-online'}, status='cancelled',
+                     error='schedule-superseded', job_wait_since=at)
+        atomic_json(requests.path(self.state, first['request_id']), first)
+        current = requests.create(self.state, arguments={'mode': 'database-online'})
+        current.update(status='deferred', created_at=fixture.NOW - 60, job_wait_since=fixture.NOW - 60)
+        atomic_json(requests.path(self.state, current['request_id']), current)
+        for index in range(35):
+            self.complete_request(fixture.NOW - index * 60)
+        self.sweep()
+        with patch('paymenter_backups.presentation.time.time', return_value=fixture.NOW):
+            result = overview(self.state)
+            self.assertNotIn(first['request_id'], [row['request_id'] for row in result['requests']])
+            self.assertTrue(result['job_wait_overdue'])
+            self.backup('new-full', mode='full-quiesced', created_at=fixture.NOW - 30)
+            journal = self.item('new-full')
+            journal['service_recovered'] = False
+            self.state.save(journal)
+            self.assertTrue(overview(self.state)['job_wait_overdue'])
+            journal['service_recovered'] = True
+            self.state.save(journal)
+            self.assertFalse(overview(self.state)['job_wait_overdue'])
+
     def test_recent_slot_replay_does_not_read_a_damaged_payload(self):
         item = self.complete_request(fixture.NOW - 86400, slot='recent-damaged-slot')
         self.sweep()

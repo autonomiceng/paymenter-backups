@@ -19,7 +19,7 @@ from .common import BackupError, private_file, read_json, safe_writer_cause
 from .config import DEFAULTS
 from .engine import plan, storage_usage
 from .process import process_identity
-from .requests import ACTIVE, list_requests, next_slot
+from .requests import ACTIVE, iter_evidence, list_requests, next_slot
 
 SAFE_CODE = re.compile(r"[a-z0-9][a-z0-9-]{0,63}")
 SAFE_ID = re.compile(r"[A-Za-z0-9_-]{1,100}")
@@ -453,6 +453,8 @@ def overview(state, envelope=None, error=None, writer_cause=None):
         last_good[kind] = next((item['run_id'] for item in runs if item['mode'] == mode and
                               ((item['local'] and item['download'] == 'ready') or (item['remote'] in ('delivered', 'present') and item['run_id'] in verified_remote))), None)
         last_good['s3_' + kind] = next((item['run_id'] for item in runs if item['mode'] == mode and item['remote'] in ('delivered', 'present') and item['run_id'] in verified_remote), None)
+    from .history import TERMINAL
+    wait_evidence = iter_evidence(state, actions={'run'}, statuses=set(ACTIVE) | TERMINAL | {'failed'}) if state.initialized else ()
     return {"schema_version": 1, "generated_at": time.time(), "initialized": state.initialized,
             "installation_uuid": state.uuid, "maintenance": (state.app / "storage/framework/down").exists(),
             "scheduler": scheduler(state) if state.initialized else {"last_tick_at": None},
@@ -461,7 +463,7 @@ def overview(state, envelope=None, error=None, writer_cause=None):
             "last_good": last_good,
             "recent_runs": [{'run_id': row['id'], 'created_at': row['created_at']} for row in recent_index(state, 'runs') if row['id'] is not None] if state.initialized else [],
             "history_errors": page['errors'],
-            "job_wait_overdue": job_wait_overdue(requests, journals, time.time()),
+            "job_wait_overdue": job_wait_overdue(wait_evidence, journals, time.time()),
             "database_job_coordination": database_job_coordination(state),
             "s3_pending": {"count": len(pending_s3) if envelope and envelope["settings"]["destination"] == "s3" else 0,
                            "oldest_at": min((number(item.get("created_at")) or 0 for item in pending_s3), default=None) if envelope and envelope["settings"]["destination"] == "s3" else None},
