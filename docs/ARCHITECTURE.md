@@ -366,6 +366,8 @@ renaming leaves the cold payload and its replay receipt. Request creation
 checks the permanent receipt before publishing a new request. Receipts never
 expire, including when their payload is deleted. Cold expiration verifies the
 receipt and checksum; damaged entries remain and are reported separately.
+Recent fallback reads verify the receipt checksum against the exact bytes
+decoded as JSON. An existing active record remains authoritative.
 Terminal records within their first 13 months move to `recent-requests` and
 `recent-runs` under the same locks, receipt and rename contract. These records
 are still active history, separate from open work. Recent filenames contain

@@ -1,6 +1,8 @@
 """Versioned cold history; replay keys remain outside expiring payloads."""
 import calendar
 import datetime
+import hashlib
+import json
 import math
 import os
 import re
@@ -46,9 +48,18 @@ def layout(state, create=False):
     return root
 
 
-def owned(state, path, family, identifier):
+def owned(state, path, family, identifier, checksum=None):
     private_file(path)
-    item = read_json(path)
+    if checksum is None:
+        item = read_json(path)
+    else:
+        try:
+            payload = path.read_bytes()
+            if hashlib.sha256(payload).hexdigest() != checksum:
+                raise BackupError('history-payload-conflict')
+            item = json.loads(payload)
+        except (OSError, ValueError, UnicodeError):
+            raise BackupError('state-unreadable') from None
     key = 'request_id' if family == 'requests' else 'run_id'
     if not isinstance(item, dict) or item.get(key) != identifier or item.get('installation_uuid') != state.uuid:
         raise BackupError('history-identity-mismatch')
@@ -309,10 +320,9 @@ def read_entry(state, family, entry, cold=False):
     key_family = 'request-keys' if family == 'requests' else 'run-keys'
     receipt = owned(state, root / key_family / (identifier + '.json'), family, identifier)
     path = root / (family if cold else 'recent-' + family) / entry['name']
-    item = owned(state, path, family, identifier)
-    if receipt.get('cold_name' if cold else 'recent_name') != path.name or receipt.get('sha256') != digest(path):
+    if receipt.get('cold_name' if cold else 'recent_name') != path.name or not isinstance(receipt.get('sha256'), str):
         raise BackupError('history-payload-conflict')
-    return item
+    return owned(state, path, family, identifier, checksum=receipt['sha256'])
 
 
 def recent_page(state, family, limit=30, offset=0, cold=False, ids=None):
@@ -352,6 +362,13 @@ def recent_path(state, family, identifier):
         return None
     private_file(path)
     return path
+
+
+def recent_record(state, family, identifier):
+    path = recent_path(state, family, identifier)
+    if path is None:
+        return None
+    return read_entry(state, family, {'id': identifier, 'name': path.name})
 
 
 def cool(state, root, before, requests, unknown_requests, report):

@@ -109,6 +109,35 @@ class HistoryPaging(PrivateFixture):
         self.assertEqual(replay['request_id'], item['request_id'])
         self.assertEqual(replay['status'], 'complete')
 
+    def test_run_fallback_refuses_changed_audit_payload_but_active_record_wins(self):
+        from paymenter_backups import artifacts
+        original = self.deleted_run(at=fixture.NOW - 86400)
+        self.sweep()
+        self.assertEqual(artifacts.journal(self.state, 'old-run'), original)
+        root = history.layout(self.state)
+        receipt = read_json(root / 'run-keys/old-run.json')
+        target = root / 'recent-runs' / receipt['recent_name']
+        atomic_json(target, dict(original, retained_deleted=False))
+        with self.assertRaisesRegex(BackupError, 'history-payload-conflict'):
+            artifacts.journal(self.state, 'old-run')
+        self.state.run_path('old-run').mkdir(mode=0o700)
+        atomic_json(self.state.run_path('old-run') / 'journal.json', original)
+        self.assertEqual(artifacts.journal(self.state, 'old-run'), original)
+
+    def test_request_fallback_refuses_changed_terminal_status(self):
+        item = self.complete_request(fixture.NOW - 86400)
+        self.sweep()
+        with self.assertRaisesRegex(BackupError, 'request-not-cancellable'):
+            requests.cancel(self.state, item['request_id'])
+        root = history.layout(self.state)
+        receipt = read_json(root / 'request-keys' / (item['request_id'] + '.json'))
+        atomic_json(root / 'recent-requests' / receipt['recent_name'], dict(item, status='pending'))
+        with self.assertRaisesRegex(BackupError, 'history-payload-conflict'):
+            requests.cancel(self.state, item['request_id'])
+        atomic_json(self.state.root / 'requests' / (item['request_id'] + '.json'), item)
+        with self.assertRaisesRegex(BackupError, 'request-not-cancellable'):
+            requests.cancel(self.state, item['request_id'])
+
     def damage_request(self, item):
         root = history.layout(self.state)
         receipt = read_json(root / 'request-keys' / (item['request_id'] + '.json'))

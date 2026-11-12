@@ -33,16 +33,26 @@ def resume_delivery(item, journal):
         item["delivery_scope"] = journal["delivery_scope"]
 
 
-def path(state, request_id):
+def path(state, request_id, history=True):
     # Reuse the strict run-ID grammar without creating a run.
     state.run_path(request_id)
     target = state.root / "requests" / (request_id + ".json")
     if target.is_symlink():
         raise BackupError("private-state-permissions")
-    if not target.exists():
+    if history and not target.exists():
         from .history import recent_path
         return recent_path(state, 'requests', request_id) or target
     return target
+
+
+def read_request(state, request_id):
+    target = path(state, request_id, history=False)
+    if not target.exists():
+        from .history import recent_record
+        item = recent_record(state, 'requests', request_id)
+        if item is not None:
+            return item
+    return read_json(target)
 
 
 def create(state, action="run", arguments=None, slot=None, scheduled_metadata=None):
@@ -139,19 +149,19 @@ def iter_evidence(state, *, actions, statuses):
 
 def cancel(state, request_id):
     # Match the run -> requests lock order used by coverage reconciliation.
-    needs_run_lock = read_json(path(state, request_id))["action"] == "deliver"
+    needs_run_lock = read_request(state, request_id)["action"] == "deliver"
     with contextlib.ExitStack() as locks:
         if needs_run_lock:
             locks.enter_context(state.lock())
         locks.enter_context(state.lock("requests.lock"))
-        item = read_json(path(state, request_id))
+        item = read_request(state, request_id)
         if item["action"] == "deliver" and not needs_run_lock:
             # A worker/tick converted the request. Release requests.lock before
             # taking the journal lock, then re-read status and action below.
             locks.close()
             locks.enter_context(state.lock())
             locks.enter_context(state.lock("requests.lock"))
-            item = read_json(path(state, request_id))
+            item = read_request(state, request_id)
         if item["status"] not in ("pending", "deferred"):
             raise BackupError("request-not-cancellable")
         item["status"] = "cancelled"
@@ -488,7 +498,7 @@ def worker(state, envelope, request_id, envelope_loader=None, database_context=N
     from .engine import capture, verify
     from .storage import delete_run, deliver, destination_test, retention, retrieve
     with state.lock("requests.lock"):
-        item = read_json(path(state, request_id))
+        item = read_request(state, request_id)
         if item["status"] != "launching":
             raise BackupError("request-not-launchable")
         item.update({"status": "running", "worker": process_identity(__import__("os").getpid())})
