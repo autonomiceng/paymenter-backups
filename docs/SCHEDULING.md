@@ -133,8 +133,9 @@ and queue.lock as 0600 owner-private regular files and validates existing
 descriptors without acquiring these launcher locks. Full capture requires these
 locks. When finite jobs have verified cooperative locks, database-only capture
 takes those locks, waits up to max(lock_timeout, 60 seconds), and defers while
-a guarded finite job still holds its lock. This spans the fallback queue suggestion's
-`--max-time=50` run; an existing coordinated crontab worker is preserved and may
+a guarded finite job still holds its lock. The fallback queue suggestion's
+`--max-time=50` limit is checked after the current job finishes, so a long job
+can exceed that wait. An existing coordinated crontab worker is preserved and may
 run longer (for example, `--max-time=300`), deferring capture beyond that wait.
 Billing admission reserves the bounded wait. Database-only capture uses
 no maintenance mode or drain. Locks keep a multi-step job out of the dump; a
