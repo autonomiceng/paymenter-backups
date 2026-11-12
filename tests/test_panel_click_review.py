@@ -239,16 +239,16 @@ class ClickReview(unittest.TestCase):
                     {'name': 'detailsSetUpS3', 'label': 'Set up S3', 'url': '/admin/backups?tab=settings#s3'}]
                 self.assertEqual(rows.get('d_s3', []), expected_s3_actions)
 
-    def test_verify_menu_complements_the_row_and_suppresses_pending_requests(self):
+    def test_verify_menu_complements_the_row_and_suppresses_active_requests(self):
         for status in ('ready', 'damaged', 'failed'):
             for download in ('none', 'ready', 'retrieve'):
                 run = {'run_id': 'fixture-run', 'status': status, 'download': download,
                        'local': download != 'retrieve', 'remote': 'delivered' if download == 'retrieve' else 'none'}
-                for request_status in (None, 'pending', 'failed'):
+                for request_status in (None, 'pending', 'deferred', 'launching', 'running', 'failed'):
                     with self.subTest(run=run, request_status=request_status):
                         requests = [{'action': 'verify', 'status': request_status, 'run_id': run['run_id']}] if request_status else []
                         result = self.page('detail-rows', run=run, requests=requests)
-                        eligible = status in ('ready', 'damaged') and request_status != 'pending'
+                        eligible = status in ('ready', 'damaged') and request_status not in ('pending', 'deferred', 'launching', 'running')
                         self.assertEqual(result['verify'], {'verifyFirst': eligible and download == 'none',
                                                            'verify': eligible and download != 'none'})
                         self.assertEqual(bool((result['rows'] or {}).get('d_verified')), eligible)
