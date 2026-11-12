@@ -34,10 +34,15 @@ def layout(state, create=False):
     for path in (root, root / 'v1'):
         if not directory(path, create):
             return None
+        if create:
+            sync(path.parent)
     root /= 'v1'
     for family in ('requests', 'runs', 'request-keys', 'run-keys', 'recent-requests', 'recent-runs'):
         if not directory(root / family, create) and not family.startswith('recent-'):
             return None
+        if create:
+            # Retry also flushes entries left by an interrupted mkdir sequence.
+            sync(root)
     return root
 
 

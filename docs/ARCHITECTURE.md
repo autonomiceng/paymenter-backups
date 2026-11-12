@@ -341,6 +341,10 @@ and plaintext local archives containing private data and APP_KEY.
 
 ### Local history retention
 
+Before publishing history receipts or moving active payloads, maintenance syncs
+every history directory's parent, including directories left by an interrupted
+attempt. Leaf publication and source removal then sync their own directories.
+
 The tick and explicit `history-maintain` command move completed requests and
 fully deleted, recovered runs to `history/v1/requests` and `history/v1/runs`
 after 13 calendar months, and delete their cold payloads after three calendar

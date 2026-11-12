@@ -170,6 +170,38 @@ class HistoryRetention(PrivateFixture):
         self.assertFalse(requests.path(self.state, item['request_id']).exists())
         self.assertEqual(len(list((self.state.root / 'history/v1/requests').glob('*.json'))), 1)
 
+    def test_history_parents_are_durable_before_receipt_and_move_even_on_retry(self):
+        from paymenter_backups import history
+        item = self.complete_request(slot='durable-slot')
+        root = self.state.root / 'history/v1'
+        synced = []
+        publish = history.atomic_json
+
+        def durable():
+            self.assertIn(self.state.root, synced)
+            self.assertIn(root.parent, synced)
+            self.assertGreaterEqual(synced.count(root), 6)
+
+        def receipt(path, value):
+            durable()
+            publish(path, value)
+
+        def interrupted(source, target):
+            durable()
+            raise OSError('controlled crash before move')
+
+        # The second attempt sees a hierarchy and receipt left by the first.
+        for attempt in range(2):
+            with self.subTest(attempt=attempt):
+                synced.clear()
+                with patch.object(history, 'sync', side_effect=synced.append), patch.object(
+                        history, 'atomic_json', side_effect=receipt), patch.object(
+                        history, 'move', side_effect=interrupted):
+                    history.maintain(self.state, NOW)
+                self.assertTrue(requests.path(self.state, item['request_id']).exists())
+        history.maintain(self.state, NOW)
+        self.assertEqual(requests.create(self.state, 'destination-test', slot='durable-slot')['status'], 'complete')
+
     def test_damaged_or_foreign_cold_records_are_retained_and_reported(self):
         self.complete_request(slot='damaged-slot')
         self.sweep()
