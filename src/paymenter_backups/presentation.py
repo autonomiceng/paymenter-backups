@@ -412,11 +412,15 @@ def scheduler(state):
         return {"last_tick_at": None}
 
 
+def recovered_capture_at(journals):
+    return max((item.get("created_at", 0) for item in journals
+                if item.get("capture_complete") and item.get("service_recovered")), default=0)
+
+
 def job_wait_overdue(requests, journals, now):
     # Keep the first contention time across superseded hourly slots. A successful
     # full checkpoint also resolves the missing database snapshot.
-    latest = max((item.get("created_at", 0) for item in journals
-                  if item.get("capture_complete") and item.get("service_recovered")), default=0)
+    latest = recovered_capture_at(journals)
     return any(item.get("action") == "run" and item.get("arguments", {}).get("mode") == "database-online"
                and (item.get("status") != "cancelled" or item.get("error") == "schedule-superseded")
                and latest < item.get("job_wait_since", now) <= now - 86400
@@ -454,7 +458,9 @@ def overview(state, envelope=None, error=None, writer_cause=None):
                               ((item['local'] and item['download'] == 'ready') or (item['remote'] in ('delivered', 'present') and item['run_id'] in verified_remote))), None)
         last_good['s3_' + kind] = next((item['run_id'] for item in runs if item['mode'] == mode and item['remote'] in ('delivered', 'present') and item['run_id'] in verified_remote), None)
     from .history import TERMINAL
-    wait_evidence = iter_evidence(state, actions={'run'}, statuses=set(ACTIVE) | TERMINAL | {'failed'}) if state.initialized else ()
+    # A request that finished before the last recovered capture cannot carry a later wait time.
+    wait_evidence = iter_evidence(state, actions={'run'}, statuses=set(ACTIVE) | TERMINAL | {'failed'},
+                                  terminal_after=recovered_capture_at(journals)) if state.initialized else ()
     return {"schema_version": 1, "generated_at": time.time(), "initialized": state.initialized,
             "installation_uuid": state.uuid, "maintenance": (state.app / "storage/framework/down").exists(),
             "scheduler": scheduler(state) if state.initialized else {"last_tick_at": None},

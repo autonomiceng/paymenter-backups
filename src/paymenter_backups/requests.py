@@ -119,7 +119,7 @@ def list_requests(state, history=True):
     return items
 
 
-def iter_evidence(state, *, actions, statuses):
+def iter_evidence(state, *, actions, statuses, terminal_after=None):
     """Read work first, then one matching terminal payload at a time.
 
     Receipt metadata selects evidence without decoding unrelated history.
@@ -136,6 +136,8 @@ def iter_evidence(state, *, actions, statuses):
     for entry in recent_index(state, 'requests'):
         if entry['id'] is None or entry['id'] in seen:
             continue
+        if terminal_after is not None and entry['terminal_at'] is not None and entry['terminal_at'] < terminal_after:
+            continue  # Callers that pass terminal_after only need history finished after it.
         try:
             receipt = replay(state, entry['id'])
             if receipt is None or not matches(receipt):

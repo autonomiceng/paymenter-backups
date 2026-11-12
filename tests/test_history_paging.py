@@ -139,7 +139,10 @@ class HistoryPaging(PrivateFixture):
             self.assertTrue(overview(self.state)['job_wait_overdue'])
             journal['service_recovered'] = True
             self.state.save(journal)
-            self.assertFalse(overview(self.state)['job_wait_overdue'])
+            with patch('paymenter_backups.history.replay', wraps=history.replay) as replayed:
+                self.assertFalse(overview(self.state)['job_wait_overdue'])
+            # Only history finished after the recovered capture is reread for wait evidence.
+            self.assertLessEqual(replayed.call_count, 1)
 
     def test_recent_slot_replay_does_not_read_a_damaged_payload(self):
         item = self.complete_request(fixture.NOW - 86400, slot='recent-damaged-slot')
