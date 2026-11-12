@@ -352,6 +352,8 @@ years from their proven terminal time. All dates use UTC. Missing terminal
 dates, unknown outcomes, unfinished intents, remaining run work and unresolved
 recovery stay active and appear in `history-maintenance.json`. Failed requests
 remain uncertain records. This policy never deletes backup artifacts.
+Tick-only completion and prelaunch expiry record a terminal timestamp when
+missing, preserving any existing finish evidence.
 The newest completed, verified storage-test request stays active as readiness
 evidence, regardless of age. A newer passing test releases the older proof to
 ordinary retention; a failed retest does not displace it.

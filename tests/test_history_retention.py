@@ -232,6 +232,34 @@ class HistoryRetention(PrivateFixture):
         requests.create(self.state, 'destination-test', slot='new-active-slot')
         self.assertEqual(len(requests.list_requests(self.state)), 1)
 
+    def test_tick_expiry_records_terminal_time_and_can_archive(self):
+        with patch.object(requests.time, 'time', return_value=OLD):
+            item = requests.create(self.state, 'retention')
+        self.tick(NOW)
+        expired = requests.read_request(self.state, item['request_id'])
+        self.assertEqual(expired['status'], 'expired')
+        self.assertEqual(expired.get('finished_at'), NOW)
+        self.sweep(NOW + 450 * 86400)
+        self.assertFalse(requests.path(self.state, item['request_id']).exists())
+
+    def test_tick_capture_completion_records_missing_time_and_preserves_existing_time(self):
+        for index, finished in enumerate((None, NOW - 10)):
+            with self.subTest(finished=finished):
+                item = requests.create(self.state, arguments={'mode': 'database-online'})
+                item.update(status='running', created_at=NOW - 30)
+                if finished is not None:
+                    item['finished_at'] = finished
+                atomic_json(requests.path(self.state, item['request_id']), item)
+                run_id = 'tick-complete-' + str(index)
+                self.backup(run_id, created_at=NOW - 30)
+                journal = self.item(run_id)
+                journal.update(request_id=item['request_id'], delivery_required=False)
+                self.state.save(journal)
+                self.tick(NOW)
+                complete = requests.read_request(self.state, item['request_id'])
+                self.assertEqual(complete['status'], 'complete')
+                self.assertEqual(complete.get('finished_at'), NOW if finished is None else finished)
+
     def test_busy_run_lock_skips_maintenance_without_lock_inversion(self):
         item = self.complete_request()
         with self.state.lock():

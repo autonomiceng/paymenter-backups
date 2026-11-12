@@ -340,6 +340,7 @@ def tick(state, envelope, command_prefix, envelope_loader=None, database_context
                             resume_delivery(item, journal)
                         else:
                             item.update(status="complete", result={"run_id": journal["run_id"], "local_complete": journal.get("local_complete", False)})
+                            item.setdefault("finished_at", now)
                             atomic_json(path(state, item["request_id"]), item)
                             continue
                     elif item.get("capture_attempts", 0) >= CAPTURE_ATTEMPTS:
@@ -361,6 +362,7 @@ def tick(state, envelope, command_prefix, envelope_loader=None, database_context
                                     and "job_wait_since" in item)
                 if item["action"] != "deliver" and now - item["created_at"] > settings["request_max_age"] and not waiting_for_jobs:
                     item["status"] = "expired"
+                    item.setdefault("finished_at", now)
                     atomic_json(path(state, item["request_id"]), item)
                     continue
                 # Freeze old mode-less pending requests before any later edit.
