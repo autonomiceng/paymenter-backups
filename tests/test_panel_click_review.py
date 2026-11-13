@@ -339,6 +339,17 @@ class ClickReview(unittest.TestCase):
         failed_test = [{'action': 'destination-test', 'status': 'failed', 'run_id': None}]
         self.assertEqual(self.page('head', runs=runs, overview=blocked, requests=failed_test), ['failed', '#checks'])
 
+    def test_a_running_backup_does_not_hide_the_latest_finished_failure(self):
+        run = {'request_id': None, 'mode': 'database-online', 'finished_at': None, 'verified_at': None,
+               'remote': 'none', 'local': True, 'size': 1, 'download': 'none'}
+        runs = [dict(run, run_id='fixture-running', status='running', created_at=1_700_000_200),
+                dict(run, run_id='fixture-failed', status='failed', created_at=1_700_000_100),
+                dict(run, run_id='fixture-good', status='ready', download='ready', created_at=1_700_000_000)]
+        self.assertEqual(self.page('head', runs=runs), ['failed', None])
+        self.assertEqual(self.rows(runs=runs)['schedule']['notice-running']['state'], 'running')
+        runs.insert(0, dict(run, run_id='fixture-new-good', status='ready', download='ready', created_at=1_700_000_150))
+        self.assertEqual(self.page('head', runs=runs), ['ok', None])
+
     def test_a_full_disk_never_hides_waiting_uploads_plain_s3_copies_or_skipped_cleanup(self):
         storage = self.rows(settings_version=1, storage={'keep_local': True, 'upload_s3': True, 's3_bucket': 'fixture-bucket'}, overview={
             's3_pending': {'count': 2}, 'configuration': {'space': {'state': 'full', 'used': 10, 'budget': 10}, 'encryption': {'enabled': False},

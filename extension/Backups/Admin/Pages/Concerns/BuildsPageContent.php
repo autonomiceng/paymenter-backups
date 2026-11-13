@@ -134,7 +134,7 @@ trait BuildsPageContent
         }
         $newest = null;
         foreach ($this->overview()['runs'] as $run) {
-            if ($run['status'] !== 'deleted' && ($newest === null || $run['created_at'] > $newest['created_at'])) { $newest = $run; }
+            if (!in_array($run['status'], ['deleted', 'running'], true) && ($newest === null || $run['created_at'] > $newest['created_at'])) { $newest = $run; }
         }
         if ($newest !== null && in_array($newest['status'], ['failed', 'interrupted', 'attention', 'damaged'], true)) {
             return ['at' => $newest['created_at'] === null ? null : Fact::date((int) $newest['created_at'], Reader::Staff)];
