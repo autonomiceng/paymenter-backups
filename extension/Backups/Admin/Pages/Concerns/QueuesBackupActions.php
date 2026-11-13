@@ -129,7 +129,7 @@ trait QueuesBackupActions
     {
         return Action::make('testStorage')->label('Test storage')->color('gray')
             ->disabled(fn () => $this->activeRequest('destination-test') !== null)
-            ->tooltip(fn () => $this->activeRequest('destination-test') ? 'A storage test is already queued.' : 'Writes, reads and deletes a small test file in ' . ($this->uploadsToS3() ? 'the S3 bucket' . (filled($this->storage()['s3_bucket'] ?? null) ? ' ' . $this->storage()['s3_bucket'] : '') : 'the backup directory') . '.')
+            ->tooltip(fn () => $this->activeRequest('destination-test') ? null : 'Writes, reads and deletes a small test file in ' . ($this->uploadsToS3() ? 'the S3 bucket' . (filled($this->storage()['s3_bucket'] ?? null) ? ' ' . $this->storage()['s3_bucket'] : '') : 'the backup directory') . '.')
             ->action(fn () => $this->queue('destination-test', [], 'Storage test queued'));
     }
 
@@ -153,7 +153,6 @@ trait QueuesBackupActions
         $count = static fn (int $n) => $n . ($n === 1 ? ' backup' : ' backups');
         return Action::make('applyRetention')->label('Run cleanup')->color('gray')
             ->disabled(fn () => array_sum($this->retentionPending()) === 0)
-            ->tooltip(fn () => array_sum($this->retentionPending()) === 0 ? 'Nothing to delete' : null)
             ->requiresConfirmation()->modalHeading('Run cleanup?')
             ->modalDescription(function () use ($count) {
                 $pending = $this->retentionPending();

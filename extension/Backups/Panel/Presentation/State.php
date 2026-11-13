@@ -27,8 +27,6 @@ enum State: string implements HasLabel
     case NotSupported = 'not_supported';
     #[Entry([State::NotReadYet, State::CouldntRead], 'The runner sent a status we have not mapped, and the code shows under it.', 'Backups\' existing word, shared by every repo. DESIGN.md Panels, Nov 12, 2026.')]
     case NotRecognized = 'not_recognized';
-    #[Entry([State::Skipped], 'An optional backup destination switched off.', 'DESIGN.md Panels status marks, Nov 13, 2026.')]
-    case Off = 'off';
     #[Entry([State::Skipped, State::Cancelled], 'A backup deleted on purpose, by cleanup or by staff.', 'Backups\' existing word. DESIGN.md Panels seed list, Nov 12, 2026.')]
     case Deleted = 'deleted';
     #[Entry([State::Cancelled, State::Covered], 'A task that did not run because it wasn\'t needed.', 'Backups\' existing word. DESIGN.md Panels seed list, Nov 12, 2026.')]
@@ -91,7 +89,7 @@ enum State: string implements HasLabel
         return match ($this) {
             self::Ok => 'OK', self::Verified => 'Verified', self::InS3 => 'In S3', self::Completed => 'Completed',
             self::NotReadYet => 'Not read yet', self::NotForSale => 'Not for sale', self::NotSupported => 'Not supported', self::NotRecognized => 'Not recognized',
-            self::Off => 'Off', self::Deleted => 'Deleted', self::Skipped => 'Skipped', self::Cancelled => 'Cancelled', self::Covered => 'Covered',
+            self::Deleted => 'Deleted', self::Skipped => 'Skipped', self::Cancelled => 'Cancelled', self::Covered => 'Covered',
             self::Checking => 'Checking', self::Queued => 'Queued', self::Running => 'Running', self::Deleting => 'Deleting',
             self::NotSet => 'Not set', self::NeedsReview => 'Needs review', self::NotRunning => 'Not running', self::OutOfDate => 'Out of date',
             self::NotVerified => 'Not verified', self::NeedsRecovery => 'Needs recovery', self::DeletionIncomplete => 'Deletion incomplete',
@@ -106,7 +104,7 @@ enum State: string implements HasLabel
     {
         return match ($this) {
             self::Ok, self::Verified, self::InS3, self::Completed => Tone::Ok,
-            self::NotReadYet, self::NotForSale, self::NotSupported, self::NotRecognized, self::Off, self::Deleted, self::Skipped, self::Cancelled, self::Covered => Tone::Off,
+            self::NotReadYet, self::NotForSale, self::NotSupported, self::NotRecognized, self::Deleted, self::Skipped, self::Cancelled, self::Covered => Tone::Off,
             self::Checking, self::Queued, self::Running, self::Deleting => Tone::Progress,
             self::NotSet, self::NeedsReview, self::NotRunning, self::OutOfDate, self::NotVerified, self::NeedsRecovery, self::DeletionIncomplete,
             self::S3CopyMissing, self::OldS3Folder, self::S3CopyUnchecked => Tone::Attention,

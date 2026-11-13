@@ -342,14 +342,14 @@ if ($mode === 'upload') {
         }
         check(isset($fixtureChecks[$key]['state']), 'Installation fixture has no state: ' . $key);
         $expected = match ($fixtureChecks[$key]['state']) { 'ready' => [1, 'ok'], 'pending' => [0, ''], default => [1, 'err'] };
-        // A healthy local store is the only installation check omitted from the rail.
-        if ($key === 'local_storage' && $fixtureChecks[$key]['state'] === 'ready') {
-            check($values === [], 'Healthy local storage should not need an installation step');
+        // Healthy local storage and a switched-off S3 destination do not need a check.
+        if (($key === 'local_storage' && $fixtureChecks[$key]['state'] === 'ready') || ($key === 'offsite' && $after['upload_s3'] !== '1')) {
+            check($values === [], 'Non-applicable installation check shown: ' . $label);
             continue;
         }
-        // S3 names its state while setup is unfinished, including when uploads are off.
+        // An enabled S3 destination names its state while setup is unfinished.
         if ($key === 'offsite' && $fixtureChecks[$key]['state'] === 'pending') {
-            $expected = [1, $after['upload_s3'] === '1' ? 'warn' : 'off'];
+            $expected = [1, 'warn'];
             check(count($values) === 1 && $values[0] === $expected, 'Installation check has no unique expected state: ' . $label);
             continue;
         }

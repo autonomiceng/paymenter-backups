@@ -129,6 +129,14 @@ if ($input['case'] === 'health') {
         }
     }
     echo json_encode($out);
+} elseif ($input['case'] === 'blocked') {
+    $rows = $panelRows([$call('storageSection')]);
+    $out = [];
+    foreach (['This server', 'Keep'] as $label) {
+        $row = $rows[$label];
+        $out[$label] = ['reason' => $part($row, 'blocked'), 'disabled' => $part($row, 'controls')[0]->isDisabled()];
+    }
+    echo json_encode($out);
 } elseif ($input['case'] === 'keep') {
     echo json_encode($part($panelRows([$call('storageSection')])['Keep'], 'rowValue')->word);
 } elseif ($input['case'] === 'hints') {
@@ -170,7 +178,7 @@ if ($input['case'] === 'health') {
     };
     $checks = $call('checksSection');
     $steps = array_map(fn ($step) => ['label' => $step['label'], 'state' => $step['state']?->value], $part($checks->rows[0], 'steps'));
-    echo json_encode(['sections' => $sections, 'backups' => ['steps' => $steps, 'link' => $checks->link?->getUrl()],
+    echo json_encode(['sections' => $sections, 'backups' => ['steps' => $steps, 'note' => $checks->note, 'link' => $checks->link?->getUrl()],
         'diagnostics' => $serialize(Filament\Schemas\Schema::make($page)->components($call('detectedChecks'))->getComponents())]);
 } elseif ($input['case'] === 'settings') {
     $rows = Filament\Schemas\Schema::make($page)->components($call('detectedChecks'))->getComponents();
@@ -397,15 +405,29 @@ class ClickReview(unittest.TestCase):
         self.assertIn('CACHE_STORE=file', diagnostics)
         self.assertIn('tabindex="0"', diagnostics)
 
+    def test_storage_actions_are_blocked_only_while_their_reasons_apply(self):
+        blocked = self.page('blocked', requests=[{'action': 'destination-test', 'status': 'pending', 'run_id': None}])
+        for row in blocked.values():
+            self.assertTrue(row['reason'])
+            self.assertTrue(row['disabled'])
+        ready = self.page('blocked', overview={'configuration': {'retention': {'pending': {'local': 1}}}})
+        for row in ready.values():
+            self.assertIsNone(row['reason'])
+            self.assertFalse(row['disabled'])
+
     def test_s3_check_distinguishes_off_from_an_enabled_destination(self):
-        for upload, code, expected in ((False, None, 'off'), (True, 'storage-untested', 'not_verified'),
+        for upload, code, expected in ((False, None, None), (True, 'storage-untested', 'not_verified'),
                                        (True, 's3-credentials-required', 'not_set')):
             with self.subTest(upload=upload, code=code):
                 result = self.page('checks', storage={'upload_s3': upload},
                                    overview={'configuration': {'installation': {'checks': {
                                        'offsite': {'state': 'pending', 'code': code}}}}})
-                step = next(step for step in result['backups']['steps'] if step['label'] == 'S3')
-                self.assertEqual(step['state'], expected)
+                steps = result['backups']['steps']
+                matches = [step for step in steps if step['label'] == 'S3']
+                self.assertEqual([step['state'] for step in matches], [] if expected is None else [expected])
+                counts = re.search(r'(\d+) of (\d+)', result['backups']['note'])
+                self.assertEqual(int(counts.group(1)), sum(step['state'] == 'ok' for step in steps))
+                self.assertEqual(int(counts.group(2)), len(steps))
 
     def test_diagnostics_keep_unknown_failed_and_stale_inventory_visible(self):
         for jobs, expected in ((None, 'Not checked'), ({'state': 'failed'}, 'Failed'),

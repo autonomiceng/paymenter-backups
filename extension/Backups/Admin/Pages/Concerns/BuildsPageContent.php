@@ -35,12 +35,21 @@ trait BuildsPageContent
         }
         $actions = [];
         $action = $item['action'];
+        $testing = $action && $action['kind'] === 'test-storage' && $this->activeRequest('destination-test') !== null;
+        if ($testing && $this->schedulerFresh()) {
+            $children[] = Text::make('A storage test is already queued. Wait for it to finish before testing again.')
+                ->extraAttributes(['id' => $prefix . '-storage-test-reason']);
+        }
         if ($action) {
             $name = $prefix . preg_replace('/[^A-Za-z0-9]/', '', ucwords($item['code'], '-'));
             $actions = match ($action['kind']) {
                 'settings' => [$this->link($name, $action['label'], $this->settingsUrl($action['target'] ?? 'settings'))],
                 'help' => [$this->link($name, $action['label'], static::getUrl(['tab' => 'help']) . '#' . ($action['target'] ?? 'help'))],
-                'test-storage' => $this->schedulerFresh() ? [$this->testStorageAction()->button()->size(Size::Small)] : [],
+                'test-storage' => !$this->schedulerFresh() ? [] : ($testing
+                    ? [Action::make($name)->label('Test storage')->button()->size(Size::Small)->color('gray')
+                        ->alpineClickHandler('$event.preventDefault()')->livewireClickHandlerEnabled(false)
+                        ->extraAttributes(['aria-disabled' => 'true', 'aria-describedby' => $prefix . '-storage-test-reason', 'class' => 'domains-panel-blocked'])]
+                    : [$this->testStorageAction()->button()->size(Size::Small)]),
                 'recovery-key' => $this->recoveryKeyActions(),
                 default => [],
             };
@@ -313,11 +322,14 @@ trait BuildsPageContent
     {
         ['server' => $server, 's3' => $s3, 'keep' => $keepValue] = $this->storageValues();
         $keepRow = Row::make('Keep', $keepValue)->actions($this->applyRetentionAction()->button()->outlined()->size(Size::Small));
+        if (array_sum($this->retentionPending()) === 0) { $keepRow->blocked('Nothing to delete. Run cleanup when backups exceed the keep rule.'); }
+        $serverRow = Row::make('This server', $server)->actions($this->testStorageAction()->button()->outlined()->size(Size::Small));
+        if ($this->activeRequest('destination-test') !== null) { $serverRow->blocked('A storage test is already queued. Wait for it to finish before testing again.'); }
         $s3Link = $this->plainS3() ? $this->link('alertEncryption', 'Go to S3 settings', $this->settingsUrl('s3'))
             : $this->link('storageS3', $this->uploadsToS3() ? 'Change' : 'Set up S3', $this->settingsUrl('s3'));
         return PanelSection::make('Storage', array_values(array_filter([
             $this->storageNotice(),
-            Row::make('This server', $server)->actions($this->testStorageAction()->button()->outlined()->size(Size::Small)),
+            $serverRow,
             Row::make('S3', $s3)->actions($s3Link),
             $this->keepHint() === '' ? $keepRow : $keepRow->help($this->keepHint()),
         ])));
@@ -353,11 +365,12 @@ trait BuildsPageContent
     {
         $trace = Trace::make(Reader::Staff);
         $ok = 0;
-        foreach ($this->checkSteps() as $step) {
+        $steps = $this->checkSteps();
+        foreach ($steps as $step) {
             $ok += $step['state'] === State::Ok ? 1 : 0;
             $trace->step($step['label'], $step['state'], $step['at'] ?? null, null, $step['reason'] ?? null, 'check-' . md5($step['label']));
         }
-        return PanelSection::make(Messages::INSTALLATION_TITLE, [$trace], $ok . ' of ' . count($this->checkSteps()) . ' checks OK.', 'checks')
+        return PanelSection::make(Messages::INSTALLATION_TITLE, [$trace], $ok . ' of ' . count($steps) . ' checks OK.', 'checks')
             ->link($this->link('checksFull', 'Full backup diagnostics', $this->settingsUrl('full-backup-checks')));
     }
 
@@ -385,9 +398,9 @@ trait BuildsPageContent
         };
         $checks = $this->configuration()['installation']['checks'] ?? [];
         foreach (['observer', 'tools', 'private_state', 'local_storage', 'offsite'] as $key) {
-            if (!isset($checks[$key])) { continue; }
+            if (!isset($checks[$key]) || ($key === 'offsite' && !$this->uploadsToS3())) { continue; }
             [, , $next] = Messages::installationState($key, $checks[$key]);
-            $state = match ($checks[$key]['state']) { 'ready' => State::Ok, 'pending' => $key !== 'offsite' ? null : (!$this->uploadsToS3() ? State::Off : (($checks[$key]['code'] ?? null) === 'storage-untested' ? State::NotVerified : State::NotSet)), default => State::Failed };
+            $state = match ($checks[$key]['state']) { 'ready' => State::Ok, 'pending' => $key !== 'offsite' ? null : (($checks[$key]['code'] ?? null) === 'storage-untested' ? State::NotVerified : State::NotSet), default => State::Failed };
             if ($key === 'local_storage' && $state === State::Ok) { continue; }
             if ($key === 'offsite' && $state === State::Ok && ($short = $this->keyInfo()['short'])) { $next = 'Uploads encrypted with recovery key ' . $short . '.'; }
             $steps[] = ['label' => Messages::INSTALLATION_CHECKS[$key], 'state' => $state, 'reason' => $state === State::Ok && $key !== 'offsite' ? null : $next];
