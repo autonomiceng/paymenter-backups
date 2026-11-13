@@ -318,7 +318,7 @@ if ($mode === 'upload') {
     check($after['full_schedule'] === 'off' && $after['retention_keep_database'] === '4' && json_decode($after['full_weekdays'], true) === [0, 6]
         && json_decode($after['job_lock_paths'], true) === ['/fixture/a.lock', '/fixture/b.lock'] && $after['settings_version'] === '2', 'page settings not persisted in engine form: ' . json_encode(array_intersect_key($after, array_flip($changedKeys))));
     check(array_diff_key($after, array_flip($changedKeys)) === array_diff_key($before, array_flip($changedKeys)), 'page save changed unrelated rows');
-    // The Checks rail renders each installation check as a step: its name, then one state word, or none while pending.
+    // The Checks rail renders each installation check as a step: its name, then its state's tone, or none while pending.
     $installation = new DOMDocument;
     $installation->loadHTML(Livewire\Livewire::test($page)->html(), LIBXML_NOERROR | LIBXML_NOWARNING | LIBXML_NONET);
     $installationXPath = new DOMXPath($installation);
@@ -327,14 +327,14 @@ if ($mode === 'upload') {
         $titles = $installationXPath->query('.//*[contains(@class, "domains-panel-step-t")]', $row);
         $words = $installationXPath->query('.//*[contains(@class, "domains-panel-step-w")]', $row);
         if ($titles->length === 1) {
-            $installationRows[trim(preg_replace('/\s+/', ' ', $titles->item(0)->textContent))][] = $words->length === 1 ? trim($words->item(0)->textContent) : '';
+            $installationRows[trim(preg_replace('/\s+/', ' ', $titles->item(0)->textContent))][] = $words->length === 1 ? $row->getAttribute('data-domains-tone') : '';
         }
     }
     foreach (Paymenter\Extensions\Others\Backups\Messages::INSTALLATION_CHECKS as $key => $label) {
         $values = $installationRows[$label] ?? [];
         // This server shows only when it needs attention.
         check(count($values) === 1 || ($key === 'local_storage' && $values === []), 'Installation check not rendered exactly once: ' . $label);
-        check($values === [] || in_array($values[0], $key === 'scheduler' ? ['OK', 'Not running'] : ['OK', 'Failed', ''], true), 'Installation check has no state word: ' . $label);
+        check($values === [] || in_array($values[0], $key === 'scheduler' ? ['ok', 'warn'] : ['ok', 'err', ''], true), 'Installation check has no state: ' . $label);
     }
     check($after['local_byte_budget'] === $before['local_byte_budget'], 'unchanged byte limit rewritten');
     // Space settings are entered in GiB and stored in bytes.

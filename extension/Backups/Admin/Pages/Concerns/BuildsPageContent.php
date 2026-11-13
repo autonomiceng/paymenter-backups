@@ -158,25 +158,30 @@ trait BuildsPageContent
         };
     }
 
-    /** A running backup first, as a job row; then the notice that most needs staff. */
+    /** A running backup first, as a job row; else the maintenance hold on queued tasks. Facts staff must act on live
+     * on their own rows (Database backups, Lock files), so this one notice never hides them. */
     private function scheduleNotice(): ?Row
     {
-        $coordination = $this->overview()['database_job_coordination'] ?? [];
         foreach ($this->overview()['runs'] as $run) {
             if ($run['status'] === 'running') {
                 $value = Value::state(State::Running, Reader::Staff, Messages::mode($run['mode']) . ' running. The site stays online.', 'run-' . $run['run_id']);
                 return Row::notice('running', $run['created_at'] === null ? $value : $value->when((int) $run['created_at']));
             }
         }
-        $reason = match (true) {
-            ($coordination['state'] ?? null) === 'unverified' => Messages::JOB_COORDINATION_UNVERIFIED . '. ' . Messages::error($coordination['error'] ?? null),
-            (bool) ($this->overview()['job_wait_overdue'] ?? false) => 'Database backups have waited a day for Paymenter jobs. Check scheduler and queue jobs and their lock setup on this tab. Waiting backups retry automatically. If none is waiting, queue a database backup. Backups cannot safely stop a job that may be changing data or guess which locks protect it.',
-            ($coordination['state'] ?? null) === 'absent' => 'Database backups are running without job locks and can overlap Paymenter jobs.',
-            default => null,
-        };
-        if ($reason !== null) { return Row::notice('jobs', Value::state(State::NeedsReview, Reader::Staff, $reason)); }
         return ($this->overview()['maintenance'] ?? false)
             ? Row::notice('maintenance', Value::state(State::Queued, Reader::Staff, 'The site is in maintenance mode. Queued tasks wait until it\'s back online.')) : null;
+    }
+
+    /** Job locks that need staff: unverified or absent. Null when they are fine. */
+    private function lockFilesRow(): ?Row
+    {
+        $coordination = $this->overview()['database_job_coordination'] ?? [];
+        $reason = match ($coordination['state'] ?? null) {
+            'unverified' => Messages::JOB_COORDINATION_UNVERIFIED . '. ' . Messages::error($coordination['error'] ?? null),
+            'absent' => 'Database backups are running without job locks and can overlap Paymenter jobs.',
+            default => null,
+        };
+        return $reason === null ? null : Row::make('Lock files', Value::state(State::NeedsReview, Reader::Staff, $reason, 'job-locks'));
     }
 
     private function scheduleSection(): PanelSection
@@ -185,65 +190,74 @@ trait BuildsPageContent
             $recurrence = $this->scheduleRecurrence($mode);
             $at = $this->scheduleFor($mode)['next_at'] ?? null;
             $value = match (true) {
+                // Capture stalled for a day: the row says so, with the recovery steps, until a backup runs.
+                $mode === 'database-online' && (bool) ($this->overview()['job_wait_overdue'] ?? false) => Value::state(State::NeedsReview, Reader::Staff,
+                    'Database backups have waited a day for Paymenter jobs. Check scheduler and queue jobs and their lock setup on this tab. Waiting backups retry automatically. If none is waiting, queue a database backup. Backups cannot safely stop a job that may be changing data or guess which locks protect it.', 'job-wait'),
                 ($this->scheduleFor($mode)['frequency'] ?? 'off') === 'off' => Value::plain(Plain::Off, 'Create these backups by hand, or turn on a schedule.'),
                 $at === null => Value::plain(Plain::None, $recurrence . '. None in the next 8 days.'),
                 default => Value::fact(Fact::date((int) $at, Reader::Staff), $recurrence . ($this->schedulerFresh() ? '.' : ', once the cron job runs.')),
             };
+            if ($value->state !== null && $at !== null) { $value = $value->detail(Fact::date((int) $at, Reader::Staff)); }
             return Row::make(self::KIND_LABELS[$mode], $value)->help(Messages::TYPE_HINTS[$mode])
                 ->actions($this->link('schedule' . ucfirst(self::KINDS[$mode]) . 'Change', 'Change', $this->settingsUrl('schedule')));
         };
-        return PanelSection::make('Schedule', array_values(array_filter([$this->scheduleNotice(), $row('full-quiesced'), $row('database-online')])));
+        return PanelSection::make('Schedule', array_values(array_filter([$this->scheduleNotice(), $row('full-quiesced'), $row('database-online'), $this->lockFilesRow()])));
     }
 
-    /** The storage notice that most needs staff: a full disk stops backups, then uploads waiting, skipped cleanup and plain uploads. */
+    /** A full disk stops every backup, so it is the Storage notice. Uploads waiting, plain S3 copies and skipped
+     * cleanup each show on their own row, so this notice never hides them. */
     private function storageNotice(): ?Row
     {
-        $pending = (int) ($this->overview()['s3_pending']['count'] ?? 0);
-        if (($this->configuration()['space']['state'] ?? null) === 'full') {
-            return Row::notice('space', Value::state(State::Failed, Reader::Staff, 'Backups on this server reached the ' . Messages::bytes($this->configuration()['space']['budget'] ?? null)
-                . ' limit. New backups stop until you delete old ones or raise the limit.'), $this->link('alertSpace', 'Change space limit', $this->settingsUrl('storage')));
-        }
-        if ($pending > 0) {
-            return Row::notice('uploads', Value::state(State::NeedsReview, Reader::Staff, $pending . ($pending === 1 ? ' backup isn\'t' : ' backups aren\'t')
-                . ' uploaded to S3 yet. They\'re kept on this server. Use Upload to S3 in each row\'s menu.'));
-        }
-        if ($this->skippedCount() > 0) {
-            return Row::notice('cleanup', Value::state(State::NeedsReview, Reader::Staff, 'Cleanup skipped ' . $this->skippedCount()
-                . ($this->skippedCount() === 1 ? ' backup' : ' backups') . '. They weren\'t deleted. Their rows say why.'));
-        }
-        if ($this->overviewError === null && $this->settingsVersion() < 2 && $this->uploadsToS3() && !($this->encryption()['enabled'] ?? true)) {
-            return Row::notice('encryption', Value::state(State::NeedsReview, Reader::Staff, 'Backups in S3 aren\'t encrypted. Save settings to turn on encryption for new uploads. Backups already in S3 stay as they are.'),
-                $this->link('alertEncryption', 'Go to S3 settings', $this->settingsUrl('s3')));
-        }
-        return null;
+        if (($this->configuration()['space']['state'] ?? null) !== 'full') { return null; }
+        return Row::notice('space', Value::state(State::Failed, Reader::Staff, 'Backups on this server reached the ' . Messages::bytes($this->configuration()['space']['budget'] ?? null)
+            . ' limit. New backups stop until you delete old ones or raise the limit.'), $this->link('alertSpace', 'Change space limit', $this->settingsUrl('storage')));
+    }
+
+    /** Legacy settings that upload to S3 without encryption. */
+    private function plainS3(): bool
+    {
+        return $this->overviewError === null && $this->settingsVersion() < 2 && $this->uploadsToS3() && !($this->encryption()['enabled'] ?? true);
     }
 
     private function storageSection(): PanelSection
     {
         $count = count(array_filter($this->overview()['runs'], static fn ($run) => $run['local']));
+        $pending = (int) ($this->overview()['s3_pending']['count'] ?? 0);
         $local = (bool) ($this->storage()['keep_local'] ?? true);
         $space = $this->configuration()['space'] ?? null;
+        $used = $space && $space['used'] !== null ? Fact::names([Messages::bytes($space['used']) . ' of ' . Messages::bytes($space['budget']) . ' used']) : null;
         $server = match (true) {
+            // Waiting uploads are kept here whatever the setting, until their S3 copy is made.
+            $pending > 0 => Value::state(State::NeedsReview, Reader::Staff, $pending . ($pending === 1 ? ' backup isn\'t' : ' backups aren\'t')
+                . ' uploaded to S3 yet. They\'re kept on this server. Use Upload to S3 in each row\'s menu.', 's3-pending'),
             !$local => Value::plain(Plain::Off, 'Each backup is deleted here once its S3 copy is verified.'),
-            !$space || $space['used'] === null => Value::plain(Plain::None, 'No backups are stored here yet.'),
-            default => Value::fact(Fact::names([Messages::bytes($space['used']) . ' of ' . Messages::bytes($space['budget']) . ' used']), $count . ' ' . ($count === 1 ? 'backup' : 'backups') . ' here.'),
+            $used === null => Value::plain(Plain::None, 'No backups are stored here yet.'),
+            default => Value::fact($used, $count . ' ' . ($count === 1 ? 'backup' : 'backups') . ' here.'),
         };
+        if ($server->state !== null && $used !== null) { $server = $server->detail($used); }
         $bucket = $this->storage()['s3_bucket'] ?? null;
         $s3 = match (true) {
             !$this->uploadsToS3() => Value::plain(Plain::Off, 'Optional. Add a bucket to keep a copy off this server.'),
             !filled($bucket) => Value::state(State::NotSet, Reader::Staff, 'Add a bucket in Settings. ' . $this->s3Sentence()),
+            $this->plainS3() => Value::state(State::NeedsReview, Reader::Staff, 'Backups in S3 aren\'t encrypted. Save settings to turn on encryption for new uploads. Backups already in S3 stay as they are.', 's3-encryption')
+                ->detail(Fact::names([$bucket])),
             default => Value::fact(Fact::names([$bucket]), $this->s3Sentence()),
         };
         $values = $this->formValues();
-        $keep = $this->settingsVersion() < 2
+        $keep = Fact::names([$this->settingsVersion() < 2
             ? 'Newest ' . (int) ($values['retention_keep_full'] ?? 0) . ' backups'
-            : 'Newest ' . (int) ($values['retention_keep_full'] ?? 0) . ' full and ' . (int) ($values['retention_keep_database'] ?? 0) . ' database backups';
-        $keepRow = Row::make('Keep', Value::fact(Fact::names([$keep]), ($values['automatic_retention'] ?? true) ? 'Cleanup runs after each backup.' : 'Automatic cleanup is off.'))
-            ->actions($this->applyRetentionAction()->button()->outlined()->size(Size::Small));
+            : 'Newest ' . (int) ($values['retention_keep_full'] ?? 0) . ' full and ' . (int) ($values['retention_keep_database'] ?? 0) . ' database backups']);
+        $skipped = $this->skippedCount();
+        $keepValue = $skipped > 0
+            ? Value::state(State::NeedsReview, Reader::Staff, 'Cleanup skipped ' . $skipped . ($skipped === 1 ? ' backup' : ' backups') . '. They weren\'t deleted. Their rows say why.', 'cleanup-skipped')->detail($keep)
+            : Value::fact($keep, ($values['automatic_retention'] ?? true) ? 'Cleanup runs after each backup.' : 'Automatic cleanup is off.');
+        $keepRow = Row::make('Keep', $keepValue)->actions($this->applyRetentionAction()->button()->outlined()->size(Size::Small));
+        $s3Link = $this->plainS3() ? $this->link('alertEncryption', 'Go to S3 settings', $this->settingsUrl('s3'))
+            : $this->link('storageS3', $this->uploadsToS3() ? 'Change' : 'Set up S3', $this->settingsUrl('s3'));
         return PanelSection::make('Storage', array_values(array_filter([
             $this->storageNotice(),
             Row::make('This server', $server)->actions($this->testStorageAction()->button()->outlined()->size(Size::Small)),
-            Row::make('S3', $s3)->actions($this->link('storageS3', $this->uploadsToS3() ? 'Change' : 'Set up S3', $this->settingsUrl('s3'))),
+            Row::make('S3', $s3)->actions($s3Link),
             $this->keepHint() === '' ? $keepRow : $keepRow->help($this->keepHint()),
         ])));
     }
