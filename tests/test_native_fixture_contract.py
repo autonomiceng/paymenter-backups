@@ -104,7 +104,7 @@ class PackageImport(unittest.TestCase):
                 result = subprocess.run(
                     [sys.executable, '-m', 'unittest',
                      'test_panel_create_actions.CreateActions',
-                     'test_panel_schedule.StaffSchedule', 'test_panel_poll_times.PollTimes'],
+                     'test_panel_command_copy.CommandCopy', 'test_panel_poll_times.PollTimes'],
                     cwd=ROOT / 'tests', env=environment, capture_output=True, text=True)
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
                 self.assertIn('skipped=3', result.stderr)

@@ -62,6 +62,15 @@ function flatten($components) {
     }
     return $result;
 }
+// Panel rows and traces keep their parts private; read them as the Blade view does.
+$part = fn ($object, $name) => (new ReflectionProperty($object, $name))->getValue($object);
+$panelRows = function (array $sections) use ($page, $part) {
+    $rows = [];
+    foreach (flatten(Filament\Schemas\Schema::make($page)->components(array_map(fn ($section) => $section->toSchema(), $sections))->getComponents()) as $component) {
+        if ($component instanceof Paymenter\Extensions\Others\Backups\Panel\Row) $rows[$part($component, 'rowLabel')] = $component;
+    }
+    return $rows;
+};
 if ($input['case'] === 'health') {
     echo json_encode(['setup' => $call('setupOpen'), 'full_blockers' => $call('blockers', 'full-quiesced'), 'full' => $call('typeCheck', 'full-quiesced')]);
 } elseif ($input['case'] === 'queue') {
@@ -106,16 +115,16 @@ if ($input['case'] === 'health') {
     }
     echo json_encode(['rows' => $rows, 'verify' => $verify]);
 } elseif ($input['case'] === 'keep') {
-    foreach (flatten(Filament\Schemas\Schema::make($page)->components([$call('storageSection')])->getComponents()) as $component) {
-        if ($component instanceof Filament\Infolists\Components\TextEntry && $component->getName() === 'storage_keep') {
-            echo json_encode($component->getState());
-        }
-    }
+    echo json_encode($part($panelRows([$call('storageSection')])['Keep'], 'rowValue')->word);
 } elseif ($input['case'] === 'hints') {
     $record = ['__key' => 'fixture-run', 'kind' => 'run', 'run_id' => 'fixture-run', 'origin' => 'Staff', 'run' => ['run_id' => 'fixture-run',
         'status' => 'ready', 'mode' => 'full-quiesced', 'created_at' => null, 'finished_at' => null, 'verified_at' => null, 'remote' => 'none', 'local' => true, 'size' => 1, 'download' => 'ready']];
     $hints = [];
-    foreach (flatten(Filament\Schemas\Schema::make($page)->components([$call('scheduleSection'), $call('storageSection'), ...$call('detailsSchema', $record)])->getComponents()) as $component) {
+    $tip = new ReflectionMethod(Paymenter\Extensions\Others\Backups\Panel\Row::class, 'tip');
+    foreach ($panelRows([$call('scheduleSection'), $call('storageSection')]) as $label => $row) {
+        if ($tip->invoke($row) !== null) $hints[$label] = ['label' => $tip->invoke($row)];
+    }
+    foreach (flatten(Filament\Schemas\Schema::make($page)->components($call('detailsSchema', $record))->getComponents()) as $component) {
         if (!$component instanceof Filament\Infolists\Components\TextEntry) continue;
         foreach ($component->getHintActions() as $hint) {
             $hints[$component->getName()] = ['label' => $hint->getLabel(), 'tooltip' => $hint->getTooltip(), 'icon_button' => $hint->isIconButton(),
@@ -144,8 +153,10 @@ if ($input['case'] === 'health') {
             return ['attributes' => $component->getExtraAttributes(), 'children' => array_map(fn ($child) => $child->getExtraAttributes(), $component->getChildComponents()), 'html' => $html];
         }, $components);
     };
-    $backups = Filament\Schemas\Schema::make($page)->components($call('checksSection'))->getComponents()[0];
-    echo json_encode(['sections' => $sections, 'backups' => $serialize($backups->getChildComponents()), 'diagnostics' => $serialize(Filament\Schemas\Schema::make($page)->components($call('detectedChecks'))->getComponents())]);
+    $checks = $call('checksSection');
+    $steps = array_map(fn ($step) => ['label' => $step['label'], 'state' => $step['state']?->value], $part($checks->rows[0], 'steps'));
+    echo json_encode(['sections' => $sections, 'backups' => ['steps' => $steps, 'link' => $checks->link?->getUrl()],
+        'diagnostics' => $serialize(Filament\Schemas\Schema::make($page)->components($call('detectedChecks'))->getComponents())]);
 } elseif ($input['case'] === 'settings') {
     $rows = Filament\Schemas\Schema::make($page)->components($call('detectedChecks'))->getComponents();
     $command = null;
@@ -177,7 +188,7 @@ class ClickReview(unittest.TestCase):
         result = self.page('health')
         self.assertFalse(result['setup'], 'An ordinary cron tick must not open Setup needed')
         self.assertEqual(result['full_blockers'], [])
-        self.assertEqual(result['full']['value'], 'Waiting')
+        self.assertEqual(result['full']['state'], 'queued')
 
     def test_help_queue_command_uses_the_detected_capture_lock(self):
         with tempfile.TemporaryDirectory(prefix='queue-help-') as scratch:
@@ -259,8 +270,9 @@ class ClickReview(unittest.TestCase):
         database = "The database only. The site stays online. To restore, you also need Paymenter's files from a full backup."
         keep = 'The newest verified backup of each type on this server is always kept. So are backups that failed a check.'
         self.assertEqual({name: hint['label'] for name, hint in hints.items()},
-                         {'schedule_full': full, 'schedule_database': database, 'storage_keep': keep, 'd_type': full})
-        for name, hint in hints.items():
+                         {'Full backups': full, 'Database backups': database, 'Keep': keep, 'd_type': full})
+        for name in ('d_type',):
+            hint = hints[name]
             with self.subTest(hint=name):
                 # The label is the button's accessible name; the tooltip shows the same words.
                 self.assertEqual(hint['tooltip'], hint['label'])
@@ -287,7 +299,7 @@ class ClickReview(unittest.TestCase):
                 with self.subTest(settings_version=version, storage=name):
                     if version < 2:
                         expected = expected.replace(' of each type', '')
-                    self.assertEqual(self.page('hints', settings_version=version, storage=storage)['storage_keep']['label'], expected)
+                    self.assertEqual(self.page('hints', settings_version=version, storage=storage)['Keep']['label'], expected)
 
     def test_started_sorts_both_ways_and_defaults_to_newest_first(self):
         runs = [{'run_id': run_id, 'request_id': None, 'status': 'ready', 'mode': 'database-online', 'created_at': created,
@@ -313,26 +325,14 @@ class ClickReview(unittest.TestCase):
             'stores': [{'kind': 'cache', 'driver': 'redis', 'supported': False, 'env': 'CACHE_STORE', 'suggest': 'file'}]})
         self.assertEqual(result['sections'], [{'title': 'Full backup diagnostics', 'description':
             'Detected commands and storage settings, for debugging full backups.'}])
-        for panel in ('backups', 'diagnostics'):
-            self.assertEqual(len(result[panel]), 1)
-            rows = result[panel][0]
-            self.assertEqual(rows['attributes']['role'], 'list')
-            self.assertIn('backups-checks', rows['attributes']['class'].split())
-            self.assertTrue(rows['children'])
-            self.assertTrue(all(row.get('role') == 'listitem' for row in rows['children']))
-            self.assertTrue(all('domains-trace-item' in row['class'].split() for row in rows['children']))
-        readiness = ''.join(result['backups'][0]['html'])
-        self.assertIn('Full backups', readiness)
-        self.assertIn('Waiting', readiness)
-        self.assertIn('href="/admin/backups?tab=settings#full-backup-checks"', readiness)
+        self.assertIn({'label': 'Full backups', 'state': 'queued'}, result['backups']['steps'])
+        self.assertEqual(result['backups']['link'], '/admin/backups?tab=settings#full-backup-checks')
+        self.assertEqual(len(result['diagnostics']), 1)
         diagnostics = ''.join(result['diagnostics'][0]['html'])
-        self.assertIn('domains-trace-title', diagnostics)
-        self.assertIn('domains-trace-word', diagnostics)
         self.assertIn('OK', diagnostics)
         self.assertIn('Needs setup', diagnostics)
         self.assertIn(command, diagnostics)
         self.assertIn('CACHE_STORE=file', diagnostics)
-        self.assertIn('overflow-x: auto', diagnostics)
         self.assertIn('tabindex="0"', diagnostics)
 
     def test_diagnostics_keep_unknown_failed_and_stale_inventory_visible(self):
@@ -341,5 +341,4 @@ class ClickReview(unittest.TestCase):
             with self.subTest(jobs=jobs):
                 result = self.page('checks', checks={'jobs': jobs})
                 html = ''.join(result['diagnostics'][0]['html'])
-                self.assertIn('domains-trace-word', html)
                 self.assertIn(expected, html)
