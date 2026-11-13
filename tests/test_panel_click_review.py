@@ -398,7 +398,7 @@ class ClickReview(unittest.TestCase):
         self.assertIn('tabindex="0"', diagnostics)
 
     def test_s3_check_distinguishes_off_from_an_enabled_destination(self):
-        for upload, code, expected in ((False, None, 'off'), (True, 'storage-untested', 'not_read_yet'),
+        for upload, code, expected in ((False, None, 'off'), (True, 'storage-untested', 'not_verified'),
                                        (True, 's3-credentials-required', 'not_set')):
             with self.subTest(upload=upload, code=code):
                 result = self.page('checks', storage={'upload_s3': upload},
