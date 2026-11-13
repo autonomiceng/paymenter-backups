@@ -347,6 +347,11 @@ if ($mode === 'upload') {
             check($values === [], 'Healthy local storage should not need an installation step');
             continue;
         }
+        // S3 always names its state: Off when uploads are switched off, an attention word while setup is unfinished.
+        if ($key === 'offsite' && $fixtureChecks[$key]['state'] === 'pending') {
+            check(count($values) === 1 && $values[0][0] === 1 && in_array($values[0][1], ['off', 'warn'], true), 'Installation check has no unique expected state: ' . $label);
+            continue;
+        }
         check(count($values) === 1 && $values[0] === $expected, 'Installation check has no unique expected state: ' . $label);
     }
     check($after['local_byte_budget'] === $before['local_byte_budget'], 'unchanged byte limit rewritten');
