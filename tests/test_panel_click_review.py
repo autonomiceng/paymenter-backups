@@ -48,6 +48,7 @@ $overview = ['initialized' => true, 'scheduler' => ['last_tick_at' => time()], '
         'readiness' => ['full-quiesced' => ['state' => 'waiting', 'items' => [['code' => 'job-lock-busy']]],
                         'database-online' => ['state' => 'ready', 'items' => []]],
         'admission' => ['full-quiesced' => ['job-lock-busy'], 'database-online' => []]]];
+$overview = array_replace_recursive($overview, $input['overview'] ?? []);
 (new ReflectionProperty($class, 'overviewCache'))->setValue($page, $overview);
 $values = ($input['settings_version'] ?? 2) < 2
     ? Paymenter\Extensions\Others\Backups\Settings::fromLegacy($input['settings'] ?? [])
@@ -62,6 +63,15 @@ function flatten($components) {
     }
     return $result;
 }
+// Panel rows and traces keep their parts private; read them as the Blade view does.
+$part = fn ($object, $name) => (new ReflectionProperty($object, $name))->getValue($object);
+$panelRows = function (array $sections) use ($page, $part) {
+    $rows = [];
+    foreach (flatten(Filament\Schemas\Schema::make($page)->components(array_map(fn ($section) => $section->toSchema(), $sections))->getComponents()) as $component) {
+        if ($component instanceof Paymenter\Extensions\Others\Backups\Panel\Row) $rows[$part($component, 'rowLabel')] = $component;
+    }
+    return $rows;
+};
 if ($input['case'] === 'health') {
     echo json_encode(['setup' => $call('setupOpen'), 'full_blockers' => $call('blockers', 'full-quiesced'), 'full' => $call('typeCheck', 'full-quiesced')]);
 } elseif ($input['case'] === 'queue') {
@@ -105,17 +115,31 @@ if ($input['case'] === 'health') {
         }
     }
     echo json_encode(['rows' => $rows, 'verify' => $verify]);
-} elseif ($input['case'] === 'keep') {
-    foreach (flatten(Filament\Schemas\Schema::make($page)->components([$call('storageSection')])->getComponents()) as $component) {
-        if ($component instanceof Filament\Infolists\Components\TextEntry && $component->getName() === 'storage_keep') {
-            echo json_encode($component->getState());
+} elseif ($input['case'] === 'head') {
+    $head = $call('head');
+    echo json_encode([$part($head, 'state')?->value, $part($head, 'link')['url'] ?? null]);
+} elseif ($input['case'] === 'rows') {
+    // Each section's rows: the notice key, each row's state and the actions it offers.
+    $out = [];
+    foreach (['schedule' => 'scheduleSection', 'storage' => 'storageSection'] as $name => $method) {
+        foreach ($call($method)->rows as $row) {
+            $value = $part($row, 'rowValue');
+            $out[$name][] = ['key' => $row->getKey(false), 'label' => $part($row, 'rowLabel'), 'state' => $value->state?->value, 'kind' => $value->kind,
+                'actions' => array_map(fn ($action) => ['name' => $action->getName(), 'url' => $action->getUrl()], $part($row, 'controls'))];
         }
     }
+    echo json_encode($out);
+} elseif ($input['case'] === 'keep') {
+    echo json_encode($part($panelRows([$call('storageSection')])['Keep'], 'rowValue')->word);
 } elseif ($input['case'] === 'hints') {
     $record = ['__key' => 'fixture-run', 'kind' => 'run', 'run_id' => 'fixture-run', 'origin' => 'Staff', 'run' => ['run_id' => 'fixture-run',
         'status' => 'ready', 'mode' => 'full-quiesced', 'created_at' => null, 'finished_at' => null, 'verified_at' => null, 'remote' => 'none', 'local' => true, 'size' => 1, 'download' => 'ready']];
     $hints = [];
-    foreach (flatten(Filament\Schemas\Schema::make($page)->components([$call('scheduleSection'), $call('storageSection'), ...$call('detailsSchema', $record)])->getComponents()) as $component) {
+    $tip = new ReflectionMethod(Paymenter\Extensions\Others\Backups\Panel\Row::class, 'tip');
+    foreach ($panelRows([$call('scheduleSection'), $call('storageSection')]) as $label => $row) {
+        if ($tip->invoke($row) !== null) $hints[$label] = ['label' => $tip->invoke($row)];
+    }
+    foreach (flatten(Filament\Schemas\Schema::make($page)->components($call('detailsSchema', $record))->getComponents()) as $component) {
         if (!$component instanceof Filament\Infolists\Components\TextEntry) continue;
         foreach ($component->getHintActions() as $hint) {
             $hints[$component->getName()] = ['label' => $hint->getLabel(), 'tooltip' => $hint->getTooltip(), 'icon_button' => $hint->isIconButton(),
@@ -144,8 +168,10 @@ if ($input['case'] === 'health') {
             return ['attributes' => $component->getExtraAttributes(), 'children' => array_map(fn ($child) => $child->getExtraAttributes(), $component->getChildComponents()), 'html' => $html];
         }, $components);
     };
-    $backups = Filament\Schemas\Schema::make($page)->components($call('checksSection'))->getComponents()[0];
-    echo json_encode(['sections' => $sections, 'backups' => $serialize($backups->getChildComponents()), 'diagnostics' => $serialize(Filament\Schemas\Schema::make($page)->components($call('detectedChecks'))->getComponents())]);
+    $checks = $call('checksSection');
+    $steps = array_map(fn ($step) => ['label' => $step['label'], 'state' => $step['state']?->value], $part($checks->rows[0], 'steps'));
+    echo json_encode(['sections' => $sections, 'backups' => ['steps' => $steps, 'link' => $checks->link?->getUrl()],
+        'diagnostics' => $serialize(Filament\Schemas\Schema::make($page)->components($call('detectedChecks'))->getComponents())]);
 } elseif ($input['case'] === 'settings') {
     $rows = Filament\Schemas\Schema::make($page)->components($call('detectedChecks'))->getComponents();
     $command = null;
@@ -177,7 +203,7 @@ class ClickReview(unittest.TestCase):
         result = self.page('health')
         self.assertFalse(result['setup'], 'An ordinary cron tick must not open Setup needed')
         self.assertEqual(result['full_blockers'], [])
-        self.assertEqual(result['full']['value'], 'Waiting')
+        self.assertEqual(result['full']['state'], 'queued')
 
     def test_help_queue_command_uses_the_detected_capture_lock(self):
         with tempfile.TemporaryDirectory(prefix='queue-help-') as scratch:
@@ -255,12 +281,12 @@ class ClickReview(unittest.TestCase):
 
     def test_question_hints_explain_types_and_keep_without_a_request(self):
         hints = self.page('hints', settings_version=2)
-        full = 'The database and all Paymenter files, except logs, cache and sessions. The site stays online.'
-        database = "The database only. The site stays online. To restore, you also need Paymenter's files from a full backup."
-        keep = 'The newest verified backup of each type on this server is always kept. So are backups that failed a check.'
-        self.assertEqual({name: hint['label'] for name, hint in hints.items()},
-                         {'schedule_full': full, 'schedule_database': database, 'storage_keep': keep, 'd_type': full})
-        for name, hint in hints.items():
+        self.assertEqual(set(hints), {'Full backups', 'Database backups', 'Keep', 'd_type'})
+        # Each type's row and a backup of that type explain it the same way.
+        self.assertEqual(hints['Full backups']['label'], hints['d_type']['label'])
+        self.assertNotEqual(hints['Full backups']['label'], hints['Database backups']['label'])
+        for name in ('d_type',):
+            hint = hints[name]
             with self.subTest(hint=name):
                 # The label is the button's accessible name; the tooltip shows the same words.
                 self.assertEqual(hint['tooltip'], hint['label'])
@@ -269,25 +295,74 @@ class ClickReview(unittest.TestCase):
                 self.assertEqual(hint['click'], '$el.focus()')
                 self.assertIsNone(hint['url'])
 
-    def test_keep_hint_names_only_the_places_that_keep_copies(self):
-        # Cleanup keeps undelivered backups only while S3 uploads are required (storage.py:977), and
-        # S3-only removes each local copy once its S3 copy is verified (storage.py:1083).
-        cases = {
-            'this server only': ({'keep_local': True, 'upload_s3': False},
-                                 'The newest verified backup of each type on this server is always kept. So are backups that failed a check.'),
-            'this server and S3': ({'keep_local': True, 'upload_s3': True},
-                                   'The newest verified backup of each type on this server and in S3 is always kept. '
-                                   'So are backups waiting for their S3 upload and backups that failed a check.'),
-            'S3 only': ({'keep_local': False, 'upload_s3': True},
-                        'The newest verified backup of each type in S3 is always kept. '
-                        'So are backups waiting for their S3 upload and backups that failed a check.'),
-        }
-        for version in (1, 2):
-            for name, (storage, expected) in cases.items():
-                with self.subTest(settings_version=version, storage=name):
-                    if version < 2:
-                        expected = expected.replace(' of each type', '')
-                    self.assertEqual(self.page('hints', settings_version=version, storage=storage)['storage_keep']['label'], expected)
+    def test_keep_hint_shows_only_when_some_place_keeps_copies(self):
+        for storage, shown in (({'keep_local': True, 'upload_s3': False}, True), ({'keep_local': True, 'upload_s3': True}, True),
+                               ({'keep_local': False, 'upload_s3': True}, True), ({'keep_local': False, 'upload_s3': False}, False)):
+            for version in (1, 2):
+                with self.subTest(settings_version=version, storage=storage):
+                    self.assertEqual('Keep' in self.page('hints', settings_version=version, storage=storage), shown)
+
+    def rows(self, **input):
+        return {name: {row['label'] or row['key']: row for row in rows} for name, rows in self.page('rows', **input).items()}
+
+    def test_a_running_backup_or_lock_problem_never_hides_a_stalled_database_capture(self):
+        running = [{'run_id': 'fixture-running', 'request_id': None, 'status': 'running', 'mode': 'full-quiesced', 'created_at': 1_700_000_000,
+                    'finished_at': None, 'verified_at': None, 'remote': 'none', 'local': True, 'size': None, 'download': 'none'}]
+        for coordination in ('unverified', 'absent'):
+            with self.subTest(coordination=coordination):
+                schedule = self.rows(runs=running, overview={'job_wait_overdue': True, 'maintenance': True,
+                                     'database_job_coordination': {'state': coordination, 'error': None}})['schedule']
+                self.assertEqual(schedule['notice-running']['state'], 'running')
+                self.assertEqual(schedule['Database backups']['state'], 'needs_review')
+                self.assertEqual(schedule['Lock files']['state'], 'needs_review')
+                self.assertEqual([action['name'] for action in schedule['Database backups']['actions']], ['scheduleDatabaseChange'])
+        quiet = self.rows(overview={'database_job_coordination': {'state': 'coordinated'}})['schedule']
+        self.assertNotIn('Lock files', quiet)
+        self.assertEqual(quiet['Database backups']['kind'], 'plain')
+        self.assertEqual([row['key'] for row in self.page('rows', overview={'maintenance': True})['schedule']][0], 'notice-maintenance')
+
+    def test_head_takes_the_worst_row_state_and_leaves_jobs_in_their_rows(self):
+        run = {'request_id': None, 'mode': 'database-online', 'finished_at': None, 'verified_at': None, 'remote': 'none', 'local': True, 'size': 1}
+        runs = [dict(run, run_id='fixture-good', status='ready', download='ready', created_at=1_700_000_000),
+                dict(run, run_id='fixture-running', status='running', download='none', created_at=1_700_000_100)]
+        self.assertEqual(self.page('head', runs=runs), ['ok', None])
+        full = {'configuration': {'space': {'state': 'full', 'used': 10, 'budget': 10}}}
+        storage_fix = '/admin/backups?tab=settings#storage'
+        self.assertEqual(self.page('head', runs=runs, overview=full), ['failed', storage_fix])
+        self.assertEqual(self.page('head', runs=runs, overview={'s3_pending': {'count': 1}})[0], 'needs_review')
+        # A failure outranks stopped cron and a blocker on both types, and its fix is the link.
+        stale = {'scheduler': {'last_tick_at': 1_000_000_000}}
+        self.assertEqual(self.page('head', runs=runs, overview=stale), ['not_running', '#setup'])
+        self.assertEqual(self.page('head', runs=runs, overview={**stale, **full}), ['failed', storage_fix])
+        blocked = {'configuration': {'admission': {'full-quiesced': ['config-invalid'], 'database-online': ['config-invalid']}}}
+        self.assertEqual(self.page('head', runs=runs, overview=blocked), ['needs_review', '#setup'])
+        failed_test = [{'action': 'destination-test', 'status': 'failed', 'run_id': None}]
+        self.assertEqual(self.page('head', runs=runs, overview=blocked, requests=failed_test), ['failed', '#checks'])
+
+    def test_a_running_backup_does_not_hide_the_latest_finished_failure(self):
+        run = {'request_id': None, 'mode': 'database-online', 'finished_at': None, 'verified_at': None,
+               'remote': 'none', 'local': True, 'size': 1, 'download': 'none'}
+        runs = [dict(run, run_id='fixture-running', status='running', created_at=1_700_000_200),
+                dict(run, run_id='fixture-failed', status='failed', created_at=1_700_000_100),
+                dict(run, run_id='fixture-good', status='ready', download='ready', created_at=1_700_000_000)]
+        self.assertEqual(self.page('head', runs=runs), ['failed', None])
+        self.assertEqual(self.rows(runs=runs)['schedule']['notice-running']['state'], 'running')
+        runs.insert(0, dict(run, run_id='fixture-new-good', status='ready', download='ready', created_at=1_700_000_150))
+        self.assertEqual(self.page('head', runs=runs), ['ok', None])
+
+    def test_a_full_disk_never_hides_waiting_uploads_plain_s3_copies_or_skipped_cleanup(self):
+        storage = self.rows(settings_version=1, storage={'keep_local': True, 'upload_s3': True, 's3_bucket': 'fixture-bucket'}, overview={
+            's3_pending': {'count': 2}, 'configuration': {'space': {'state': 'full', 'used': 10, 'budget': 10}, 'encryption': {'enabled': False},
+                                                         'retention': {'last_apply': {'skipped_count': 3}}}})['storage']
+        self.assertEqual(storage['notice-space']['state'], 'failed')
+        self.assertEqual(storage['notice-space']['actions'], [{'name': 'alertSpace', 'url': '/admin/backups?tab=settings#storage'}])
+        self.assertEqual(storage['This server']['state'], 'needs_review')
+        self.assertEqual(storage['S3']['state'], 'needs_review')
+        self.assertEqual(storage['S3']['actions'], [{'name': 'alertEncryption', 'url': '/admin/backups?tab=settings#s3'}])
+        self.assertEqual(storage['Keep']['state'], 'needs_review')
+        calm = self.rows(storage={'keep_local': True, 'upload_s3': False})['storage']
+        self.assertFalse(any(key.startswith('notice-') for key in calm))
+        self.assertEqual({label: row['state'] for label, row in calm.items()}, {'This server': None, 'S3': None, 'Keep': None})
 
     def test_started_sorts_both_ways_and_defaults_to_newest_first(self):
         runs = [{'run_id': run_id, 'request_id': None, 'status': 'ready', 'mode': 'database-online', 'created_at': created,
@@ -311,28 +386,15 @@ class ClickReview(unittest.TestCase):
         result = self.page('checks', checks={'jobs': {'state': 'ok', 'items': [
             {'kind': 'scheduler', 'coordination': 'coordinated', 'command': command, 'lock': '/fixture/scheduler.lock'}]},
             'stores': [{'kind': 'cache', 'driver': 'redis', 'supported': False, 'env': 'CACHE_STORE', 'suggest': 'file'}]})
-        self.assertEqual(result['sections'], [{'title': 'Full backup diagnostics', 'description':
-            'Detected commands and storage settings, for debugging full backups.'}])
-        for panel in ('backups', 'diagnostics'):
-            self.assertEqual(len(result[panel]), 1)
-            rows = result[panel][0]
-            self.assertEqual(rows['attributes']['role'], 'list')
-            self.assertIn('backups-checks', rows['attributes']['class'].split())
-            self.assertTrue(rows['children'])
-            self.assertTrue(all(row.get('role') == 'listitem' for row in rows['children']))
-            self.assertTrue(all('domains-trace-item' in row['class'].split() for row in rows['children']))
-        readiness = ''.join(result['backups'][0]['html'])
-        self.assertIn('Full backups', readiness)
-        self.assertIn('Waiting', readiness)
-        self.assertIn('href="/admin/backups?tab=settings#full-backup-checks"', readiness)
+        self.assertEqual(len(result['sections']), 1)
+        self.assertIn({'label': 'Full backups', 'state': 'queued'}, result['backups']['steps'])
+        self.assertEqual(result['backups']['link'], '/admin/backups?tab=settings#full-backup-checks')
+        self.assertEqual(len(result['diagnostics']), 1)
         diagnostics = ''.join(result['diagnostics'][0]['html'])
-        self.assertIn('domains-trace-title', diagnostics)
-        self.assertIn('domains-trace-word', diagnostics)
         self.assertIn('OK', diagnostics)
         self.assertIn('Needs setup', diagnostics)
         self.assertIn(command, diagnostics)
         self.assertIn('CACHE_STORE=file', diagnostics)
-        self.assertIn('overflow-x: auto', diagnostics)
         self.assertIn('tabindex="0"', diagnostics)
 
     def test_diagnostics_keep_unknown_failed_and_stale_inventory_visible(self):
@@ -341,5 +403,4 @@ class ClickReview(unittest.TestCase):
             with self.subTest(jobs=jobs):
                 result = self.page('checks', checks={'jobs': jobs})
                 html = ''.join(result['diagnostics'][0]['html'])
-                self.assertIn('domains-trace-word', html)
                 self.assertIn(expected, html)

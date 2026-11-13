@@ -318,23 +318,36 @@ if ($mode === 'upload') {
     check($after['full_schedule'] === 'off' && $after['retention_keep_database'] === '4' && json_decode($after['full_weekdays'], true) === [0, 6]
         && json_decode($after['job_lock_paths'], true) === ['/fixture/a.lock', '/fixture/b.lock'] && $after['settings_version'] === '2', 'page settings not persisted in engine form: ' . json_encode(array_intersect_key($after, array_flip($changedKeys))));
     check(array_diff_key($after, array_flip($changedKeys)) === array_diff_key($before, array_flip($changedKeys)), 'page save changed unrelated rows');
-    // The Checks rail renders each installation check as a marked step: its name, then one state word.
+    // The Checks rail renders each installation check as a step: its name, then its state's tone, or none while pending.
     $installation = new DOMDocument;
     $installation->loadHTML(Livewire\Livewire::test($page)->html(), LIBXML_NOERROR | LIBXML_NOWARNING | LIBXML_NONET);
     $installationXPath = new DOMXPath($installation);
     $installationRows = [];
-    foreach ($installationXPath->query('//*[contains(concat(" ", normalize-space(@class), " "), " domains-trace-item ")]') as $row) {
-        $titles = $installationXPath->query('.//*[contains(@class, "domains-trace-title")]', $row);
-        $words = $installationXPath->query('.//*[contains(@class, "domains-trace-word")]', $row);
-        if ($titles->length === 1 && $words->length === 1) {
-            $installationRows[trim(preg_replace('/\s+/', ' ', $titles->item(0)->textContent))][] = trim($words->item(0)->textContent);
-        }
+    $fixtureChecks = Paymenter\Extensions\Others\Backups\Runtime::command(['overview'])['configuration']['installation']['checks'];
+    // Match whole class names: domains-panel-step-t must not also match its wrapper, domains-panel-step-tx.
+    $piece = static fn (string $name) => 'contains(concat(" ", normalize-space(@class), " "), " ' . $name . ' ")';
+    foreach ($installationXPath->query('//*[@id="checks"]//li[' . $piece('domains-panel-step') . ']') as $row) {
+        $titles = $installationXPath->query('.//*[' . $piece('domains-panel-step-t') . ']', $row);
+        $words = $installationXPath->query('.//*[' . $piece('domains-panel-step-w') . ']', $row);
+        check($titles !== false && $titles->length === 1 && $words !== false, 'Installation check has no unique title');
+        $installationRows[trim(preg_replace('/\s+/', ' ', $titles->item(0)->textContent))][] = [
+            $words->length, $row->getAttribute('data-domains-tone'),
+        ];
     }
     foreach (Paymenter\Extensions\Others\Backups\Messages::INSTALLATION_CHECKS as $key => $label) {
         $values = $installationRows[$label] ?? [];
-        // This server shows only when it needs attention.
-        check(count($values) === 1 || ($key === 'local_storage' && $values === []), 'Installation check not rendered exactly once: ' . $label);
-        check($values === [] || in_array($values[0], $key === 'scheduler' ? ['OK', 'Off', 'Missing', 'Not running'] : ['OK', 'Off', 'Missing'], true), 'Installation check has no state word: ' . $label);
+        if ($key === 'scheduler') {
+            check(count($values) === 1 && $values[0][0] === 1 && in_array($values[0][1], ['ok', 'warn'], true), 'Cron check has no unique state');
+            continue;
+        }
+        check(isset($fixtureChecks[$key]['state']), 'Installation fixture has no state: ' . $key);
+        $expected = match ($fixtureChecks[$key]['state']) { 'ready' => [1, 'ok'], 'pending' => [0, ''], default => [1, 'err'] };
+        // A healthy local store is the only installation check omitted from the rail.
+        if ($key === 'local_storage' && $fixtureChecks[$key]['state'] === 'ready') {
+            check($values === [], 'Healthy local storage should not need an installation step');
+            continue;
+        }
+        check(count($values) === 1 && $values[0] === $expected, 'Installation check has no unique expected state: ' . $label);
     }
     check($after['local_byte_budget'] === $before['local_byte_budget'], 'unchanged byte limit rewritten');
     // Space settings are entered in GiB and stored in bytes.

@@ -242,10 +242,9 @@ try {
       const full = setup.locator('.backups-group-title').filter({hasText: /^Full backups only$/});
       assert.equal(await full.count(), 1);
       // Only blocked types get Setup groups; a ready database type lives in Checks.
-      const checks = page.locator('[id="checks"] .domains-trace-item');
-      const database = checks.filter({has: page.locator('.domains-trace-title').filter({hasText: /^Database backups$/})});
+      const checks = page.locator('[id="checks"] li.domains-panel-step');
+      const database = checks.filter({has: page.locator('.domains-panel-step-t').filter({hasText: /^Database backups$/})});
       assert.equal(await database.count(), 1);
-      assert.match(await database.locator('.domains-trace-word').innerText(), /^(OK|Off|Waiting|Not ready)$/);
       assert.doesNotMatch(await database.innerText(), /maintenance|queue worker|No other program|Redis/i, 'Database readiness leaked full-only requirements');
       assert.equal(await page.getByRole('link', {name: 'Paymenter scheduler setup', exact: true}).count(), 0, 'External scheduler link returned');
       await shot(page, 'setup-readiness');

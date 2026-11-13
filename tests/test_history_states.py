@@ -136,7 +136,7 @@ sys.exit(not result.wasSuccessful())
                     [sys.executable, '-c', program,
                      'test_panel_create_actions.CreateActions.test_cancel_precedes_create_and_blocked_dialog_has_only_close',
                      'test_panel_poll_times.PollTimes.test_staff_times_survive_repeated_poll_morphs_and_changed_instants',
-                     'test_panel_click_review.ClickReview', 'test_panel_schedule.StaffSchedule'],
+                     'test_panel_click_review.ClickReview', 'test_panel_command_copy.CommandCopy'],
                     cwd=ROOT / 'tests', env=environment, capture_output=True, text=True)
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
                 summary = json.loads(result.stdout)
