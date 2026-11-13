@@ -115,6 +115,8 @@ if ($input['case'] === 'health') {
         }
     }
     echo json_encode(['rows' => $rows, 'verify' => $verify]);
+} elseif ($input['case'] === 'head') {
+    echo json_encode($part($call('head'), 'state')?->value);
 } elseif ($input['case'] === 'rows') {
     // Each section's rows: the notice key, each row's state and the actions it offers.
     $out = [];
@@ -317,6 +319,15 @@ class ClickReview(unittest.TestCase):
         self.assertNotIn('Lock files', quiet)
         self.assertEqual(quiet['Database backups']['kind'], 'plain')
         self.assertEqual([row['key'] for row in self.page('rows', overview={'maintenance': True})['schedule']][0], 'notice-maintenance')
+
+    def test_head_takes_the_worst_row_state_and_leaves_jobs_in_their_rows(self):
+        run = {'request_id': None, 'mode': 'database-online', 'finished_at': None, 'verified_at': None, 'remote': 'none', 'local': True, 'size': 1}
+        runs = [dict(run, run_id='fixture-good', status='ready', download='ready', created_at=1_700_000_000),
+                dict(run, run_id='fixture-running', status='running', download='none', created_at=1_700_000_100)]
+        self.assertEqual(self.page('head', runs=runs), 'ok')
+        full = {'configuration': {'space': {'state': 'full', 'used': 10, 'budget': 10}}}
+        self.assertEqual(self.page('head', runs=runs, overview=full), 'failed')
+        self.assertEqual(self.page('head', runs=runs, overview={'s3_pending': {'count': 1}}), 'needs_review')
 
     def test_a_full_disk_never_hides_waiting_uploads_plain_s3_copies_or_skipped_cleanup(self):
         storage = self.rows(settings_version=1, storage={'keep_local': True, 'upload_s3': True, 's3_bucket': 'fixture-bucket'}, overview={

@@ -20,7 +20,7 @@ use Paymenter\Extensions\Others\Backups\Messages;
 use Paymenter\Extensions\Others\Backups\Admin\Support\Sheet;
 use Paymenter\Extensions\Others\Backups\Panel\{Head, Row, Trace, Value};
 use Paymenter\Extensions\Others\Backups\Panel\Page\Section as PanelSection;
-use Paymenter\Extensions\Others\Backups\Panel\Presentation\{Fact, Plain, Reader, State};
+use Paymenter\Extensions\Others\Backups\Panel\Presentation\{Fact, Plain, Reader, State, Tone};
 use Paymenter\Extensions\Others\Backups\Panel\Support\Sheet as PanelSheet;
 
 trait BuildsPageContent
@@ -117,8 +117,27 @@ trait BuildsPageContent
             return $newest['created_at'] === null ? $head : $head->fact('Last backup', Fact::date((int) $newest['created_at'], Reader::Staff));
         }
         $good = array_filter([$this->lastGood('full-quiesced'), $this->lastGood('database-online')]);
-        if (!$good) { return $head->link('Turn on a schedule', $this->settingsUrl('schedule')); }
-        return $head->state(State::Ok, 'backups')->fact('Last backup', Fact::date((int) max(array_map(static fn ($run) => $run['created_at'], $good)), Reader::Staff));
+        $last = $good ? Fact::date((int) max(array_map(static fn ($run) => $run['created_at'], $good)), Reader::Staff) : null;
+        if (($worst = $this->worstState()) !== null) {
+            $head->state($worst, 'backups');
+            return $last === null ? $head : $head->fact('Last backup', $last);
+        }
+        if ($last === null) { return $head->link('Turn on a schedule', $this->settingsUrl('schedule')); }
+        return $head->state(State::Ok, 'backups')->fact('Last backup', $last);
+    }
+
+    /** The worst state a Schedule or Storage row, the Storage notice or a check shows, so the head never reads OK over
+     * a problem. A job (Running, Queued) keeps its own row and never sets the head. */
+    private function worstState(): ?State
+    {
+        $storage = $this->storageValues();
+        $states = [$this->spaceValue()?->state, $this->scheduleValue('full-quiesced')->state, $this->scheduleValue('database-online')->state,
+            $this->lockValue()?->state, $storage['server']->state, $storage['s3']->state, $storage['keep']->state,
+            ...array_column($this->checkSteps(), 'state')];
+        foreach ([Tone::Failed, Tone::Attention] as $tone) {
+            foreach ($states as $state) { if ($state !== null && $state->tone(Reader::Staff) === $tone) { return $state; } }
+        }
+        return null;
     }
 
     /** Every blocker with its exact fix. Only Paymenter's cron job missing gets its own title. */
@@ -172,8 +191,14 @@ trait BuildsPageContent
             ? Row::notice('maintenance', Value::state(State::Queued, Reader::Staff, 'The site is in maintenance mode. Queued tasks wait until it\'s back online.')) : null;
     }
 
-    /** Job locks that need staff: unverified or absent. Null when they are fine. */
     private function lockFilesRow(): ?Row
+    {
+        $value = $this->lockValue();
+        return $value === null ? null : Row::make('Lock files', $value);
+    }
+
+    /** Job locks that need staff: unverified or absent. Null when they are fine. */
+    private function lockValue(): ?Value
     {
         $coordination = $this->overview()['database_job_coordination'] ?? [];
         $reason = match ($coordination['state'] ?? null) {
@@ -181,23 +206,29 @@ trait BuildsPageContent
             'absent' => 'Database backups are running without job locks and can overlap Paymenter jobs.',
             default => null,
         };
-        return $reason === null ? null : Row::make('Lock files', Value::state(State::NeedsReview, Reader::Staff, $reason, 'job-locks'));
+        return $reason === null ? null : Value::state(State::NeedsReview, Reader::Staff, $reason, 'job-locks');
+    }
+
+    private function scheduleValue(string $mode): Value
+    {
+        $recurrence = $this->scheduleRecurrence($mode);
+        $at = $this->scheduleFor($mode)['next_at'] ?? null;
+        $value = match (true) {
+            // Capture stalled for a day: the row says so, with the recovery steps, until a backup runs.
+            $mode === 'database-online' && (bool) ($this->overview()['job_wait_overdue'] ?? false) => Value::state(State::NeedsReview, Reader::Staff,
+                'Database backups have waited a day for Paymenter jobs. Check scheduler and queue jobs and their lock setup on this tab. Waiting backups retry automatically. If none is waiting, queue a database backup. Backups cannot safely stop a job that may be changing data or guess which locks protect it.', 'job-wait'),
+            ($this->scheduleFor($mode)['frequency'] ?? 'off') === 'off' => Value::plain(Plain::Off, 'Create these backups by hand, or turn on a schedule.'),
+            $at === null => Value::plain(Plain::None, $recurrence . '. None in the next 8 days.'),
+            default => Value::fact(Fact::date((int) $at, Reader::Staff), $recurrence . ($this->schedulerFresh() ? '.' : ', once the cron job runs.')),
+        };
+        if ($value->state !== null && $at !== null) { $value = $value->detail(Fact::date((int) $at, Reader::Staff)); }
+        return $value;
     }
 
     private function scheduleSection(): PanelSection
     {
         $row = function (string $mode): Row {
-            $recurrence = $this->scheduleRecurrence($mode);
-            $at = $this->scheduleFor($mode)['next_at'] ?? null;
-            $value = match (true) {
-                // Capture stalled for a day: the row says so, with the recovery steps, until a backup runs.
-                $mode === 'database-online' && (bool) ($this->overview()['job_wait_overdue'] ?? false) => Value::state(State::NeedsReview, Reader::Staff,
-                    'Database backups have waited a day for Paymenter jobs. Check scheduler and queue jobs and their lock setup on this tab. Waiting backups retry automatically. If none is waiting, queue a database backup. Backups cannot safely stop a job that may be changing data or guess which locks protect it.', 'job-wait'),
-                ($this->scheduleFor($mode)['frequency'] ?? 'off') === 'off' => Value::plain(Plain::Off, 'Create these backups by hand, or turn on a schedule.'),
-                $at === null => Value::plain(Plain::None, $recurrence . '. None in the next 8 days.'),
-                default => Value::fact(Fact::date((int) $at, Reader::Staff), $recurrence . ($this->schedulerFresh() ? '.' : ', once the cron job runs.')),
-            };
-            if ($value->state !== null && $at !== null) { $value = $value->detail(Fact::date((int) $at, Reader::Staff)); }
+            $value = $this->scheduleValue($mode);
             return Row::make(self::KIND_LABELS[$mode], $value)->help(Messages::TYPE_HINTS[$mode])
                 ->actions($this->link('schedule' . ucfirst(self::KINDS[$mode]) . 'Change', 'Change', $this->settingsUrl('schedule')));
         };
@@ -208,9 +239,15 @@ trait BuildsPageContent
      * cleanup each show on their own row, so this notice never hides them. */
     private function storageNotice(): ?Row
     {
+        $value = $this->spaceValue();
+        return $value === null ? null : Row::notice('space', $value, $this->link('alertSpace', 'Change space limit', $this->settingsUrl('storage')));
+    }
+
+    private function spaceValue(): ?Value
+    {
         if (($this->configuration()['space']['state'] ?? null) !== 'full') { return null; }
-        return Row::notice('space', Value::state(State::Failed, Reader::Staff, 'Backups on this server reached the ' . Messages::bytes($this->configuration()['space']['budget'] ?? null)
-            . ' limit. New backups stop until you delete old ones or raise the limit.'), $this->link('alertSpace', 'Change space limit', $this->settingsUrl('storage')));
+        return Value::state(State::Failed, Reader::Staff, 'Backups on this server reached the ' . Messages::bytes($this->configuration()['space']['budget'] ?? null)
+            . ' limit. New backups stop until you delete old ones or raise the limit.');
     }
 
     /** Legacy settings that upload to S3 without encryption. */
@@ -219,7 +256,8 @@ trait BuildsPageContent
         return $this->overviewError === null && $this->settingsVersion() < 2 && $this->uploadsToS3() && !($this->encryption()['enabled'] ?? true);
     }
 
-    private function storageSection(): PanelSection
+    /** @return array{server: Value, s3: Value, keep: Value} */
+    private function storageValues(): array
     {
         $count = count(array_filter($this->overview()['runs'], static fn ($run) => $run['local']));
         $pending = (int) ($this->overview()['s3_pending']['count'] ?? 0);
@@ -251,6 +289,12 @@ trait BuildsPageContent
         $keepValue = $skipped > 0
             ? Value::state(State::NeedsReview, Reader::Staff, 'Cleanup skipped ' . $skipped . ($skipped === 1 ? ' backup' : ' backups') . '. They weren\'t deleted. Their rows say why.', 'cleanup-skipped')->detail($keep)
             : Value::fact($keep, ($values['automatic_retention'] ?? true) ? 'Cleanup runs after each backup.' : 'Automatic cleanup is off.');
+        return ['server' => $server, 's3' => $s3, 'keep' => $keepValue];
+    }
+
+    private function storageSection(): PanelSection
+    {
+        ['server' => $server, 's3' => $s3, 'keep' => $keepValue] = $this->storageValues();
         $keepRow = Row::make('Keep', $keepValue)->actions($this->applyRetentionAction()->button()->outlined()->size(Size::Small));
         $s3Link = $this->plainS3() ? $this->link('alertEncryption', 'Go to S3 settings', $this->settingsUrl('s3'))
             : $this->link('storageS3', $this->uploadsToS3() ? 'Change' : 'Set up S3', $this->settingsUrl('s3'));
