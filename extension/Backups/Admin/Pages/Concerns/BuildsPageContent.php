@@ -102,22 +102,21 @@ trait BuildsPageContent
         $this->overview();
         if ($this->overviewError !== null) { return $head->state(State::Failed, 'backups'); }
         if (!$this->initialized()) { return $head->state(State::NotSet, 'backups')->link('Open Settings', $this->settingsUrl()); }
+        $good = array_filter([$this->lastGood('full-quiesced'), $this->lastGood('database-online')]);
+        $last = $good ? Fact::date((int) max(array_map(static fn ($run) => $run['created_at'], $good)), Reader::Staff) : null;
+        // A failure outranks every amber state below, and its fix is the head's link.
+        if (($failure = $this->failure()) !== null) {
+            $head->state(State::Failed, 'backups');
+            $at = array_key_exists('at', $failure) ? $failure['at'] : $last;
+            if ($at !== null) { $head->fact('Last backup', $at); }
+            return isset($failure['link']) ? $head->link(...$failure['link']) : $head;
+        }
         if (!$this->schedulerFresh()) {
             $head->state(State::NotRunning, 'backups');
             if ($this->lastTick() !== null) { $head->fact('Cron job last ran', Fact::date((int) $this->lastTick(), Reader::Staff)); }
             return $head->link('See the fix', '#setup');
         }
         if ($this->nothingCanStart()) { return $head->state(State::NeedsReview, 'backups')->link('See the fix', '#setup'); }
-        $newest = null;
-        foreach ($this->overview()['runs'] as $run) {
-            if ($run['status'] !== 'deleted' && ($newest === null || $run['created_at'] > $newest['created_at'])) { $newest = $run; }
-        }
-        if ($newest !== null && in_array($newest['status'], ['failed', 'interrupted', 'attention', 'damaged'], true)) {
-            $head->state(State::Failed, 'backups');
-            return $newest['created_at'] === null ? $head : $head->fact('Last backup', Fact::date((int) $newest['created_at'], Reader::Staff));
-        }
-        $good = array_filter([$this->lastGood('full-quiesced'), $this->lastGood('database-online')]);
-        $last = $good ? Fact::date((int) max(array_map(static fn ($run) => $run['created_at'], $good)), Reader::Staff) : null;
         if (($worst = $this->worstState()) !== null) {
             $head->state($worst, 'backups');
             return $last === null ? $head : $head->fact('Last backup', $last);
@@ -126,15 +125,33 @@ trait BuildsPageContent
         return $head->state(State::Ok, 'backups')->fact('Last backup', $last);
     }
 
+    /** The first failure staff must fix, with the link to its fix: a full disk, then the newest backup failing, then a
+     * failed row or check. Null when nothing failed. */
+    private function failure(): ?array
+    {
+        if ($this->spaceValue()?->state?->tone(Reader::Staff) === Tone::Failed) {
+            return ['link' => ['Change space limit', $this->settingsUrl('storage')]];
+        }
+        $newest = null;
+        foreach ($this->overview()['runs'] as $run) {
+            if ($run['status'] !== 'deleted' && ($newest === null || $run['created_at'] > $newest['created_at'])) { $newest = $run; }
+        }
+        if ($newest !== null && in_array($newest['status'], ['failed', 'interrupted', 'attention', 'damaged'], true)) {
+            return ['at' => $newest['created_at'] === null ? null : Fact::date((int) $newest['created_at'], Reader::Staff)];
+        }
+        if ($this->worstState(Tone::Failed) !== null) { return ['link' => ['See the fix', '#checks']]; }
+        return null;
+    }
+
     /** The worst state a Schedule or Storage row, the Storage notice or a check shows, so the head never reads OK over
      * a problem. A job (Running, Queued) keeps its own row and never sets the head. */
-    private function worstState(): ?State
+    private function worstState(Tone ...$tones): ?State
     {
         $storage = $this->storageValues();
         $states = [$this->spaceValue()?->state, $this->scheduleValue('full-quiesced')->state, $this->scheduleValue('database-online')->state,
             $this->lockValue()?->state, $storage['server']->state, $storage['s3']->state, $storage['keep']->state,
             ...array_column($this->checkSteps(), 'state')];
-        foreach ([Tone::Failed, Tone::Attention] as $tone) {
+        foreach ($tones ?: [Tone::Failed, Tone::Attention] as $tone) {
             foreach ($states as $state) { if ($state !== null && $state->tone(Reader::Staff) === $tone) { return $state; } }
         }
         return null;

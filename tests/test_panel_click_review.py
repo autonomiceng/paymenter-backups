@@ -116,7 +116,8 @@ if ($input['case'] === 'health') {
     }
     echo json_encode(['rows' => $rows, 'verify' => $verify]);
 } elseif ($input['case'] === 'head') {
-    echo json_encode($part($call('head'), 'state')?->value);
+    $head = $call('head');
+    echo json_encode([$part($head, 'state')?->value, $part($head, 'link')['url'] ?? null]);
 } elseif ($input['case'] === 'rows') {
     // Each section's rows: the notice key, each row's state and the actions it offers.
     $out = [];
@@ -324,10 +325,19 @@ class ClickReview(unittest.TestCase):
         run = {'request_id': None, 'mode': 'database-online', 'finished_at': None, 'verified_at': None, 'remote': 'none', 'local': True, 'size': 1}
         runs = [dict(run, run_id='fixture-good', status='ready', download='ready', created_at=1_700_000_000),
                 dict(run, run_id='fixture-running', status='running', download='none', created_at=1_700_000_100)]
-        self.assertEqual(self.page('head', runs=runs), 'ok')
+        self.assertEqual(self.page('head', runs=runs), ['ok', None])
         full = {'configuration': {'space': {'state': 'full', 'used': 10, 'budget': 10}}}
-        self.assertEqual(self.page('head', runs=runs, overview=full), 'failed')
-        self.assertEqual(self.page('head', runs=runs, overview={'s3_pending': {'count': 1}}), 'needs_review')
+        storage_fix = '/admin/backups?tab=settings#storage'
+        self.assertEqual(self.page('head', runs=runs, overview=full), ['failed', storage_fix])
+        self.assertEqual(self.page('head', runs=runs, overview={'s3_pending': {'count': 1}})[0], 'needs_review')
+        # A failure outranks stopped cron and a blocker on both types, and its fix is the link.
+        stale = {'scheduler': {'last_tick_at': 1_000_000_000}}
+        self.assertEqual(self.page('head', runs=runs, overview=stale), ['not_running', '#setup'])
+        self.assertEqual(self.page('head', runs=runs, overview={**stale, **full}), ['failed', storage_fix])
+        blocked = {'configuration': {'admission': {'full-quiesced': ['config-invalid'], 'database-online': ['config-invalid']}}}
+        self.assertEqual(self.page('head', runs=runs, overview=blocked), ['needs_review', '#setup'])
+        failed_test = [{'action': 'destination-test', 'status': 'failed', 'run_id': None}]
+        self.assertEqual(self.page('head', runs=runs, overview=blocked, requests=failed_test), ['failed', '#checks'])
 
     def test_a_full_disk_never_hides_waiting_uploads_plain_s3_copies_or_skipped_cleanup(self):
         storage = self.rows(settings_version=1, storage={'keep_local': True, 'upload_s3': True, 's3_bucket': 'fixture-bucket'}, overview={
