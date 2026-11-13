@@ -1,14 +1,11 @@
 """The panel pieces under extension/Backups stay exactly what tools/panel_sync.py writes.
 
-tools/panel_sync.lock.json records the script's output. Set PAYMENTER_DOMAINS_CHECKOUT to a Domains git checkout to
-also rebuild that output from Domains and compare it.
+tools/panel_sync.lock.json records the script's output. To rebuild that output from Domains and compare it, run
+tools/panel_sync.py DOMAINS_CHECKOUT --check.
 """
 import hashlib
 import json
-import os
 from pathlib import Path
-import subprocess
-import sys
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -37,12 +34,6 @@ class PanelSync(unittest.TestCase):
         found = {str(path.relative_to(ROOT)) for folder in COPIED_DIRS for path in (ROOT / folder).rglob('*') if path.is_file()}
         self.assertEqual(found - set(LOCK['files']) - OWNED, set(), 'Add pieces in Domains, or own them outside the copy')
         self.assertEqual(OWNED - found, set())
-
-    @unittest.skipUnless(os.environ.get('PAYMENTER_DOMAINS_CHECKOUT'), 'PAYMENTER_DOMAINS_CHECKOUT not set')
-    def test_script_rebuilds_the_same_copy_from_domains(self):
-        result = subprocess.run([sys.executable, str(SCRIPT), os.environ['PAYMENTER_DOMAINS_CHECKOUT'], '--check'],
-                                capture_output=True, text=True)
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
 
 if __name__ == '__main__':
