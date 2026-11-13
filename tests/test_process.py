@@ -169,7 +169,24 @@ class ProcessTests(unittest.TestCase):
             app.mkdir()
             state = State(app, pathlib.Path(temporary) / "private")
             receipt = pathlib.Path(temporary) / "receipt.json"
-            script = "import os,json,sys,time;payload=sys.stdin.buffer.read();targets=[os.readlink('/proc/self/fd/'+f) for f in os.listdir('/proc/self/fd') if os.path.exists('/proc/self/fd/'+f)];open(sys.argv[1],'w').write(json.dumps({'sid':os.getsid(0),'pid':os.getpid(),'targets':targets,'payload':payload.decode()}));time.sleep(30)"
+            script = """
+import json
+import os
+import pathlib
+import sys
+import time
+
+payload = sys.stdin.buffer.read()
+targets = [os.readlink('/proc/self/fd/' + f) for f in os.listdir('/proc/self/fd')
+           if os.path.exists('/proc/self/fd/' + f)]
+receipt = pathlib.Path(sys.argv[1])
+pending = receipt.with_suffix('.pending')
+pending.write_text(json.dumps({'sid': os.getsid(0), 'pid': os.getpid(),
+                               'targets': targets, 'payload': payload.decode()}))
+# Publish only after the complete receipt has been written and closed.
+pending.replace(receipt)
+time.sleep(30)
+"""
             with state.lock():
                 pid = detach([sys.executable, "-I", "-c", script, str(receipt)], b"private-context")
                 try:
