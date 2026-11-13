@@ -323,9 +323,11 @@ if ($mode === 'upload') {
     $installation->loadHTML(Livewire\Livewire::test($page)->html(), LIBXML_NOERROR | LIBXML_NOWARNING | LIBXML_NONET);
     $installationXPath = new DOMXPath($installation);
     $installationRows = [];
-    foreach ($installationXPath->query('//*[@id="checks"]//li[@data-piece="step" or contains(concat(" ", normalize-space(@class), " "), " domains-panel-step ")]') as $row) {
-        $titles = $installationXPath->query('.//*[contains(@class, "domains-panel-step-t")]', $row);
-        $words = $installationXPath->query('.//*[contains(@class, "domains-panel-step-w")]', $row);
+    // Match whole class names: domains-panel-step-t must not also match its wrapper, domains-panel-step-tx.
+    $piece = static fn (string $name) => 'contains(concat(" ", normalize-space(@class), " "), " ' . $name . ' ")';
+    foreach ($installationXPath->query('//*[@id="checks"]//li[' . $piece('domains-panel-step') . ']') as $row) {
+        $titles = $installationXPath->query('.//*[' . $piece('domains-panel-step-t') . ']', $row);
+        $words = $installationXPath->query('.//*[' . $piece('domains-panel-step-w') . ']', $row);
         if ($titles->length === 1) {
             $installationRows[trim(preg_replace('/\s+/', ' ', $titles->item(0)->textContent))][] = $words->length === 1 ? $row->getAttribute('data-domains-tone') : '';
         }
