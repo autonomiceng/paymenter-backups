@@ -387,7 +387,7 @@ trait BuildsPageContent
         foreach (['observer', 'tools', 'private_state', 'local_storage', 'offsite'] as $key) {
             if (!isset($checks[$key])) { continue; }
             [, , $next] = Messages::installationState($key, $checks[$key]);
-            $state = match ($checks[$key]['state']) { 'ready' => State::Ok, 'pending' => null, default => State::Failed };
+            $state = match ($checks[$key]['state']) { 'ready' => State::Ok, 'pending' => $key !== 'offsite' ? null : (!$this->uploadsToS3() ? State::Off : (($checks[$key]['code'] ?? null) === 'storage-untested' ? State::NotVerified : State::NotSet)), default => State::Failed };
             if ($key === 'local_storage' && $state === State::Ok) { continue; }
             if ($key === 'offsite' && $state === State::Ok && ($short = $this->keyInfo()['short'])) { $next = 'Uploads encrypted with recovery key ' . $short . '.'; }
             $steps[] = ['label' => Messages::INSTALLATION_CHECKS[$key], 'state' => $state, 'reason' => $state === State::Ok && $key !== 'offsite' ? null : $next];

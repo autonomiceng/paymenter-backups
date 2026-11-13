@@ -397,6 +397,16 @@ class ClickReview(unittest.TestCase):
         self.assertIn('CACHE_STORE=file', diagnostics)
         self.assertIn('tabindex="0"', diagnostics)
 
+    def test_s3_check_distinguishes_off_from_an_enabled_destination(self):
+        for upload, code, expected in ((False, None, 'off'), (True, 'storage-untested', 'not_verified'),
+                                       (True, 's3-credentials-required', 'not_set')):
+            with self.subTest(upload=upload, code=code):
+                result = self.page('checks', storage={'upload_s3': upload},
+                                   overview={'configuration': {'installation': {'checks': {
+                                       'offsite': {'state': 'pending', 'code': code}}}}})
+                step = next(step for step in result['backups']['steps'] if step['label'] == 'S3')
+                self.assertEqual(step['state'], expected)
+
     def test_diagnostics_keep_unknown_failed_and_stale_inventory_visible(self):
         for jobs, expected in ((None, 'Not checked'), ({'state': 'failed'}, 'Failed'),
                                ({'state': 'stale', 'items': []}, 'Stale')):
