@@ -20,7 +20,7 @@ use Paymenter\Extensions\Others\Backups\Messages;
 use Paymenter\Extensions\Others\Backups\Admin\Support\Sheet;
 use Paymenter\Extensions\Others\Backups\Panel\{Head, Row, Trace, Value};
 use Paymenter\Extensions\Others\Backups\Panel\Page\Section as PanelSection;
-use Paymenter\Extensions\Others\Backups\Panel\Presentation\{Fact, Plain, Reader, State, Tone};
+use Paymenter\Extensions\Others\Backups\Panel\Presentation\{Fact, Plain, Reader, StaffTime, State, Tone};
 use Paymenter\Extensions\Others\Backups\Panel\Support\Sheet as PanelSheet;
 
 trait BuildsPageContent
@@ -81,7 +81,9 @@ trait BuildsPageContent
                     Tab::make('Backups')->id('backups')->schema([
                         PanelSheet::split([
                             $this->setupSection(),
-                            Group::make(fn () => array_map(static fn (PanelSection $section) => $section->toSchema(), [$this->scheduleSection(), $this->storageSection()])),
+                            // Each section is its own sheet column, so the sheet draws the line between them.
+                            Group::make(fn () => [$this->scheduleSection()->toSchema()]),
+                            Group::make(fn () => [$this->storageSection()->toSchema()]),
                         ], [Group::make(fn () => [$this->checksSection()->toSchema()->id('checks')])], 'sheet'),
                         EmbeddedTable::make(),
                     ]),
@@ -187,18 +189,33 @@ trait BuildsPageContent
             ->visible(fn () => $this->setupOpen());
     }
 
-    /** How a saved schedule repeats, in the schedule's own time zone. The next run shows in the viewer's zone. */
-    private function scheduleRecurrence(string $mode): string
+    /** How a saved schedule repeats. With a next run it reads in the staff time zone, like every other time on the page,
+     * taking the clock time and the day shift from that run. Without one it reads in the schedule's own zone. */
+    private function scheduleRecurrence(string $mode, ?int $at = null): string
     {
         $values = $this->formValues();
         $kind = self::KINDS[$mode];
-        $zone = ' ' . ($values['schedule_timezone'] ?? 'UTC');
-        $days = array_map(static fn ($day) => Messages::WEEKDAYS[$day] ?? '', (array) ($values[$kind . '_weekdays'] ?? []));
+        $ownZone = (string) ($values['schedule_timezone'] ?? 'UTC');
+        $zone = ' ' . $ownZone;
+        $time = (string) ($values[$kind . '_time'] ?? '');
+        $minute = (int) ($values['database_minute'] ?? 0);
+        $shift = 0;
+        if ($at !== null && in_array($ownZone, \DateTimeZone::listIdentifiers(), true)) {
+            $local = StaffTime::local($at);
+            $own = (new \DateTimeImmutable('@' . $at))->setTimezone(new \DateTimeZone($ownZone));
+            // -1, 0 or 1: the run's calendar day in the staff zone against its day in the schedule's zone.
+            $shift = (int) round((strtotime($local->format('Y-m-d') . ' UTC') - strtotime($own->format('Y-m-d') . ' UTC')) / 86400);
+            $time = $local->format('g:i A');
+            $minute = (int) $local->format('i');
+            $zone = ' ' . $local->format('T');
+        }
+        $days = array_map(static fn ($day) => is_numeric($day) ? (Messages::WEEKDAYS[((int) $day + $shift + 7) % 7] ?? '') : '',
+            (array) ($values[$kind . '_weekdays'] ?? []));
         return match ($values[$kind . '_schedule'] ?? 'off') {
             'hourly' => ((int) ($values['database_every_hours'] ?? 1) === 1 ? 'Every hour' : 'Every ' . (int) $values['database_every_hours'] . ' hours')
-                . ' at :' . str_pad((string) (int) ($values['database_minute'] ?? 0), 2, '0', STR_PAD_LEFT) . $zone,
-            'daily' => 'Daily at ' . ($values[$kind . '_time'] ?? '') . $zone,
-            'weekly' => 'Weekly, ' . implode(', ', $days) . ' at ' . ($values[$kind . '_time'] ?? '') . $zone,
+                . ' at :' . str_pad((string) $minute, 2, '0', STR_PAD_LEFT) . $zone,
+            'daily' => 'Daily at ' . $time . $zone,
+            'weekly' => 'Weekly, ' . implode(', ', $days) . ' at ' . $time . $zone,
             default => 'Off',
         };
     }
@@ -237,8 +254,8 @@ trait BuildsPageContent
 
     private function scheduleValue(string $mode): Value
     {
-        $recurrence = $this->scheduleRecurrence($mode);
         $at = $this->scheduleFor($mode)['next_at'] ?? null;
+        $recurrence = $this->scheduleRecurrence($mode, $at === null ? null : (int) $at);
         $value = match (true) {
             // Capture stalled for a day: the row says so, with the recovery steps, until a backup runs.
             $mode === 'database-online' && (bool) ($this->overview()['job_wait_overdue'] ?? false) => Value::state(State::NeedsReview, Reader::Staff,
@@ -322,7 +339,7 @@ trait BuildsPageContent
     {
         ['server' => $server, 's3' => $s3, 'keep' => $keepValue] = $this->storageValues();
         $keepRow = Row::make('Keep', $keepValue)->actions($this->applyRetentionAction()->button()->outlined()->size(Size::Small));
-        if (array_sum($this->retentionPending()) === 0) { $keepRow->blocked('Nothing to delete. Run cleanup when backups exceed the keep rule.'); }
+        if (array_sum($this->retentionPending()) === 0) { $keepRow->blocked('Nothing to delete yet.'); }
         $serverRow = Row::make('This server', $server)->actions($this->testStorageAction()->button()->outlined()->size(Size::Small));
         if ($this->activeRequest('destination-test') !== null) { $serverRow->blocked('A storage test is already queued. Wait for it to finish before testing again.'); }
         $s3Link = $this->plainS3() ? $this->link('alertEncryption', 'Go to S3 settings', $this->settingsUrl('s3'))

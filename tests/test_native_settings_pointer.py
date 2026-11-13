@@ -51,7 +51,7 @@ class NativeSettingsPointerTests(unittest.TestCase):
     def test_card_links_to_the_backups_page_route(self):
         enabled = self.config()['enabled']
         self.assertEqual(enabled, [{'name': 'backup_settings', 'type': 'placeholder', 'label': {'html':
-            'Edit them on the <a class="font-medium" style="text-decoration: underline" '
+            'Edit them on the <a class="domains-link font-medium" style="text-decoration: underline" '
             'href="https://billing.example.com/admin/backups?a=&quot;&amp;b">Backups page</a>.'}}])
 
     def test_card_names_the_page_when_its_route_is_not_registered(self):
