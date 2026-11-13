@@ -1,5 +1,5 @@
 <?php
-// Synced from Domains 08c94293c3a93f4afcd4704186dc0cf420dc5ea3 Domains/Admin/Support/Panel/Page/Concerns/ListType.php by tools/panel_sync.py. Change it in Domains and run the script again.
+// Synced from Domains da04a18ba33f05f38dd67607d36d9bfcf3510206 Domains/Admin/Support/Panel/Page/Concerns/ListType.php by tools/panel_sync.py. Change it in Domains and run the script again.
 // MIT, Copyright (c) 2026 Autonomic Engineering.
 declare(strict_types=1);
 namespace Paymenter\Extensions\Others\Backups\Panel\Page\Concerns;
@@ -26,7 +26,7 @@ trait ListType
                 $rows = collect($this->rows())->keyBy(static fn (array $r, int $i): string => (string) ($r['key'] ?? $i))
                     ->filter(static fn (array $r): bool => blank($search) || Str::contains(implode(' ', array_map(static fn (string $k): string => (string) ($r[$k] ?? ''), $searchable)), $search, true))
                     ->filter(static function (array $r) use ($filters): bool {
-                        foreach ($filters as $name => $state) { if (filled($state['value'] ?? null) && (string) ($r[$name] ?? '') !== (string) $state['value']) { return false; } }
+                        foreach ($filters as $name => $state) { if (!Filter::keeps($state, $r[$name] ?? '')) { return false; } }
                         return true;
                     });
                 if ($sortColumn !== null) { $rows = $rows->sortBy(static fn (array $r): string => (string) ($r[$sortColumn] ?? ''), SORT_NATURAL | SORT_FLAG_CASE, $sortDirection === 'desc'); }

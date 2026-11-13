@@ -1,4 +1,4 @@
-{{-- Synced from Domains 08c94293c3a93f4afcd4704186dc0cf420dc5ea3 Domains/resources/views/components/panel/switch.blade.php by tools/panel_sync.py. Change it in Domains and run the script again. --}}
+{{-- Synced from Domains da04a18ba33f05f38dd67607d36d9bfcf3510206 Domains/resources/views/components/panel/switch.blade.php by tools/panel_sync.py. Change it in Domains and run the script again. --}}
 {{-- MIT, Copyright (c) 2026 Autonomic Engineering. A setting row's switch (Panel\SettingsRow::toggle): the page's own action, drawn as a toggle. Blocked, it keeps focus and points to its reason. The word On or Off stays in the row's value. --}}
 @php
     $click = $why === null && ! $action->isDisabled() ? $action->getLivewireClickHandler() : null;

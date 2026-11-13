@@ -1,5 +1,5 @@
 <?php
-// Synced from Domains 08c94293c3a93f4afcd4704186dc0cf420dc5ea3 Domains/Admin/Support/Panel/Page/Column.php by tools/panel_sync.py. Change it in Domains and run the script again.
+// Synced from Domains da04a18ba33f05f38dd67607d36d9bfcf3510206 Domains/Admin/Support/Panel/Page/Column.php by tools/panel_sync.py. Change it in Domains and run the script again.
 // MIT, Copyright (c) 2026 Autonomic Engineering.
 declare(strict_types=1);
 namespace Paymenter\Extensions\Others\Backups\Panel\Page;
@@ -22,6 +22,7 @@ final class Column
     private ?string $from = null;
     private ?\Closure $link = null;
     private bool $optional = false;
+    private string $cut = 'line';
     private function __construct(public readonly string $name, public readonly string $label, public readonly string $kind, public bool $searchable = false, public bool $sortable = false) {}
     /** Plain text on one line, cut with "..." and the full text on hover: the row's own field, or what $text returns for the row. @param ?\Closure(array|Model):?string $text */
     public static function text(string $name, string $label, ?\Closure $text = null): self { $c = new self($name, $label, 'text'); $c->text = $text; return $c; }
@@ -45,6 +46,10 @@ final class Column
     /** Where the cell opens, such as the request a note names; null opens the row's own link.
      * @param \Closure(array|Model):?string $link */
     public function link(\Closure $link): self { $this->link = $link; return $this; }
+    /** A text cell that holds a person's name: cut early, so the table fits its card. */
+    public function short(): self { $this->cut = 'short'; return $this; }
+    /** A text cell that holds a row's note, its next step first: cut at the note width. */
+    public function note(): self { $this->cut = 'note'; return $this; }
     /** Staff can show it from the Columns menu; it starts hidden. */
     public function optional(): self { $this->optional = true; return $this; }
     public function isOptional(): bool { return $this->optional; }
@@ -70,7 +75,8 @@ final class Column
             'value' => $column->state(fn (array|Model $record): ?string => $this->valueOf($record)?->word)
                 // Our own escaped piece markup, passed as Htmlable: Filament's sanitizer would drop its data-* markers.
                 ->formatStateUsing(fn (array|Model $record): HtmlString => new HtmlString((string) $this->valueOf($record)?->toHtml())),
-            default => OneLine::apply($this->text === null ? $column : $column->state(fn (array|Model $record): ?string => ($this->text)($record))),
+            default => OneLine::apply($this->text === null ? $column : $column->state(fn (array|Model $record): ?string => ($this->text)($record)),
+                match ($this->cut) { 'short' => OneLine::SHORT, 'note' => OneLine::NOTE, default => OneLine::LINE }),
         };
     }
 }

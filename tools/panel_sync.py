@@ -20,7 +20,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-REV = '08c94293c3a93f4afcd4704186dc0cf420dc5ea3'
+REV = 'da04a18ba33f05f38dd67607d36d9bfcf3510206'
 SOURCE = 'Domains'
 LOCK = 'tools/panel_sync.lock.json'
 DOMAINS = 'Paymenter\\Extensions\\Servers\\Domains\\'

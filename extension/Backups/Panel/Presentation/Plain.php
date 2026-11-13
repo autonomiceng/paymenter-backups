@@ -1,5 +1,5 @@
 <?php
-// Synced from Domains 08c94293c3a93f4afcd4704186dc0cf420dc5ea3 Domains/Presentation/Plain.php by tools/panel_sync.py. Change it in Domains and run the script again.
+// Synced from Domains da04a18ba33f05f38dd67607d36d9bfcf3510206 Domains/Presentation/Plain.php by tools/panel_sync.py. Change it in Domains and run the script again.
 // MIT, Copyright (c) 2026 Autonomic Engineering.
 declare(strict_types=1);
 namespace Paymenter\Extensions\Others\Backups\Panel\Presentation;
@@ -14,7 +14,7 @@ enum Plain: string implements HasLabel
     case No = 'no';
     #[Entry([Plain::Yes], 'A setting that is on. Plain text with no mark, so it can\'t read as a status.', 'On stops being a status word (K14). DESIGN.md Panels, Nov 12, 2026.')]
     case On = 'on';
-    #[Entry([Plain::No, State::Stopped], 'A setting that is off. Stopped is a status.', 'Off stops being a status word (K14). DESIGN.md Panels, Nov 12, 2026.')]
+    #[Entry([Plain::No], 'A setting that is off. Stopped is a status.', 'Off stops being a status word (K14). DESIGN.md Panels, Nov 12, 2026.')]
     case Off = 'off';
     #[Entry([Plain::Test], 'A registrar account\'s mode that spends real money.', 'DESIGN.md Panels, Records and jobs, Nov 12, 2026.')]
     case Live = 'live';

@@ -1,4 +1,4 @@
-{{-- Synced from Domains 08c94293c3a93f4afcd4704186dc0cf420dc5ea3 Domains/resources/views/partials/moment.blade.php by tools/panel_sync.py. Change it in Domains and run the script again. --}}
+{{-- Synced from Domains da04a18ba33f05f38dd67607d36d9bfcf3510206 Domains/resources/views/partials/moment.blade.php by tools/panel_sync.py. Change it in Domains and run the script again. --}}
 {{-- A moment in time (last checked, request time). The script shows it in the viewer's time zone. The server text is the fallback without script: the site's staff zone, named (StaffTime). --}}
 @php
     $instant = null;

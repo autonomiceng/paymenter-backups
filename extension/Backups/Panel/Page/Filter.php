@@ -1,5 +1,5 @@
 <?php
-// Synced from Domains 08c94293c3a93f4afcd4704186dc0cf420dc5ea3 Domains/Admin/Support/Panel/Page/Filter.php by tools/panel_sync.py. Change it in Domains and run the script again.
+// Synced from Domains da04a18ba33f05f38dd67607d36d9bfcf3510206 Domains/Admin/Support/Panel/Page/Filter.php by tools/panel_sync.py. Change it in Domains and run the script again.
 // MIT, Copyright (c) 2026 Autonomic Engineering.
 declare(strict_types=1);
 namespace Paymenter\Extensions\Others\Backups\Panel\Page;
@@ -28,6 +28,12 @@ final class Filter
     /** @param \Closure(array):?string $indicator what the active filter says above the table */
     public function indicator(\Closure $indicator): self { $this->indicator = $indicator; return $this; }
     public function queries(): bool { return $this->query !== null || $this->kind !== 'select'; }
+    /** Whether an array-list row's value passes the filter's data: one picked value, or any of several when multiple. */
+    public static function keeps(array $state, mixed $value): bool
+    {
+        if (filled($state['values'] ?? null)) { return in_array((string) $value, array_map('strval', (array) $state['values']), true); }
+        return !filled($state['value'] ?? null) || (string) $value === (string) $state['value'];
+    }
     /** Built by the list type only. */
     public function toFilter(): BaseFilter
     {
