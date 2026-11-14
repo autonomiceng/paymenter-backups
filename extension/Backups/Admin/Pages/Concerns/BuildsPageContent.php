@@ -189,8 +189,8 @@ trait BuildsPageContent
             ->visible(fn () => $this->setupOpen());
     }
 
-    /** How a saved schedule repeats. With a next run it reads in the staff time zone, like every other time on the page,
-     * taking the clock time and the day shift from that run. Without one it reads in the schedule's own zone. */
+    /** How a saved schedule repeats. Use the next run's staff time unless upcoming weekly runs need different
+     * conversions across DST. In that case, or without a next run, keep the schedule's own zone. */
     private function scheduleRecurrence(string $mode, ?int $at = null): string
     {
         $values = $this->formValues();
@@ -203,6 +203,15 @@ trait BuildsPageContent
         if ($at !== null && in_array($ownZone, \DateTimeZone::listIdentifiers(), true)) {
             $local = StaffTime::local($at);
             $own = (new \DateTimeImmutable('@' . $at))->setTimezone(new \DateTimeZone($ownZone));
+            if (($values[$kind . '_schedule'] ?? 'off') === 'weekly') {
+                foreach ((array) ($values[$kind . '_weekdays'] ?? []) as $day) {
+                    $daysLater = ((int) $day - ((int) $own->format('N') - 1) + 7) % 7;
+                    $run = $own->modify('+' . $daysLater . ' days');
+                    if (StaffTime::local($run->getTimestamp())->getOffset() - $run->getOffset() !== $local->getOffset() - $own->getOffset()) {
+                        return $this->scheduleRecurrence($mode);
+                    }
+                }
+            }
             // -1, 0 or 1: the run's calendar day in the staff zone against its day in the schedule's zone.
             $shift = (int) round((strtotime($local->format('Y-m-d') . ' UTC') - strtotime($own->format('Y-m-d') . ' UTC')) / 86400);
             $time = $local->format('g:i A');
