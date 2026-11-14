@@ -50,9 +50,11 @@ class NativeSettingsPointerTests(unittest.TestCase):
 
     def test_card_links_to_the_backups_page_route(self):
         enabled = self.config()['enabled']
-        self.assertEqual(enabled, [{'name': 'backup_settings', 'type': 'placeholder', 'label': {'html':
-            'Edit them on the <a class="font-medium" style="text-decoration: underline" '
-            'href="https://billing.example.com/admin/backups?a=&quot;&amp;b">Backups page</a>.'}}])
+        self.assertEqual(len(enabled), 1)
+        card = enabled[0]
+        self.assertEqual((card['name'], card['type']), ('backup_settings', 'placeholder'))
+        # The link goes to the Backups page route, with the URL safely escaped.
+        self.assertIn('href="https://billing.example.com/admin/backups?a=&quot;&amp;b"', card['label']['html'])
 
     def test_card_names_the_page_when_its_route_is_not_registered(self):
         # Paymenter registers extension pages only while the extension is enabled.

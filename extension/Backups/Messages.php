@@ -430,7 +430,7 @@ final class Messages
         if ($url === null) { return 'Edit them on the Backups page (System > Backups). Enable this extension to see it.'; }
         $url = htmlspecialchars($url, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
         // Paymenter's admin theme has no underline utility; the link keeps the text color for contrast in dark mode.
-        return new \Illuminate\Support\HtmlString('Edit them on the <a class="font-medium" style="text-decoration: underline" href="' . $url . '">Backups page</a>.');
+        return new \Illuminate\Support\HtmlString('Edit them on the <a class="domains-link font-medium" style="text-decoration: underline" href="' . $url . '">Backups page</a>.');
     }
 
     private static function shellWord(string $word): string
